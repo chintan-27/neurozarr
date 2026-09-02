@@ -53,7 +53,7 @@ class Writer:
 			attrs["data_note"] = "data is physical value in the channel's native unit, rounded to float16"
 		else:
 			extras = getattr(item.raw, "_raw_extras", None)
-			if extras:
+			if extras and "cal" in extras[0]:
 				cal = np.array(extras[0]["cal"])
 				units = np.array(extras[0]["units"])
 				offsets = np.array(extras[0]["offsets"])
