@@ -34,10 +34,7 @@ class Writer:
 		self.root = zarr.open_group(store=session.store, mode="w")
 
 	def _group_for(self, prefix: tuple, entities: Entities) -> zarr.Group:
-		path = (*prefix, entities.sub, entities.ses, entities.datatype)
-		name = entities.group_name()
-		if name:
-			path = (*path, name)
+		path = (*prefix, *entities.path())
 		group = self.root
 		for part in path:
 			group = group.require_group(part)

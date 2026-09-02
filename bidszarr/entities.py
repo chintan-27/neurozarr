@@ -14,9 +14,21 @@ BIDS_ENTITY_ORDER = [
 @dataclass(frozen=True)
 class Entities:
 	sub: str
-	ses: str
-	datatype: str
+	ses: str = None  # None for session-less BIDS datasets -- a valid, real layout
+	datatype: str = None
 	extra: dict = field(default_factory=dict)
+
+	def path(self) -> tuple:
+		"""(sub[, ses], datatype[, group_name]) -- the Zarr group path for this entity set."""
+		parts = [self.sub]
+		if self.ses:
+			parts.append(self.ses)
+		if self.datatype:
+			parts.append(self.datatype)
+		name = self.group_name()
+		if name:
+			parts.append(name)
+		return tuple(parts)
 
 	def group_name(self) -> str:
 		known = [f"{k}-{self.extra[k]}" for k in BIDS_ENTITY_ORDER if k in self.extra]
@@ -26,10 +38,21 @@ class Entities:
 
 def parse_entities(stem: str) -> dict:
 	"""Split a BIDS filename stem (e.g. 'task-BrainSenseStream_acq-Power_run-3')
-	into an entity dict ({'task': 'BrainSenseStream', 'acq': 'Power', 'run': '3'})."""
-	result = {}
+	into an entity dict ({'task': 'BrainSenseStream', 'acq': 'Power', 'run': '3'}).
+	Parts without a '-' (i.e. the suffix) are silently dropped -- use split_stem
+	if you also need the suffix."""
+	return split_stem(stem)[0]
+
+
+def split_stem(stem: str) -> tuple:
+	"""Split a full BIDS filename stem into (entities dict, suffix string).
+	E.g. 'sub-001_ses-1_task-rest_run-1_channels' ->
+	({'sub': '001', 'ses': '1', 'task': 'rest', 'run': '1'}, 'channels')."""
+	entities, suffix_parts = {}, []
 	for part in stem.split("_"):
 		key, sep, value = part.partition("-")
 		if sep:
-			result[key] = value
-	return result
+			entities[key] = value
+		else:
+			suffix_parts.append(part)
+	return entities, "_".join(suffix_parts)
