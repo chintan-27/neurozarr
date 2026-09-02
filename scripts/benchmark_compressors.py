@@ -3,14 +3,17 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
+
 import icechunk as ic
 import numpy as np
 import zarr
-from zarr.codecs import ZstdCodec, BloscCodec, BloscShuffle
-from zarr.codecs.numcodecs import Delta, LZMA, BZ2, LZ4
-import bidstozarr
+from zarr.codecs import BloscCodec, BloscShuffle, ZstdCodec
+from zarr.codecs.numcodecs import BZ2, LZ4, LZMA, Delta
+
+from bidszarr import BidsReader, CodecConfig, Repo
 
 verbose = False
+BIDS_DIR = Path("./BIDS")
 REPO_DIR = Path(tempfile.mkdtemp())
 
 ZSTD19 = [ZstdCodec(level=19)]
@@ -95,8 +98,8 @@ def runQueries(root: zarr.Group) -> dict:
 
 def main():
 	storage = ic.local_filesystem_storage(str(REPO_DIR))
-	repo = ic.Repository.create(storage)
-	baseSession = repo.writable_session("main")
+	icRepo = ic.Repository.create(storage)
+	baseSession = icRepo.writable_session("main")
 	zarr.open_group(store=baseSession.store, mode="w")
 	baseSnapshot = baseSession.commit("empty base", allow_empty=True)
 
@@ -104,26 +107,23 @@ def main():
 	print(f"{'codec':45} " + " ".join(f"{c:>12}" for c in cols))
 	previousTotal = 0
 	for name, (filters, compressors, bitroundK, dtype) in CODECS.items():
-		repo.create_branch(name, snapshot_id=baseSnapshot)
-		session = repo.writable_session(name)
-		bidstozarr.DATA_FILTERS = filters
-		bidstozarr.DATA_COMPRESSORS = compressors
-		bidstozarr.DATA_BITROUND_K = bitroundK
-		bidstozarr.DATA_DTYPE = dtype
+		icRepo.create_branch(name, snapshot_id=baseSnapshot)
+		session = icRepo.writable_session(name)
+		repo = Repo(session=session, codec=CodecConfig(filters, compressors, bitroundK, dtype))
 
 		t0 = time.perf_counter()
-		bidstozarr.getBidsAsZarr(session)
+		repo.ingest(BidsReader(BIDS_DIR))
 		writeTime = time.perf_counter() - t0
 
 		t0 = time.perf_counter()
-		session.commit(f"convert with {name}")
+		repo.save(f"convert with {name}")
 		commitTime = time.perf_counter() - t0
 
-		stats = repo.chunk_storage_stats()
+		stats = icRepo.chunk_storage_stats()
 		storedBytes = stats.total_bytes() - previousTotal
 		previousTotal = stats.total_bytes()
 
-		readSession = repo.readonly_session(branch=name)
+		readSession = icRepo.readonly_session(branch=name)
 		readRoot = zarr.open_group(store=readSession.store, mode="r")
 		q = runQueries(readRoot)
 

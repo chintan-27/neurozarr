@@ -12,14 +12,13 @@ class Repo:
 	Build it up either by ingesting a Reader (bulk import) or by hand via
 	createSubject()/Subject.addVisit()/Visit.add*()."""
 
-	def __init__(self, path: str, codec: CodecConfig = None):
-		storage = icechunk.local_filesystem_storage(str(path))
-		if icechunk.Repository.exists(storage):
-			self._icechunk_repo = icechunk.Repository.open(storage)
-		else:
-			self._icechunk_repo = icechunk.Repository.create(storage)
-		self._session = self._icechunk_repo.writable_session("main")
-		self._writer = Writer(self._session, codec)
+	def __init__(self, path: str = None, codec: CodecConfig = None, session: icechunk.Session = None):
+		if session is None:
+			storage = icechunk.local_filesystem_storage(str(path))
+			icechunk_repo = icechunk.Repository.open(storage) if icechunk.Repository.exists(storage) \
+				else icechunk.Repository.create(storage)
+			session = icechunk_repo.writable_session("main")
+		self._writer = Writer(session, codec)
 
 	def createSubject(self, sub_id: str, attrs: dict = None) -> "Subject":
 		if attrs:

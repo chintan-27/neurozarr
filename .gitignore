@@ -5,3 +5,4 @@ __pycache__/
 zarr/
 COMPRESSOR_REPORT.html
 CLAUDE.md
+*.egg-info/
