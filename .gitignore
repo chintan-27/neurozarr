@@ -1,2 +1,7 @@
 .venv
 BIDS/
+__pycache__/
+*.pyc
+zarr/
+COMPRESSOR_REPORT.html
+CLAUDE.md

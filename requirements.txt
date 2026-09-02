@@ -1,3 +1,0 @@
-icechunk
-pandas
-mne
