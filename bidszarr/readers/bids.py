@@ -3,112 +3,155 @@ from pathlib import Path
 import mne
 import pandas as pd
 
-from ..entities import Entities, parse_entities
+from ..entities import Entities, split_stem
 from ..items import Attrs, Recording, Table
 from ..util import cleanNan, loadJson
 
+# Formats mne.io.read_raw() auto-dispatches on, covering eeg/ieeg/meg/nirs data
+# generically. Imaging datatypes (anat/func/dwi -- NIfTI) need nibabel, which
+# isn't a dependency here; files with any other extension fall back to an
+# "unread" Attrs placeholder instead of crashing (see _read_datatype_dir).
+MNE_READABLE_EXTS = {".edf", ".bdf", ".gdf", ".vhdr", ".set", ".fif", ".cnt"}
+
 
 class BidsReader:
-	"""Reads a BIDS-formatted export folder and yields standardized
-	Attrs/Table/Recording items for a Writer to consume."""
+	"""Reads any valid BIDS dataset generically: subjects/sessions are
+	discovered by directory, not by a required sessions.tsv; datatype
+	directories (ieeg, eeg, beh, anat, ...) are walked without a fixed list;
+	JSON sidecars are resolved via the BIDS inheritance principle (closest
+	matching sidecar wins). BRAVO-specific extras (.bravo_subject_ids.json,
+	_devices.json, _manifest.json) are used only if present -- never required."""
 
 	def __init__(self, root_dir):
 		self.root_dir = Path(root_dir)
 
 	def read(self):
 		yield Attrs((), cleanNan(loadJson(self.root_dir / "dataset_description.json")))
-		for sub, attrs in self._loadParticipantAttributes().items():
-			for ses, sattrs in self._loadSessionAttributes(sub).items():
-				yield Attrs((sub, ses), cleanNan(sattrs))
-				sessionDir = self.root_dir / sub / ses
-				if (sessionDir / "ieeg").exists():
-					yield from self._read_ieeg(sub, ses)
-				if (sessionDir / "beh").exists():
-					yield from self._read_beh(self.root_dir, sub, ses)
-			yield Attrs((sub,), cleanNan(attrs))
+
+		participantAttrs, participantsFieldInfo = self._load_participants()
+		if participantsFieldInfo:
+			yield Attrs(("participants_description",), participantsFieldInfo)
+
+		for subDir in sorted(self.root_dir.glob("sub-*")):
+			if not subDir.is_dir():
+				continue
+			sub = subDir.name
+			if sub in participantAttrs:
+				yield Attrs((sub,), participantAttrs[sub])
+
+			sessionAttrs, sessionsFieldInfo = self._load_sessions(sub)
+			if sessionsFieldInfo:
+				yield Attrs((sub, "sessions_description"), sessionsFieldInfo)
+
+			sesDirs = sorted(subDir.glob("ses-*"))
+			levels = [(d.name, d) for d in sesDirs if d.is_dir()] or [(None, subDir)]
+			for ses, sesDir in levels:
+				if ses and ses in sessionAttrs:
+					yield Attrs((sub, ses), sessionAttrs[ses])
+				for dtDir in sorted(sesDir.iterdir()):
+					if dtDir.is_dir() and dtDir.name != "derivatives":
+						yield from self._read_datatype_dir(sub, ses, dtDir.name, dtDir)
+
 		yield from self._read_derivatives()
 
-	def _loadParticipantAttributes(self) -> dict:
-		participants = pd.read_csv(self.root_dir / "participants.tsv", sep="\t").set_index("participant_id")
-		fieldInfo = loadJson(self.root_dir / "participants.json")
-		subjectIds = loadJson(self.root_dir / ".bravo_subject_ids.json")
+	def _load_participants(self) -> tuple:
+		path = self.root_dir / "participants.tsv"
+		if not path.exists():
+			return {}, {}
+		participants = pd.read_csv(path, sep="\t").set_index("participant_id")
+		fieldInfo = cleanNan(loadJson(self.root_dir / "participants.json"))
+		subjectIds = loadJson(self.root_dir / ".bravo_subject_ids.json")  # optional BRAVO extra
 		subToHash = {f"sub-{num:03d}": h for h, num in subjectIds.items()}
-		return {
-			sub: {**row.to_dict(), "bravo_hash": subToHash.get(sub), "field_info": fieldInfo}
+		attrs = {
+			sub: cleanNan({**row.to_dict(), **({"bravo_hash": subToHash[sub]} if sub in subToHash else {})})
 			for sub, row in participants.iterrows()
 		}
+		return attrs, fieldInfo
 
-	def _loadSessionAttributes(self, sub: str) -> dict:
+	def _load_sessions(self, sub: str) -> tuple:
 		subDir = self.root_dir / sub
-		sessions = pd.read_csv(subDir / f"{sub}_sessions.tsv", sep="\t").set_index("session_id")
-		fieldInfo = loadJson(subDir / f"{sub}_sessions.json")
-		devices = loadJson(subDir / f"{sub}_devices.json")
-		manifest = {entry["Session"]: entry for entry in loadJson(subDir / f"{sub}_manifest.json").get("Sessions", [])}
-		return {
-			ses: {**row.to_dict(), **devices.get(ses, {}), "field_info": fieldInfo, "manifest": manifest.get(ses, {})}
+		path = subDir / f"{sub}_sessions.tsv"
+		if not path.exists():
+			return {}, {}
+		sessions = pd.read_csv(path, sep="\t").set_index("session_id")
+		fieldInfo = cleanNan(loadJson(subDir / f"{sub}_sessions.json"))
+		devices = loadJson(subDir / f"{sub}_devices.json")  # optional BRAVO extra
+		manifest = {e["Session"]: e for e in loadJson(subDir / f"{sub}_manifest.json").get("Sessions", [])}
+		attrs = {
+			ses: cleanNan({**row.to_dict(), **devices.get(ses, {}), "manifest": manifest.get(ses, {})})
 			for ses, row in sessions.iterrows()
 		}
+		return attrs, fieldInfo
 
-	def _read_ieeg(self, sub, ses):
-		ieegDir = self.root_dir / sub / ses / "ieeg"
-		fixedPrefix = f"{sub}_{ses}_space-Other"
+	def _read_datatype_dir(self, sub, ses, datatype, dir_path, prefix=()):
+		groups = {}
+		for f in sorted(dir_path.iterdir()):
+			if not f.is_file():
+				continue
+			entities, suffix = split_stem(f.stem)
+			entities.pop("sub", None)
+			entities.pop("ses", None)
+			key = (tuple(sorted(entities.items())), suffix)
+			groups.setdefault(key, {})[f.suffix] = f
 
-		coordsystem = cleanNan(loadJson(ieegDir / f"{fixedPrefix}_coordsystem.json"))
-		yield Attrs(("ieeg_descriptions", "coordsystem"), coordsystem)
+		for (entityItems, suffix), exts in groups.items():
+			entities = Entities(sub, ses, datatype, dict(entityItems))
+			dataExts = [e for e in exts if e != ".json"]
+			if not dataExts:
+				# pure sidecar json with no data of its own (e.g. coordsystem.json) --
+				# still materialized here, and independently discoverable via
+				# _find_sidecar for any sibling group that needs it as inherited meta.
+				if ".json" in exts:
+					yield Attrs((*prefix, *entities.path(), suffix), cleanNan(loadJson(exts[".json"])))
+				continue
 
-		electrodes = pd.read_csv(ieegDir / f"{fixedPrefix}_electrodes.tsv", sep="\t")
-		yield Table(Entities(sub, ses, "ieeg"), "electrodes", electrodes)
-		electrodesDescription = cleanNan(loadJson(ieegDir / f"{fixedPrefix}_electrodes.json"))
-		yield Attrs(("ieeg_descriptions", "electrodes"), electrodesDescription)
+			meta = cleanNan(loadJson(exts[".json"])) if ".json" in exts \
+				else self._find_sidecar(dir_path, dict(entityItems), suffix)
 
-		scansPath = self.root_dir / sub / ses / f"{sub}_{ses}_scans.tsv"
-		scans = pd.read_csv(scansPath, sep="\t") if scansPath.exists() else pd.DataFrame(columns=["filename"])
-
-		for _, row in scans.iterrows():
-			fullName = Path(row["filename"]).stem.removesuffix("_ieeg")
-			runName = fullName.removeprefix(f"{sub}_{ses}_")
-			entities = Entities(sub, ses, "ieeg", parse_entities(runName))
-
-			runAttrs = cleanNan(row.drop("filename").to_dict())
-			runAttrs.update(cleanNan(loadJson(ieegDir / f"{fullName}_ieeg.json")))
-			edf = mne.io.read_raw_edf(ieegDir / f"{fullName}_ieeg.edf", preload=True, verbose=False)
-			yield Recording(entities, edf, runAttrs)
-
-			channels = pd.read_csv(ieegDir / f"{fullName}_channels.tsv", sep="\t")
-			yield Table(entities, "channels", channels)
-			channelsDescription = cleanNan(loadJson(ieegDir / f"{fullName}_channels.json"))
-			yield Attrs(("ieeg_descriptions", "channels"), channelsDescription)
-
-			eventsPath = ieegDir / f"{fullName}_events.tsv"
-			if eventsPath.exists():
-				events = pd.read_csv(eventsPath, sep="\t")
-				eventsDescription = cleanNan(loadJson(self.root_dir / "events.json"))
-				yield Table(entities, "events", events, eventsDescription)
-
-	def _read_beh(self, base_dir, sub, ses, prefix=()):
-		behDir = base_dir / sub / ses / "beh"
-		for tsvPath in behDir.glob("*_beh.tsv"):
-			fullName = tsvPath.stem.removesuffix("_beh")
-			taskName = fullName.removeprefix(f"{sub}_{ses}_")
-			entities = Entities(sub, ses, "beh", parse_entities(taskName))
-
-			beh = pd.read_csv(tsvPath, sep="\t")
-			yield Table(entities, "table", beh, prefix=prefix)
-
-			description = cleanNan(loadJson(behDir / f"{fullName}_beh.json"))
-			if taskName.startswith("task-PatientSurvey"):
-				yield Attrs((*prefix, sub, ses, "beh", taskName), description)
+			ext = dataExts[0]
+			path = exts[ext]
+			if ext == ".tsv":
+				yield Table(entities, suffix, pd.read_csv(path, sep="\t"), meta, prefix)
+			elif ext in MNE_READABLE_EXTS:
+				raw = mne.io.read_raw(path, preload=True, verbose=False)
+				yield Recording(entities, raw, meta, prefix)
 			else:
-				yield Attrs((*prefix, "beh_descriptions", taskName), description)
+				yield Attrs((*prefix, *entities.path(), suffix), {
+					**meta, "unread_file": str(path),
+					"note": f"no in-memory reader registered for {ext!r}",
+				})
+
+	def _find_sidecar(self, start_dir: Path, entities: dict, suffix: str) -> dict:
+		"""BIDS inheritance principle: nearest matching JSON sidecar wins,
+		walking from the file's own directory up to the dataset root."""
+		d = start_dir
+		while True:
+			for jf in sorted(d.glob(f"*{suffix}.json")):
+				candidate, candidateSuffix = split_stem(jf.stem)
+				candidate.pop("sub", None)
+				candidate.pop("ses", None)
+				if candidateSuffix == suffix and all(entities.get(k) == v for k, v in candidate.items()):
+					return cleanNan(loadJson(jf))
+			if d == self.root_dir:
+				return {}
+			d = d.parent
 
 	def _read_derivatives(self):
 		derivativesDir = self.root_dir / "derivatives"
 		if not derivativesDir.exists():
 			return
-		for derivDir in derivativesDir.iterdir():
+		for derivDir in sorted(derivativesDir.iterdir()):
 			if not derivDir.is_dir():
 				continue
-			yield Attrs(("derivatives", derivDir.name), cleanNan(loadJson(derivDir / "dataset_description.json")))
-			for sesDir in derivDir.glob("sub-*/ses-*"):
-				sub, ses = sesDir.parts[-2], sesDir.parts[-1]
-				yield from self._read_beh(derivDir, sub, ses, prefix=("derivatives", derivDir.name))
+			prefix = ("derivatives", derivDir.name)
+			yield Attrs(prefix, cleanNan(loadJson(derivDir / "dataset_description.json")))
+			for subDir in sorted(derivDir.glob("sub-*")):
+				if not subDir.is_dir():
+					continue
+				sub = subDir.name
+				sesDirs = sorted(derivDir.glob(f"{sub}/ses-*"))
+				levels = [(d.name, d) for d in sesDirs if d.is_dir()] or [(None, subDir)]
+				for ses, sesDir in levels:
+					for dtDir in sorted(sesDir.iterdir()):
+						if dtDir.is_dir():
+							yield from self._read_datatype_dir(sub, ses, dtDir.name, dtDir, prefix=prefix)
