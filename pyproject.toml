@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bidszarr"
+version = "0.1.0"
+description = "Convert neural/behavioral recordings into a BIDS-structured Zarr/Icechunk store"
+requires-python = ">=3.11"
+dependencies = [
+    "icechunk",
+    "pandas",
+    "mne",
+    "zarr",
+    "numpy",
+]
+
+[tool.setuptools.packages.find]
+include = ["bidszarr*"]
