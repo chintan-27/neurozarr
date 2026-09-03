@@ -37,9 +37,13 @@ CODECS = {
 	"int16+zstd-19+bitround-k7 (lossy)": ([], ZSTD19, 7, "int16"),
 }
 
-def runQueries(root: zarr.Group) -> dict:
+def _dir_size(path: Path) -> int:
+	return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+
+def runQueries(sub: zarr.Group) -> dict:
+	"""sub is sub-001's own repo root (one repo per subject -- no shared root to index into)."""
 	random.seed(0)
-	sub = root["sub-001"]
 	runGroups = [(p, n) for p, n in sub.members(max_depth=None) if isinstance(n, zarr.Group) and "data" in n]
 	biggest = max(runGroups, key=lambda pn: pn[1]["data"].shape[-1])
 
@@ -53,9 +57,9 @@ def runQueries(root: zarr.Group) -> dict:
 	biggest[1]["data"][:, start:start + 1000]
 	sliceMs = (time.perf_counter() - t0) * 1000
 
-	# scan every channels table in the dataset, filter rows whose first column contains "TD"
+	# scan every channels table for sub-001, filter rows whose first column contains "TD"
 	t0 = time.perf_counter()
-	for path, node in root.members(max_depth=None):
+	for path, node in sub.members(max_depth=None):
 		if isinstance(node, zarr.Array) and path.endswith("channels"):
 			arr = node[:]
 			_ = [row for row in arr if "TD" in row[0]]
@@ -71,15 +75,15 @@ def runQueries(root: zarr.Group) -> dict:
 			count += vals.size
 	aggregateS = time.perf_counter() - t0
 
-	# cross-subject task scan: sum every BrainSenseSurvey run's data, across all subjects/sessions
+	# task scan: sum every BrainSenseSurvey run's data across sub-001's sessions
 	t0 = time.perf_counter()
-	for path, node in root.members(max_depth=None):
+	for path, node in sub.members(max_depth=None):
 		if isinstance(node, zarr.Array) and path.endswith("/data") and "BrainSenseSurvey" in path:
 			_ = node[:].astype(np.float64).sum()
 	taskScanS = time.perf_counter() - t0
 
-	# random scattered access: small slice from 20 random data arrays across the dataset
-	allDataArrays = [n for p, n in root.members(max_depth=None) if isinstance(n, zarr.Array) and p.endswith("/data")]
+	# random scattered access: small slice from 20 random data arrays within sub-001
+	allDataArrays = [n for p, n in sub.members(max_depth=None) if isinstance(n, zarr.Array) and p.endswith("/data")]
 	random.shuffle(allDataArrays)
 	t0 = time.perf_counter()
 	for arr in allDataArrays[:20]:
@@ -89,7 +93,7 @@ def runQueries(root: zarr.Group) -> dict:
 	randomAccessMs = (time.perf_counter() - t0) * 1000
 
 	t0 = time.perf_counter()
-	for _, node in root.members(max_depth=None):
+	for _, node in sub.members(max_depth=None):
 		_ = node.attrs.asdict()
 	attrsS = time.perf_counter() - t0
 
@@ -97,19 +101,13 @@ def runQueries(root: zarr.Group) -> dict:
 		aggregateS=aggregateS, taskScanS=taskScanS, randomAccessMs=randomAccessMs, attrsS=attrsS)
 
 def main():
-	storage = ic.local_filesystem_storage(str(REPO_DIR))
-	icRepo = ic.Repository.create(storage)
-	baseSession = icRepo.writable_session("main")
-	zarr.open_group(store=baseSession.store, mode="w")
-	baseSnapshot = baseSession.commit("empty base", allow_empty=True)
-
 	cols = ["write_s", "commit_s", "full_run_s", "slice_ms", "table_scan_s", "aggregate_s", "task_scan_s", "rand_ms", "attrs_s", "stored_MB"]
 	print(f"{'codec':45} " + " ".join(f"{c:>12}" for c in cols))
-	previousTotal = 0
 	for name, (filters, compressors, bitroundK, dtype) in CODECS.items():
-		icRepo.create_branch(name, snapshot_id=baseSnapshot)
-		session = icRepo.writable_session(name)
-		repo = Repo(session=session, codec=CodecConfig(filters, compressors, bitroundK, dtype))
+		# one repo per subject means no shared store to branch across configs --
+		# each codec gets its own fresh base_path instead.
+		codecDir = REPO_DIR / name
+		repo = Repo(codecDir, codec=CodecConfig(filters, compressors, bitroundK, dtype))
 
 		t0 = time.perf_counter()
 		repo.ingest(BidsReader(BIDS_DIR))
@@ -119,16 +117,16 @@ def main():
 		repo.save(f"convert with {name}")
 		commitTime = time.perf_counter() - t0
 
-		stats = icRepo.chunk_storage_stats()
-		storedBytes = stats.total_bytes() - previousTotal
-		previousTotal = stats.total_bytes()
+		storedBytes = _dir_size(codecDir)
 
-		readSession = icRepo.readonly_session(branch=name)
-		readRoot = zarr.open_group(store=readSession.store, mode="r")
-		q = runQueries(readRoot)
+		subStorage = ic.local_filesystem_storage(str(codecDir / "sub-001"))
+		subRepo = ic.Repository.open(subStorage)
+		readSession = subRepo.readonly_session("main")
+		subRoot = zarr.open_group(store=readSession.store, mode="r")
+		q = runQueries(subRoot)
 
 		if verbose:
-			print(readRoot.tree())
+			print(subRoot.tree())
 		vals = [writeTime, commitTime, q["fullRunS"], q["sliceMs"], q["tableScanS"],
 			q["aggregateS"], q["taskScanS"], q["randomAccessMs"], q["attrsS"], storedBytes / 1e6]
 		print(f"{name:45} " + " ".join(f"{v:12.2f}" for v in vals))

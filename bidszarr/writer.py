@@ -34,7 +34,9 @@ class Writer:
 		self.root = zarr.open_group(store=session.store, mode="w")
 
 	def _group_for(self, prefix: tuple, entities: Entities) -> zarr.Group:
-		path = (*prefix, *entities.path())
+		# a Writer always scopes to one subject's own repo, so the leading
+		# sub-XXX from entities.path() is redundant -- the repo already is that subject.
+		path = (*prefix, *entities.path()[1:])
 		group = self.root
 		for part in path:
 			group = group.require_group(part)
