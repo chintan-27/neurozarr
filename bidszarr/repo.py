@@ -6,14 +6,12 @@ import pandas as pd
 
 from .entities import Entities
 from .items import Attrs, Recording, Reader, Table
+from .storage import storage_from
 from .writer import CodecConfig, Writer
 
 
-def _open_writer(storage_path: Path, codec: CodecConfig) -> Writer:
-	storage = icechunk.local_filesystem_storage(str(storage_path))
-	icechunk_repo = icechunk.Repository.open_or_create(storage)
-	session = icechunk_repo.writable_session("main")
-	return Writer(session, codec)
+def _open_writer(icechunk_repo: icechunk.Repository, codec: CodecConfig) -> Writer:
+	return Writer(icechunk_repo.writable_session("main"), codec)
 
 
 class Repo:
@@ -24,14 +22,25 @@ class Repo:
 	Build it up either by ingesting a Reader (bulk import) or by hand via
 	create_subject()/Subject.add_visit()/Visit.add*()."""
 
-	def __init__(self, base_path: str, codec: CodecConfig = None):
-		self.base_path = Path(base_path)
+	def __init__(self, target, codec: CodecConfig = None, **storage_options):
+		"""target: a local path, a URI (s3://bucket/study, gs://, az://, memory://),
+		or an icechunk.Storage. Extra keyword options pass through to the icechunk
+		storage constructor (region=, anonymous=, from_env=, ...)."""
+		self.target = target
 		self._codec = codec
-		self._writers = {}  # sub_id -> Writer, opened lazily on first use
+		self._storage_options = storage_options
+		self._repos = {}    # sub_id -> icechunk.Repository, opened lazily
+		self._writers = {}  # sub_id -> Writer, opened lazily on first write
+
+	def _icechunk_repo(self, sub_id: str) -> icechunk.Repository:
+		if sub_id not in self._repos:
+			storage = storage_from(self.target, sub_id, **self._storage_options)
+			self._repos[sub_id] = icechunk.Repository.open_or_create(storage)
+		return self._repos[sub_id]
 
 	def _writer_for(self, sub_id: str) -> Writer:
 		if sub_id not in self._writers:
-			self._writers[sub_id] = _open_writer(self.base_path / sub_id, self._codec)
+			self._writers[sub_id] = _open_writer(self._icechunk_repo(sub_id), self._codec)
 		return self._writers[sub_id]
 
 	def create_subject(self, sub_id: str, attrs: dict = None) -> "Subject":
