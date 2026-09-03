@@ -5,6 +5,8 @@ from .read import RecordingView, TableView
 from .readers import BidsReader, ManifestReader
 from .repo import Repo, Subject, Visit
 from .storage import storage_from
+from .validate import validate_source
+from .verify import export_bids, verify
 from .writer import CodecConfig, Writer
 
 __all__ = [
@@ -14,4 +16,5 @@ __all__ = [
 	"RecordingView", "TableView",
 	"CodecConfig", "Writer",
 	"storage_from", "set_verbosity",
+	"validate_source", "verify", "export_bids",
 ]

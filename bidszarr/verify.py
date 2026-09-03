@@ -16,45 +16,52 @@ def verify(source, store, tolerance: float = 1e-9, sample_limit: int = None) -> 
 	"""Re-read the source and compare every recording and table against what is in
 	the store. Returns a list of problem strings (empty means the conversion is
 	faithful). sample_limit stops after that many items, for a quick spot check."""
+	from .read import RecordingView, _table_df
+
 	repo = Repo(store)
 	problems = []
 	checked = 0
-
-	# what's in the store, keyed the way a reader's items are addressed
-	stored = {}
-	for sub_id in repo.subjects():
-		subject = repo.subject(sub_id)
-		for view in subject.recordings():
-			stored[view.path] = view
-		for view in subject.tables():
-			stored[f"{view.path}/{view.name}"] = view
+	roots = {}
 
 	for item in BidsReader(source).read():
 		if sample_limit is not None and checked >= sample_limit:
 			break
+		if not isinstance(item, (Recording, Table)):
+			continue
+
+		sub_id = item.entities.sub
+		if sub_id not in roots:
+			try:
+				roots[sub_id] = repo.root_of(sub_id)
+			except Exception as e:
+				problems.append(f"{sub_id}: cannot open its repo ({e})")
+				roots[sub_id] = None
+		root = roots[sub_id]
+		if root is None:
+			continue
+
+		# inside a subject's own repo the leading sub-XXX is dropped, as the writer does
+		group_path = "/".join((*item.prefix, *item.entities.path()[1:]))
+		name = "data" if isinstance(item, Recording) else item.name
+		where = f"{sub_id}/{group_path}/{name}"
+
+		if group_path not in root or name not in root[group_path]:
+			problems.append(f"missing from store: {where}")
+			continue
+		group = root[group_path]
+		checked += 1
+
 		if isinstance(item, Recording):
-			key = "/".join((*item.prefix, *item.entities.path()))
-			view = stored.get(key)
-			if view is None:
-				problems.append(f"missing from store: {key}")
-				continue
-			values, _ = view.data()
+			values, _ = RecordingView(group, item.entities.extra, where).data()
 			expected = item.raw.get_data()
 			if values.shape != expected.shape:
-				problems.append(f"{key}: shape {values.shape} != source {expected.shape}")
+				problems.append(f"{where}: shape {values.shape} != source {expected.shape}")
 			elif not np.allclose(values, expected, atol=tolerance):
-				worst = np.abs(values - expected).max()
-				problems.append(f"{key}: values differ (max abs error {worst:.3e})")
-			checked += 1
-		elif isinstance(item, Table):
-			key = "/".join((*item.prefix, *item.entities.path(), item.name))
-			view = stored.get(key)
-			if view is None:
-				problems.append(f"missing from store: {key}")
-				continue
-			if len(view.df()) != len(item.df):
-				problems.append(f"{key}: {len(view.df())} rows != source {len(item.df)}")
-			checked += 1
+				problems.append(f"{where}: values differ (max abs error {np.abs(values - expected).max():.3e})")
+		else:
+			stored_rows = len(_table_df(group[name]))
+			if stored_rows != len(item.df):
+				problems.append(f"{where}: {stored_rows} rows != source {len(item.df)}")
 
 	logger.info("verified %d items against %s", checked, source)
 	return problems
