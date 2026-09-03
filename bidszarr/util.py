@@ -24,7 +24,7 @@ def create_table(group: zarr.Group, name: str, df: pd.DataFrame, extra_attrs: di
 	"""Store a DataFrame as one string array. The per-column dtypes are recorded
 	in attrs so readers can cast back (see read.TableView.df) -- the array itself
 	stays all-strings, which keeps ragged/mixed BIDS tsv columns storable."""
-	table = group.create_array(name, data=df.astype(str).to_numpy().astype(str))
+	table = group.create_array(name, data=df.astype(str).to_numpy().astype(str), overwrite=True)
 	set_attrs(table, {
 		"columns": list(df.columns),
 		"dtypes": [str(dt) for dt in df.dtypes],

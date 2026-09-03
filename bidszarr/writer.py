@@ -80,6 +80,7 @@ class Writer:
 			chunks=util.chunk_shape(data.shape, data.itemsize),
 			filters=self._codec.filters,
 			compressors=self._codec.compressors,
+			overwrite=True,  # re-converting a source into an existing store replaces it
 		)
 		log_mem()
 
@@ -106,6 +107,11 @@ class Writer:
 			raise TypeError(f"unknown item type {type(item)!r}")
 
 	def save(self, message: str):
+		"""Commit this subject's session. A session with nothing new in it is left
+		alone -- icechunk refuses empty commits, and reopening a store to touch one
+		subject shouldn't fail because the others had no changes."""
+		if not self._session.has_uncommitted_changes:
+			return None
 		snapshot = self._session.commit(message)
 		log_mem()
 		return snapshot

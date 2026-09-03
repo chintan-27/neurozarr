@@ -33,6 +33,7 @@ class Repo:
 		self._storage_options = storage_options
 		self._repos = {}    # sub_id -> icechunk.Repository, opened lazily
 		self._writers = {}  # sub_id -> Writer, opened lazily on first write
+		self._new_subjects = set()  # written into the _dataset index on save()
 
 	def _icechunk_repo(self, sub_id: str) -> icechunk.Repository:
 		if sub_id not in self._repos:
@@ -43,7 +44,17 @@ class Repo:
 	def _writer_for(self, sub_id: str) -> Writer:
 		if sub_id not in self._writers:
 			self._writers[sub_id] = _open_writer(self._icechunk_repo(sub_id), self._codec)
+			if sub_id.startswith("sub-"):
+				self._new_subjects.add(sub_id)
 		return self._writers[sub_id]
+
+	def _subject_index(self) -> list:
+		"""Subject ids recorded in the _dataset repo. Object stores can't be listed
+		like a directory, so the store keeps its own index of which subjects exist."""
+		try:
+			return list(self.root_of("_dataset").attrs.asdict().get("subjects", []))
+		except Exception:  # no _dataset repo yet, or nothing committed to it
+			return []
 
 	def create_subject(self, sub_id: str, attrs: dict = None) -> "Subject":
 		if attrs:
@@ -75,6 +86,10 @@ class Repo:
 
 	def save(self, message: str):
 		"""Commit every subject repo touched since the last save."""
+		if self._new_subjects:
+			known = set(self._subject_index()) | self._new_subjects
+			self._writer_for("_dataset").add_attrs(Attrs((), {"subjects": sorted(known)}))
+			self._new_subjects.clear()
 		for writer in self._writers.values():
 			writer.save(message)
 
@@ -89,13 +104,17 @@ class Repo:
 		return zarr.open_group(store=session.store, mode="r")
 
 	def subjects(self) -> list:
-		"""Subject ids present in the store (every sub-* repo under the target)."""
-		if isinstance(self.target, icechunk.Storage):
-			return sorted(self._repos)  # opaque storage: only what this handle has opened
-		base = Path(str(self.target))
-		if not base.exists():
-			return sorted(s for s in self._repos if s.startswith("sub-"))
-		return sorted(d.name for d in base.iterdir() if d.is_dir() and d.name.startswith("sub-"))
+		"""Subject ids in the store, from the index the store keeps in its _dataset
+		repo. Falls back to listing directories for local stores written before the
+		index existed."""
+		index = self._subject_index()
+		if index:
+			return sorted(index)
+		if not isinstance(self.target, icechunk.Storage):
+			base = Path(str(self.target))
+			if base.exists():
+				return sorted(d.name for d in base.iterdir() if d.is_dir() and d.name.startswith("sub-"))
+		return sorted(s for s in self._repos if s.startswith("sub-"))
 
 	def subject(self, sub_id: str) -> "Subject":
 		return Subject(self, sub_id)
