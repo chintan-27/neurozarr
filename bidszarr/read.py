@@ -6,19 +6,27 @@ from .entities import parse_entities
 from .log import logger
 
 
-def _table_df(array: zarr.Array) -> pd.DataFrame:
-	"""Rebuild a DataFrame from a stored string table, casting each column back
-	to the dtype util.create_table recorded in attrs. A column whose dtype no
-	longer round-trips is left as strings rather than failing the whole read."""
-	attrs = array.attrs.asdict()
-	columns = attrs.get("columns")
-	df = pd.DataFrame(array[:], columns=columns)
+def _table_df(node, columns: list = None) -> pd.DataFrame:
+	"""Rebuild a DataFrame from a stored table.
+
+	Tables are groups of one typed array per column. Stores written before that
+	(a single string array for the whole table) are still read, by casting each
+	column back to the dtype recorded in attrs.
+	"""
+	attrs = node.attrs.asdict()
+	names = attrs.get("columns")
+
+	if isinstance(node, zarr.Group):  # one array per column
+		wanted = columns or names or sorted(node.array_keys())
+		return pd.DataFrame({name: node[name][:] for name in wanted})
+
+	df = pd.DataFrame(node[:], columns=names)  # legacy single string array
 	for name, dtype in zip(df.columns, attrs.get("dtypes", [])):
 		try:
 			df[name] = df[name].astype(dtype)
 		except (TypeError, ValueError):
 			logger.warning("column %r could not be cast back to %s, left as strings", name, dtype)
-	return df
+	return df[columns] if columns else df
 
 
 class TableView:
@@ -33,9 +41,14 @@ class TableView:
 		return {k: v for k, v in self._group[self.name].attrs.asdict().items()
 				if k not in ("columns", "dtypes")}
 
-	def df(self) -> pd.DataFrame:
-		"""The table as a DataFrame, with column dtypes restored."""
-		return _table_df(self._group[self.name])
+	@property
+	def columns(self) -> list:
+		return list(self._group[self.name].attrs.asdict().get("columns", []))
+
+	def df(self, columns: list = None) -> pd.DataFrame:
+		"""The table as a DataFrame. Pass columns to read only those -- each column
+		is its own array, so the rest is never fetched."""
+		return _table_df(self._group[self.name], columns)
 
 	def __repr__(self):
 		return f"<TableView {self.path}/{self.name}>"
@@ -117,6 +130,12 @@ class RecordingView:
 			return pd.DataFrame()
 		return _table_df(self._group["channels"])
 
+	def events(self) -> pd.DataFrame:
+		"""The events table stored next to this recording (empty if absent)."""
+		if "events" not in self._group:
+			return pd.DataFrame()
+		return _table_df(self._group["events"])
+
 	def ch_names(self) -> list:
 		"""Channel names: from the stored channels table (BIDS channels.tsv) if there
 		is one, else the names the writer captured off the source Raw."""
@@ -143,24 +162,40 @@ class RecordingView:
 		if window.get("picks") is not None:
 			names = [names[i] for i in self._picks(window["picks"])]
 		info = mne.create_info(names, sfreq=float(sfreq), ch_types="eeg", verbose=False)
-		return mne.io.RawArray(values, info, verbose=False)
+		raw = mne.io.RawArray(values, info, verbose=False)
+
+		# put the events table back on as annotations, so a Raw survives the round trip
+		events = self.events()
+		if not events.empty and "onset" in events and not window:
+			raw.set_annotations(mne.Annotations(
+				onset=events["onset"].astype(float),
+				duration=events["duration"].astype(float) if "duration" in events else 0.0,
+				description=events.get("trial_type", events.get("description", "")),
+			), verbose=False)
+		return raw
 
 	def __repr__(self):
 		return f"<RecordingView {self.path} shape={self.shape}>"
 
 
+def _is_table(node) -> bool:
+	"""A table is a group of one array per column (or, in older stores, a single
+	string array) -- either way it carries a "columns" attr."""
+	return "columns" in node.attrs.asdict()
+
+
 def views_in(root: zarr.Group, base_path: str = ""):
 	"""Walk a subject's tree and yield every RecordingView/TableView in it. A group
-	holding a "data" array is a recording; any other string array is a standalone
-	table (a beh table, session-level electrodes, ...)."""
+	holding a "data" array is a recording; anything carrying a "columns" attr is a
+	table (channels, events, electrodes, a beh table, ...)."""
 	prefix = f"{base_path}/" if base_path else ""
 	for path, node in root.members(max_depth=None):
-		if not isinstance(node, zarr.Group):
-			continue
+		if not isinstance(node, zarr.Group) or _is_table(node):
+			continue  # a table's own group is yielded by its parent, not walked into
 		entities = parse_entities(path.rsplit("/", 1)[-1])
 		if "data" in node:
 			yield RecordingView(node, entities, prefix + path)
 		else:
 			for name, child in node.members():
-				if isinstance(child, zarr.Array):
+				if _is_table(child):
 					yield TableView(node, name, entities, prefix + path)

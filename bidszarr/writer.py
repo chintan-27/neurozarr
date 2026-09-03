@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 
 import icechunk
 import numpy as np
+import pandas as pd
 import zarr
 from zarr.codecs import ZstdCodec
 
@@ -60,6 +61,7 @@ class Writer:
 		# sidecars (manual API, ManifestReader) still reads back as a real Raw.
 		attrs.setdefault("SamplingFrequency", float(item.raw.info["sfreq"]))
 		attrs.setdefault("ch_names", list(item.raw.ch_names))
+		self._add_annotations(group, item.raw)
 
 		if self._codec.dtype == "float16":
 			data = physical.astype(np.float16)
@@ -96,6 +98,19 @@ class Writer:
 			overwrite=True,  # re-converting a source into an existing store replaces it
 		)
 		log_mem()
+
+	def _add_annotations(self, group: zarr.Group, raw):
+		"""An mne.Raw's annotations are events -- store them the way BIDS does, as an
+		events table, so they survive a round trip. A recording that already has an
+		events table from its BIDS sidecar keeps that one."""
+		annotations = getattr(raw, "annotations", None)
+		if not annotations or len(annotations) == 0 or "events" in group:
+			return
+		util.create_table(group, "events", pd.DataFrame({
+			"onset": annotations.onset,
+			"duration": annotations.duration,
+			"trial_type": [str(d) for d in annotations.description],
+		}), {"source": "mne.Raw.annotations"})
 
 	def add_table(self, item: Table):
 		group = self._group_for(item.prefix, item.entities)

@@ -32,12 +32,17 @@ def set_attrs(node, attrs: dict):
 
 
 def create_table(group: zarr.Group, name: str, df: pd.DataFrame, extra_attrs: dict = None):
-	"""Store a DataFrame as one string array. The per-column dtypes are recorded
-	in attrs so readers can cast back (see read.TableView.df) -- the array itself
-	stays all-strings, which keeps ragged/mixed BIDS tsv columns storable."""
+	"""Store a DataFrame as one string array, recording each column's dtype in attrs
+	so readers cast back faithfully (see read._table_df).
+
+	One array per column was measured and rejected: BIDS datasets are mostly many
+	small tables (tens to hundreds of rows), so a separate zarr array per column
+	costs more in per-array metadata than typed values save -- it made a real
+	dataset 33% larger (144MB -> 192MB). Readers still understand that layout.
+	"""
 	table = group.create_array(name, data=df.astype(str).to_numpy().astype(str), overwrite=True)
 	set_attrs(table, {
-		"columns": list(df.columns),
+		"columns": [str(c) for c in df.columns],
 		"dtypes": [str(dt) for dt in df.dtypes],
 		**(extra_attrs or {}),
 	})

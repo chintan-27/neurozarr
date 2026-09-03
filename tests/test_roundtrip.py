@@ -74,6 +74,35 @@ def test_raw_accepts_a_window(written):
 	assert rec.raw(picks=["LFP_L"]).ch_names == ["LFP_L"]
 
 
+def test_annotations_survive_the_round_trip(store):
+	"""mne annotations (events, stim markers) used to be dropped on write."""
+	import mne
+
+	raw = mne.io.RawArray(np.zeros((2, 1000)),
+						  mne.create_info(["a", "b"], sfreq=100.0, ch_types="eeg"), verbose=False)
+	raw.set_annotations(mne.Annotations(onset=[1.0, 3.5], duration=[0.5, 0.25],
+										description=["stim_on", "artifact"]), verbose=False)
+	repo = Repo(store)
+	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="X")
+	repo.save("annotated")
+
+	rec = Repo(store).subject("sub-001").visit("ses-1").recording(task="X")
+	events = rec.events()
+	assert events["trial_type"].tolist() == ["stim_on", "artifact"]
+	assert events["onset"].tolist() == [1.0, 3.5]
+
+	restored = rec.raw().annotations
+	assert list(restored.description) == ["stim_on", "artifact"]
+	assert np.allclose(restored.onset, [1.0, 3.5])
+	assert np.allclose(restored.duration, [0.5, 0.25])
+
+
+def test_recording_without_annotations_has_no_events_table(written):
+	rec = Repo(written).subject("sub-001").visit("ses-1").recording(task="Stream", run=1)
+	assert rec.events().empty
+	assert rec.raw().annotations is not None  # just empty, not broken
+
+
 def test_table_dtypes_are_restored(written, table):
 	tables = Repo(written).subject("sub-001").visit("ses-1").tables()
 	got = tables[0].df()
