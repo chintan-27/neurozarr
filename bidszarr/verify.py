@@ -33,19 +33,18 @@ def verify(source, store, tolerance: float = 1e-9, sample_limit: int = None) -> 
 		if sub_id not in roots:
 			try:
 				roots[sub_id] = repo.root_of(sub_id)
-			except Exception as e:
-				problems.append(f"{sub_id}: cannot open its repo ({e})")
+			except Exception:
+				# nothing committed for this subject -- report its items as missing,
+				# which is more useful than one opaque "cannot open" line
 				roots[sub_id] = None
 		root = roots[sub_id]
-		if root is None:
-			continue
 
 		# inside a subject's own repo the leading sub-XXX is dropped, as the writer does
 		group_path = "/".join((*item.prefix, *item.entities.path()[1:]))
 		name = "data" if isinstance(item, Recording) else item.name
 		where = f"{sub_id}/{group_path}/{name}"
 
-		if group_path not in root or name not in root[group_path]:
+		if root is None or group_path not in root or name not in root[group_path]:
 			problems.append(f"missing from store: {where}")
 			continue
 		group = root[group_path]
