@@ -1,4 +1,3 @@
-import resource
 from dataclasses import dataclass, field
 
 import icechunk
@@ -9,11 +8,7 @@ from zarr.codecs import ZstdCodec
 from . import util
 from .entities import Entities
 from .items import Attrs, Recording, Table
-
-
-def _log_mem():
-	kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-	print(f"[bidszarr] peak memory: {kb / 1024:.1f} MB")
+from .log import log_mem
 
 
 @dataclass
@@ -31,7 +26,9 @@ class Writer:
 	def __init__(self, session: icechunk.Session, codec: CodecConfig = None):
 		self._session = session
 		self._codec = codec or CodecConfig()
-		self.root = zarr.open_group(store=session.store, mode="w")
+		# mode="a" (create if missing), never "w" -- "w" means "overwrite if exists",
+		# which silently wipes a store you reopened to add more data to.
+		self.root = zarr.open_group(store=session.store, mode="a")
 
 	def _group_for(self, prefix: tuple, entities: Entities) -> zarr.Group:
 		# a Writer always scopes to one subject's own repo, so the leading
@@ -71,27 +68,27 @@ class Writer:
 				data = physical.astype(np.float32)
 				attrs["data_note"] = "data is physical value in the channel's native unit (float32, no calibration metadata available)"
 
-		util.setAttrs(group, attrs)
+		util.set_attrs(group, attrs)
 		group.create_array(
 			"data",
 			data=data,
-			chunks=util.chunkShape(data.shape, data.itemsize),
+			chunks=util.chunk_shape(data.shape, data.itemsize),
 			filters=self._codec.filters,
 			compressors=self._codec.compressors,
 		)
-		_log_mem()
+		log_mem()
 
 	def add_table(self, item: Table):
 		group = self._group_for(item.prefix, item.entities)
-		util.createTable(group, item.name, item.df, item.meta)
-		_log_mem()
+		util.create_table(group, item.name, item.df, item.meta)
+		log_mem()
 
 	def add_attrs(self, item: Attrs):
 		group = self.root
 		for part in item.path:
 			group = group.require_group(part)
-		util.setAttrs(group, item.attrs)
-		_log_mem()
+		util.set_attrs(group, item.attrs)
+		log_mem()
 
 	def dispatch(self, item):
 		if isinstance(item, Recording):
@@ -105,5 +102,5 @@ class Writer:
 
 	def save(self, message: str):
 		snapshot = self._session.commit(message)
-		_log_mem()
+		log_mem()
 		return snapshot

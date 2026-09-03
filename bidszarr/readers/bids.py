@@ -5,7 +5,7 @@ import pandas as pd
 
 from ..entities import Entities, split_stem
 from ..items import Attrs, Recording, Table
-from ..util import cleanNan, loadJson
+from ..util import clean_nan, load_json
 
 # Formats mne.io.read_raw() auto-dispatches on, covering eeg/ieeg/meg/nirs data
 # generically. Imaging datatypes (anat/func/dwi -- NIfTI) need nibabel, which
@@ -26,7 +26,7 @@ class BidsReader:
 		self.root_dir = Path(root_dir)
 
 	def read(self):
-		yield Attrs((), cleanNan(loadJson(self.root_dir / "dataset_description.json")))
+		yield Attrs((), clean_nan(load_json(self.root_dir / "dataset_description.json")))
 
 		participantAttrs, participantsFieldInfo = self._load_participants()
 		if participantsFieldInfo:
@@ -59,11 +59,11 @@ class BidsReader:
 		if not path.exists():
 			return {}, {}
 		participants = pd.read_csv(path, sep="\t").set_index("participant_id")
-		fieldInfo = cleanNan(loadJson(self.root_dir / "participants.json"))
-		subjectIds = loadJson(self.root_dir / ".bravo_subject_ids.json")  # optional BRAVO extra
+		fieldInfo = clean_nan(load_json(self.root_dir / "participants.json"))
+		subjectIds = load_json(self.root_dir / ".bravo_subject_ids.json")  # optional BRAVO extra
 		subToHash = {f"sub-{num:03d}": h for h, num in subjectIds.items()}
 		attrs = {
-			sub: cleanNan({**row.to_dict(), **({"bravo_hash": subToHash[sub]} if sub in subToHash else {})})
+			sub: clean_nan({**row.to_dict(), **({"bravo_hash": subToHash[sub]} if sub in subToHash else {})})
 			for sub, row in participants.iterrows()
 		}
 		return attrs, fieldInfo
@@ -74,11 +74,11 @@ class BidsReader:
 		if not path.exists():
 			return {}, {}
 		sessions = pd.read_csv(path, sep="\t").set_index("session_id")
-		fieldInfo = cleanNan(loadJson(subDir / f"{sub}_sessions.json"))
-		devices = loadJson(subDir / f"{sub}_devices.json")  # optional BRAVO extra
-		manifest = {e["Session"]: e for e in loadJson(subDir / f"{sub}_manifest.json").get("Sessions", [])}
+		fieldInfo = clean_nan(load_json(subDir / f"{sub}_sessions.json"))
+		devices = load_json(subDir / f"{sub}_devices.json")  # optional BRAVO extra
+		manifest = {e["Session"]: e for e in load_json(subDir / f"{sub}_manifest.json").get("Sessions", [])}
 		attrs = {
-			ses: cleanNan({**row.to_dict(), **devices.get(ses, {}), "manifest": manifest.get(ses, {})})
+			ses: clean_nan({**row.to_dict(), **devices.get(ses, {}), "manifest": manifest.get(ses, {})})
 			for ses, row in sessions.iterrows()
 		}
 		return attrs, fieldInfo
@@ -102,10 +102,10 @@ class BidsReader:
 				# still materialized here, and independently discoverable via
 				# _find_sidecar for any sibling group that needs it as inherited meta.
 				if ".json" in exts:
-					yield Attrs((*prefix, *entities.path(), suffix), cleanNan(loadJson(exts[".json"])))
+					yield Attrs((*prefix, *entities.path(), suffix), clean_nan(load_json(exts[".json"])))
 				continue
 
-			meta = cleanNan(loadJson(exts[".json"])) if ".json" in exts \
+			meta = clean_nan(load_json(exts[".json"])) if ".json" in exts \
 				else self._find_sidecar(dir_path, dict(entityItems), suffix)
 
 			ext = dataExts[0]
@@ -131,7 +131,7 @@ class BidsReader:
 				candidate.pop("sub", None)
 				candidate.pop("ses", None)
 				if candidateSuffix == suffix and all(entities.get(k) == v for k, v in candidate.items()):
-					return cleanNan(loadJson(jf))
+					return clean_nan(load_json(jf))
 			if d == self.root_dir:
 				return {}
 			d = d.parent
@@ -144,7 +144,7 @@ class BidsReader:
 			if not derivDir.is_dir():
 				continue
 			prefix = ("derivatives", derivDir.name)
-			yield Attrs(prefix, cleanNan(loadJson(derivDir / "dataset_description.json")))
+			yield Attrs(prefix, clean_nan(load_json(derivDir / "dataset_description.json")))
 			for subDir in sorted(derivDir.glob("sub-*")):
 				if not subDir.is_dir():
 					continue

@@ -11,8 +11,7 @@ from .writer import CodecConfig, Writer
 
 def _open_writer(storage_path: Path, codec: CodecConfig) -> Writer:
 	storage = icechunk.local_filesystem_storage(str(storage_path))
-	icechunk_repo = icechunk.Repository.open(storage) if icechunk.Repository.exists(storage) \
-		else icechunk.Repository.create(storage)
+	icechunk_repo = icechunk.Repository.open_or_create(storage)
 	session = icechunk_repo.writable_session("main")
 	return Writer(session, codec)
 
@@ -23,7 +22,7 @@ class Repo:
 	independently, plus one base_path/_dataset/ repo for attrs that aren't about any
 	single subject (dataset_description.json, participants.tsv field descriptions).
 	Build it up either by ingesting a Reader (bulk import) or by hand via
-	createSubject()/Subject.addVisit()/Visit.add*()."""
+	create_subject()/Subject.add_visit()/Visit.add*()."""
 
 	def __init__(self, base_path: str, codec: CodecConfig = None):
 		self.base_path = Path(base_path)
@@ -35,7 +34,7 @@ class Repo:
 			self._writers[sub_id] = _open_writer(self.base_path / sub_id, self._codec)
 		return self._writers[sub_id]
 
-	def createSubject(self, sub_id: str, attrs: dict = None) -> "Subject":
+	def create_subject(self, sub_id: str, attrs: dict = None) -> "Subject":
 		if attrs:
 			self._writer_for(sub_id).add_attrs(Attrs((), attrs))
 		return Subject(self, sub_id)
@@ -70,7 +69,7 @@ class Subject:
 		self._repo = repo
 		self.sub_id = sub_id
 
-	def addVisit(self, ses_id: str, attrs: dict = None) -> "Visit":
+	def add_visit(self, ses_id: str, attrs: dict = None) -> "Visit":
 		if attrs:
 			self._repo._writer_for(self.sub_id).add_attrs(Attrs((ses_id,), attrs))
 		return Visit(self._repo, self.sub_id, ses_id)
@@ -92,8 +91,8 @@ class Visit:
 			raise TypeError(f"unsupported recording/table payload type {type(payload)!r}")
 		self._repo._writer_for(self.sub_id).dispatch(item)
 
-	def addRecording(self, raw: "mne.io.BaseRaw", meta: dict = None, **entities):
+	def add_recording(self, raw: "mne.io.BaseRaw", meta: dict = None, **entities):
 		self.add("ieeg", raw, meta, **entities)
 
-	def addBehavioralTable(self, df: pd.DataFrame, meta: dict = None, **entities):
+	def add_behavioral_table(self, df: pd.DataFrame, meta: dict = None, **entities):
 		self.add("beh", df, meta, **entities)
