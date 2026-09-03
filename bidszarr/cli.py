@@ -42,9 +42,17 @@ def cmd_convert(args) -> int:
 		return 1
 
 	codec = CodecConfig(dtype=args.dtype) if args.dtype else None
-	repo = Repo(args.dest, codec=codec)
-	repo.ingest(_reader_for(args.source), progress=_progress(not args.quiet))
-	repo.save(args.message)
+
+	if args.workers and args.workers != 1:
+		from .parallel import convert_parallel
+		convert_parallel(args.source, args.dest, workers=args.workers, codec=codec,
+						 message=args.message, skip_existing=args.skip_existing)
+		repo = Repo(args.dest)
+	else:
+		repo = Repo(args.dest, codec=codec)
+		repo.ingest(_reader_for(args.source), progress=_progress(not args.quiet),
+					skip_existing=args.skip_existing)
+		repo.save(args.message)
 
 	if not args.quiet:
 		print(f"converted {args.source} -> {args.dest} ({len(repo.subjects())} subjects)")
@@ -91,6 +99,29 @@ def cmd_validate(args) -> int:
 	return 1
 
 
+def cmd_verify(args) -> int:
+	from .verify import verify
+
+	problems = verify(args.source, args.store, sample_limit=args.limit)
+	if not problems:
+		print(f"{args.store}: matches {args.source}")
+		return 0
+	print(f"{args.store}: {len(problems)} mismatch(es) against {args.source}")
+	for p in problems[:20]:
+		print(f"  - {p}")
+	if len(problems) > 20:
+		print(f"  ... and {len(problems) - 20} more")
+	return 1
+
+
+def cmd_export(args) -> int:
+	from .verify import export_bids
+
+	dest = export_bids(args.store, args.dest, subjects=args.subject)
+	print(f"exported {args.store} -> {dest}")
+	return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
 	parser = argparse.ArgumentParser(
 		prog="bidszarr",
@@ -106,6 +137,10 @@ def build_parser() -> argparse.ArgumentParser:
 	convert.add_argument("--dtype", choices=["int16", "float16"], help="how to pack sample data")
 	convert.add_argument("-q", "--quiet", action="store_true", help="no progress or summary")
 	convert.add_argument("--force", action="store_true", help="convert despite validation problems")
+	convert.add_argument("-j", "--workers", type=int, metavar="N",
+						 help="convert N subjects in parallel (BIDS sources only)")
+	convert.add_argument("--skip-existing", action="store_true",
+						 help="only write what isn't in the store yet")
 	convert.set_defaults(func=cmd_convert)
 
 	info = sub.add_parser("info", help="show what's in a store")
@@ -120,6 +155,18 @@ def build_parser() -> argparse.ArgumentParser:
 	validate = sub.add_parser("validate", help="check a source before converting")
 	validate.add_argument("source", help="BIDS directory, or a manifest .csv/.tsv")
 	validate.set_defaults(func=cmd_validate)
+
+	verify = sub.add_parser("verify", help="check a store faithfully matches its source")
+	verify.add_argument("source", help="the BIDS directory it was converted from")
+	verify.add_argument("store")
+	verify.add_argument("--limit", type=int, metavar="N", help="stop after N items (quick check)")
+	verify.set_defaults(func=cmd_verify)
+
+	export = sub.add_parser("export", help="write a store back out as a BIDS folder")
+	export.add_argument("store")
+	export.add_argument("dest", help="output BIDS directory")
+	export.add_argument("--subject", action="append", help="export only this subject (repeatable)")
+	export.set_defaults(func=cmd_export)
 	return parser
 
 

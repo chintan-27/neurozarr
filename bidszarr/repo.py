@@ -61,15 +61,36 @@ class Repo:
 			self._writer_for(sub_id).add_attrs(Attrs((), attrs))
 		return Subject(self, sub_id)
 
-	def ingest(self, reader: Reader, progress=None):
+	def ingest(self, reader: Reader, progress=None, skip_existing: bool = False):
 		"""Write everything a Reader yields. progress, if given, wraps the item
-		stream (e.g. tqdm) -- items are written as they arrive either way."""
+		stream (e.g. tqdm) -- items are written as they arrive either way.
+
+		skip_existing=True leaves anything already in the store alone, so re-running
+		after new data arrives only writes what's new instead of rewriting everything.
+		"""
+		existing = self._existing_paths() if skip_existing else None
 		items = reader.read()
 		for item in progress(items) if progress else items:
 			if isinstance(item, Attrs):
 				self._route_attrs(item)
-			else:
+			elif existing is None or not self._already_stored(item, existing):
 				self._writer_for(item.entities.sub).dispatch(item)
+
+	def _existing_paths(self) -> set:
+		"""Every group path already in the store, as "sub-XXX/rest/of/path"."""
+		paths = set()
+		for sub_id in self.subjects():
+			try:
+				root = self.root_of(sub_id)
+			except Exception:  # nothing committed for this subject yet
+				continue
+			paths.update(f"{sub_id}/{path}" for path, _ in root.members(max_depth=None))
+		return paths
+
+	def _already_stored(self, item, existing: set) -> bool:
+		group_path = "/".join((*item.prefix, *item.entities.path()))
+		name = "data" if isinstance(item, Recording) else item.name
+		return f"{group_path}/{name}" in existing
 
 	def _route_attrs(self, item: Attrs):
 		"""An Attrs' path may embed a sub-XXX segment anywhere in it (e.g. a
@@ -216,6 +237,18 @@ class Visit:
 
 	def add_behavioral_table(self, df: pd.DataFrame, meta: dict = None, **entities):
 		self.add("beh", df, meta, **entities)
+
+	def add_derivative(self, pipeline: str, payload, datatype: str = "ieeg",
+					   meta: dict = None, **entities):
+		"""Store a processed result under derivatives/<pipeline>/, the way BIDS
+		keeps outputs separate from raw data:
+
+		    visit.add_derivative("my-filter", filtered_raw, task="Stream", run=1)
+
+		Reads back like anything else, via recordings()/tables() or repo.find().
+		"""
+		meta = {"GeneratedBy": pipeline, **(meta or {})}
+		self.add(datatype, payload, meta, prefix=("derivatives", pipeline), **entities)
 
 	# ---- reading ----------------------------------------------------------
 

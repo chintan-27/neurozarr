@@ -22,8 +22,15 @@ class BidsReader:
 	matching sidecar wins). BRAVO-specific extras (.bravo_subject_ids.json,
 	_devices.json, _manifest.json) are used only if present -- never required."""
 
-	def __init__(self, root_dir):
+	def __init__(self, root_dir, subjects: list = None):
+		"""subjects, if given, restricts which sub-* directories are read (an empty
+		list reads none). Dataset-level metadata is always yielded, so workers
+		converting one subject each still agree on it."""
 		self.root_dir = Path(root_dir)
+		self.subjects = None if subjects is None else set(subjects)
+
+	def _wanted(self, sub: str) -> bool:
+		return self.subjects is None or sub in self.subjects
 
 	def read(self):
 		yield Attrs((), clean_nan(load_json(self.root_dir / "dataset_description.json")))
@@ -36,6 +43,8 @@ class BidsReader:
 			if not subDir.is_dir():
 				continue
 			sub = subDir.name
+			if not self._wanted(sub):
+				continue
 			if sub in participantAttrs:
 				yield Attrs((sub,), participantAttrs[sub])
 
@@ -149,6 +158,8 @@ class BidsReader:
 				if not subDir.is_dir():
 					continue
 				sub = subDir.name
+				if not self._wanted(sub):
+					continue
 				sesDirs = sorted(derivDir.glob(f"{sub}/ses-*"))
 				levels = [(d.name, d) for d in sesDirs if d.is_dir()] or [(None, subDir)]
 				for ses, sesDir in levels:

@@ -94,13 +94,31 @@ rec = subject.visit("ses-20220908").recording(task="Stream", run=1)
 values, meta = rec.data()             # ndarray in physical units + its metadata
 raw = rec.raw()                       # a real mne.io.RawArray, ready for mne
 df = rec.channels()                   # the channels table as a DataFrame
+events = rec.events()                 # events / annotations
 
 # search across every subject in the store
 for rec in repo.find(task="BrainSenseStream", acq="TD"):
     print(rec.path, rec.shape)
 ```
 
-Recordings are stored as int16 with per-channel scale/offset; `.data()` and `.raw()` undo that for you, so what you read back matches the source to floating-point precision. Table columns keep their dtypes — numbers come back as numbers.
+Recordings are stored as int16 with per-channel scale/offset; `.data()` and `.raw()` undo that for you, so what you read back matches the source to floating-point precision. Table columns keep their dtypes — numbers come back as numbers. `mne` annotations are stored as an events table and put back on the `Raw` when you read it.
+
+### Reading only part of a recording
+
+Data is chunked along time, so you can pull a window without fetching the whole array — the point of storing it this way:
+
+```python
+values, meta = rec.data(tmin=10, tmax=20)          # ten seconds, by time
+values, meta = rec.data(start=1000, stop=2000)     # or by sample index
+values, meta = rec.data(tmin=10, tmax=20, picks=["LFP_L"])   # one channel
+raw = rec.raw(tmin=10, tmax=20)                    # same window as an mne.Raw
+
+rec.array          # the underlying zarr array, slice it yourself
+rec.duration       # seconds
+rec.sfreq          # sampling rate
+```
+
+On a 3708-second recording, reading a 10-second window this way is ~8× faster than reading the whole thing.
 
 ## Versioning
 
@@ -129,16 +147,45 @@ Repo(icechunk.s3_storage(...))             # or a Storage you built yourself
 
 Extra keyword arguments (`region=`, `anonymous=`, `from_env=`, …) pass straight through to Icechunk.
 
+## Storing processed results
+
+Analysis outputs go under `derivatives/`, kept separate from raw data the way BIDS does it:
+
+```python
+filtered = raw.copy().filter(l_freq=1, h_freq=40)
+visit.add_derivative("my-filter", filtered, task="Stream", run=1)
+visit.add_derivative("my-stats", stats_dataframe, datatype="beh", task="Stream")
+```
+
+They read back like anything else — `subject.recordings()` returns them with `derivatives/my-filter/` in the path.
+
+## Faster and repeat conversions
+
+```python
+from bidszarr.parallel import convert_parallel
+
+convert_parallel("./BIDS", "./study.zarr", workers=6)   # one process per subject
+repo.ingest(reader, skip_existing=True)                  # only write what's new
+```
+
+Subjects are independent repositories, so they convert concurrently — on the reference dataset that's 85s → 55s, bounded by the largest subject. `skip_existing` makes a re-run after new data arrives ~11× faster, since it writes only what isn't stored yet.
+
 ## Command line
 
 ```bash
 bidszarr validate ./my_bids_dataset          # check before converting
 bidszarr convert ./my_bids_dataset ./out     # BIDS folder or manifest.csv
+bidszarr convert ./BIDS ./out -j 6           # one worker per subject
+bidszarr convert ./BIDS ./out --skip-existing   # only what's new
 bidszarr info ./out                          # subjects, visits, counts
 bidszarr history ./out                       # versions and tags
+bidszarr verify ./BIDS ./out                 # confirm the store matches its source
+bidszarr export ./out ./bids_again           # write the store back out as BIDS
 ```
 
 `convert` takes `--dtype {int16,float16}`, `-m` for the commit message, `-q` to quiet it, and `--force` to convert despite validation warnings. `-v` turns on debug logging.
+
+`export` writes BrainVision if `pybv` is installed, EDF if `edfio` is, and otherwise FIF (readable by mne, but not BIDS-conformant for ieeg/eeg).
 
 ## How the store is laid out
 

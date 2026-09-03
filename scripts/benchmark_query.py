@@ -1,61 +1,73 @@
+"""Query benchmarks against a converted store.
+
+	python scripts/benchmark_query.py ./study.zarr
+
+Ported to the bidszarr read API: each subject is its own Icechunk repository now,
+so there is no single root to index into with root["sub-001"].
+"""
+
 import random
+import sys
 import time
-from pathlib import Path
-import icechunk as ic
+
 import zarr
 
-REPO_DIR = Path("zarr")
+from bidszarr import Repo
+
+STORE = "zarr"
+SUBJECT = "sub-001"
+
 
 def timeIt(fn):
 	t0 = time.perf_counter()
 	result = fn()
 	return result, time.perf_counter() - t0
 
-def main():
-	storage = ic.local_filesystem_storage(str(REPO_DIR))
-	repo = ic.Repository.open(storage)
-	session = repo.readonly_session(branch="main")
-	root = zarr.open_group(store=session.store, mode="r")
 
-	sub = root["sub-001"]
-	runGroups = [(p, n) for p, n in sub.members(max_depth=None) if isinstance(n, zarr.Group) and "data" in n]
+def main(store=STORE, sub_id=SUBJECT):
+	repo = Repo(store)
+	subject = repo.subject(sub_id)
+	recordings = subject.recordings()
+	if not recordings:
+		print(f"{store}: no recordings for {sub_id}")
+		return
 
-	biggest = max(runGroups, key=lambda pn: pn[1]["data"].shape[-1])
-	_, t = timeIt(lambda: biggest[1]["data"][:])
-	print(f"single full-run read ({biggest[0]}, shape={biggest[1]['data'].shape}): {t*1000:.1f} ms")
+	biggest = max(recordings, key=lambda r: r.shape[-1])
+	_, t = timeIt(lambda: biggest.data())
+	print(f"single full-run read ({biggest.path}, shape={biggest.shape}): {t*1000:.1f} ms")
 
-	n = biggest[1]["data"].shape[-1]
+	n = biggest.shape[-1]
 	start = random.randint(0, max(0, n - 1000))
-	_, t = timeIt(lambda: biggest[1]["data"][:, start:start + 1000])
+	_, t = timeIt(lambda: biggest.data(start=start, stop=start + 1000))
 	print(f"1000-sample slice read from same run: {t*1000:.1f} ms")
 
-	chArr = runGroups[0][1]["channels"]
-	_, t = timeIt(lambda: chArr[:])
-	print(f"channels table decode ({chArr.shape}): {t*1000:.1f} ms")
+	_, t = timeIt(lambda: biggest.channels())
+	print(f"channels table decode: {t*1000:.1f} ms")
 
-	ses = sub["ses-20221007"]
-	def readSession():
-		for path, node in ses.members(max_depth=None):
-			if isinstance(node, zarr.Array) and path.endswith("data"):
-				_ = node[:]
-	_, t = timeIt(readSession)
-	print(f"full session read (ses-20221007, all runs): {t:.2f} s")
+	# one session, every run in it
+	ses_id = biggest.path.split("/")[1]
+	visit = subject.visit(ses_id)
+	_, t = timeIt(lambda: [r.data() for r in visit.recordings()])
+	print(f"full session read ({ses_id}, {len(visit.recordings())} runs): {t:.2f} s")
 
-	def readSubject():
-		for path, node in sub.members(max_depth=None):
-			if isinstance(node, zarr.Array) and path.endswith("data"):
-				_ = node[:]
-	_, t = timeIt(readSubject)
-	print(f"full subject read (sub-001, all sessions): {t:.2f} s")
+	_, t = timeIt(lambda: [r.data() for r in recordings])
+	print(f"full subject read ({sub_id}, {len(recordings)} runs): {t:.2f} s")
 
 	def scanAttrs():
 		count = 0
-		for _, node in root.members(max_depth=None):
-			_ = node.attrs.asdict()
-			count += 1
+		for sub in repo.subjects():
+			for _, node in repo.root_of(sub).members(max_depth=None):
+				_ = node.attrs.asdict()
+				count += 1
 		return count
+
 	count, t = timeIt(scanAttrs)
 	print(f"attrs-only scan, no chunk data ({count} nodes, full dataset): {t:.2f} s")
 
+	# cross-subject entity search, which the old single-repo layout had no API for
+	found, t = timeIt(lambda: list(repo.find(task="BrainSenseStream", acq="TD")))
+	print(f"cross-subject find(task=BrainSenseStream, acq=TD): {len(found)} hits in {t:.2f} s")
+
+
 if __name__ == "__main__":
-	main()
+	main(*sys.argv[1:])
