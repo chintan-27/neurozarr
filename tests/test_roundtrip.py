@@ -35,6 +35,45 @@ def test_raw_without_sfreq_raises_clearly(store):
 	assert rec.raw(sfreq=250.0).info["sfreq"] == 250.0  # explicit override still works
 
 
+def test_windowed_reads_match_the_full_read(written, raw):
+	rec = Repo(written).subject("sub-001").visit("ses-1").recording(task="Stream", run=1)
+	full, _ = rec.data()
+
+	by_sample, _ = rec.data(start=100, stop=200)
+	assert np.array_equal(by_sample, full[:, 100:200])
+
+	by_time, _ = rec.data(tmin=0.4, tmax=0.8)      # 250 Hz -> samples 100:200
+	assert np.array_equal(by_time, full[:, 100:200])
+
+	one_channel, _ = rec.data(picks=["LFP_R"])
+	assert np.array_equal(one_channel[0], full[1])
+
+
+def test_chunking_allows_partial_reads(store, raw):
+	"""A recording must not land in a single chunk, or a windowed read still
+	fetches the whole array."""
+	import mne
+
+	long_raw = mne.io.RawArray(
+		np.random.default_rng(1).normal(scale=1e-5, size=(2, 200_000)),
+		mne.create_info(["a", "b"], sfreq=250.0, ch_types="eeg"), verbose=False)
+	repo = Repo(store)
+	repo.create_subject("sub-001").add_visit("ses-1").add_recording(long_raw, task="Long")
+	repo.save("long")
+
+	rec = Repo(store).subject("sub-001").visit("ses-1").recording(task="Long")
+	assert rec.array.chunks[-1] < rec.shape[-1], "whole recording is one chunk"
+	assert rec.duration == 800.0
+	assert rec.sfreq == 250.0
+
+
+def test_raw_accepts_a_window(written):
+	rec = Repo(written).subject("sub-001").visit("ses-1").recording(task="Stream", run=1)
+	windowed = rec.raw(tmin=0.0, tmax=1.0)
+	assert windowed.get_data().shape == (2, 250)
+	assert rec.raw(picks=["LFP_L"]).ch_names == ["LFP_L"]
+
+
 def test_table_dtypes_are_restored(written, table):
 	tables = Repo(written).subject("sub-001").visit("ses-1").tables()
 	got = tables[0].df()

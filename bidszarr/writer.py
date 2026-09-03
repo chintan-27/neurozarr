@@ -19,12 +19,16 @@ class CodecConfig:
 	             data, best compression); "float16" stores rounded physical values.
 	bitround_k:  drop k low bits before compressing -- lossy, smaller. 0 disables.
 	filters/compressors: zarr codecs, defaulting to zstd level 19.
+	chunk_target_bytes / max_chunk_samples: chunking along time. Bigger chunks
+	             compress slightly better; smaller ones make windowed reads cheaper.
 	"""
 
 	filters: list = field(default_factory=list)
 	compressors: list = field(default_factory=lambda: [ZstdCodec(level=19)])
 	bitround_k: int = 0
 	dtype: str = "int16"
+	chunk_target_bytes: int = 8 * 1024 * 1024
+	max_chunk_samples: int = 65536
 
 
 class Writer:
@@ -85,7 +89,8 @@ class Writer:
 		group.create_array(
 			"data",
 			data=data,
-			chunks=util.chunk_shape(data.shape, data.itemsize),
+			chunks=util.chunk_shape(data.shape, data.itemsize,
+									self._codec.chunk_target_bytes, self._codec.max_chunk_samples),
 			filters=self._codec.filters,
 			compressors=self._codec.compressors,
 			overwrite=True,  # re-converting a source into an existing store replaces it
