@@ -44,6 +44,11 @@ class Writer:
 		physical = item.raw.get_data()
 		attrs = dict(item.meta)
 
+		# Keep what the Raw already knows, so a recording ingested without BIDS
+		# sidecars (manual API, ManifestReader) still reads back as a real Raw.
+		attrs.setdefault("SamplingFrequency", float(item.raw.info["sfreq"]))
+		attrs.setdefault("ch_names", list(item.raw.ch_names))
+
 		if self._codec.dtype == "float16":
 			data = physical.astype(np.float16)
 			attrs["data_note"] = "data is physical value in the channel's native unit, rounded to float16"
