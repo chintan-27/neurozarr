@@ -50,8 +50,11 @@ class Repo:
 			self._writer_for(sub_id).add_attrs(Attrs((), attrs))
 		return Subject(self, sub_id)
 
-	def ingest(self, reader: Reader):
-		for item in reader.read():
+	def ingest(self, reader: Reader, progress=None):
+		"""Write everything a Reader yields. progress, if given, wraps the item
+		stream (e.g. tqdm) -- items are written as they arrive either way."""
+		items = reader.read()
+		for item in progress(items) if progress else items:
 			if isinstance(item, Attrs):
 				self._route_attrs(item)
 			else:

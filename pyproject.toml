@@ -15,5 +15,11 @@ dependencies = [
     "numpy",
 ]
 
+[project.scripts]
+bidszarr = "bidszarr.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest", "tqdm"]
+
 [tool.setuptools.packages.find]
 include = ["bidszarr*"]

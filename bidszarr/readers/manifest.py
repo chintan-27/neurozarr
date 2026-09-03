@@ -28,6 +28,15 @@ class ManifestReader:
 		self.entity_cols = entity_cols
 		self.row_reader = row_reader
 
+		if row_reader is None:  # a row_reader handles its own columns
+			missing = [c for c in (sub_col, path_col) if c not in self.df.columns]
+			if missing:
+				raise ValueError(
+					f"manifest is missing required column(s) {missing} "
+					f"(has: {', '.join(map(str, self.df.columns))}). "
+					"Pass sub_col=/path_col= if your columns are named differently."
+				)
+
 	def read(self):
 		for _, row in self.df.iterrows():
 			if self.row_reader:
