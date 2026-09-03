@@ -153,11 +153,15 @@ class Repo:
 
 
 class Subject:
+	"""One participant, backed by their own Icechunk repository. Write with
+	add_visit(); read with visits()/recordings()/tables()."""
+
 	def __init__(self, repo: Repo, sub_id: str):
 		self._repo = repo
 		self.sub_id = sub_id
 
 	def add_visit(self, ses_id: str, attrs: dict = None) -> "Visit":
+		"""A session (in BIDS terms) -- typically one clinic visit or upload day."""
 		if attrs:
 			self._repo._writer_for(self.sub_id).add_attrs(Attrs((ses_id,), attrs))
 		return Visit(self._repo, self.sub_id, ses_id)
@@ -187,12 +191,17 @@ class Subject:
 
 
 class Visit:
+	"""One session of one subject. add_recording()/add_behavioral_table() are the
+	common cases; add() takes any datatype. Keyword arguments are BIDS entities
+	(task=, run=, acq=, ...) and decide where the data lands in the tree."""
+
 	def __init__(self, repo: Repo, sub_id: str, ses_id: str):
 		self._repo = repo
 		self.sub_id = sub_id
 		self.ses_id = ses_id
 
 	def add(self, datatype: str, payload, meta: dict = None, prefix: tuple = (), **entities):
+		"""Store an mne.Raw or a DataFrame under any datatype ("ieeg", "eeg", "beh", ...)."""
 		e = Entities(self.sub_id, self.ses_id, datatype, entities)
 		if isinstance(payload, mne.io.BaseRaw):
 			item = Recording(e, payload, meta or {}, prefix)

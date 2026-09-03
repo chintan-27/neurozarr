@@ -9,6 +9,14 @@ from ..items import Attrs, Recording, Table
 from .bids import MNE_READABLE_EXTS
 
 
+def _entity_value(value):
+	"""A whole number reads back as run-1, not run-1.0 -- pandas widens an int
+	column to float as soon as any row in it is blank."""
+	if isinstance(value, float) and value.is_integer():
+		return int(value)
+	return value
+
+
 class ManifestReader:
 	"""Reads arbitrary data described by a manifest table (DataFrame or CSV path):
 	one row per file, with columns naming the subject/session/datatype/entities and
@@ -68,7 +76,7 @@ class ManifestReader:
 	def _extra_entities(self, row) -> dict:
 		reserved = {self.path_col, self.sub_col, self.ses_col, self.datatype_col, self.name_col, self.meta_col}
 		cols = self.entity_cols if self.entity_cols is not None else [c for c in row.index if c not in reserved]
-		return {c: row[c] for c in cols if c in row and pd.notna(row[c])}
+		return {c: _entity_value(row[c]) for c in cols if c in row and pd.notna(row[c])}
 
 	def _parse_meta(self, row) -> dict:
 		if self.meta_col not in row or pd.isna(row[self.meta_col]):

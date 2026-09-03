@@ -6,7 +6,14 @@ build-backend = "setuptools.build_meta"
 name = "bidszarr"
 version = "0.1.0"
 description = "Convert neural/behavioral recordings into a BIDS-structured Zarr/Icechunk store"
+readme = "README.md"
 requires-python = ">=3.11"
+keywords = ["bids", "zarr", "icechunk", "neuroscience", "ieeg", "eeg", "dbs"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
 dependencies = [
     "icechunk",
     "pandas",
@@ -23,3 +30,9 @@ dev = ["pytest", "tqdm"]
 
 [tool.setuptools.packages.find]
 include = ["bidszarr*"]
+
+[tool.setuptools.package-data]
+bidszarr = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

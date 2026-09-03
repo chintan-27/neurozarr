@@ -48,6 +48,18 @@ def test_row_reader_bypasses_all_interpretation():
 	assert list(reader.read()) == [sentinel]
 
 
+def test_whole_number_entities_do_not_become_floats(tsv_file):
+	"""A blank in a numeric column makes pandas widen it to float -- run must
+	still land as run-1, not run-1.0."""
+	df = pd.DataFrame([
+		{"sub": "sub-001", "run": 1, "path": str(tsv_file)},
+		{"sub": "sub-001", "run": None, "path": str(tsv_file)},
+	])
+	items = list(ManifestReader(df).read())
+	assert items[0].entities.extra == {"run": 1}
+	assert items[0].entities.group_name() == "run-1"
+
+
 def test_missing_required_column_fails_upfront():
 	with pytest.raises(ValueError, match="missing required column"):
 		ManifestReader(pd.DataFrame([{"subject": "sub-001", "filepath": "x.edf"}]))

@@ -13,6 +13,14 @@ from .log import log_mem
 
 @dataclass
 class CodecConfig:
+	"""How sample data is packed and compressed.
+
+	dtype:       "int16" packs with per-channel scale/offset (lossless for EDF-sourced
+	             data, best compression); "float16" stores rounded physical values.
+	bitround_k:  drop k low bits before compressing -- lossy, smaller. 0 disables.
+	filters/compressors: zarr codecs, defaulting to zstd level 19.
+	"""
+
 	filters: list = field(default_factory=list)
 	compressors: list = field(default_factory=lambda: [ZstdCodec(level=19)])
 	bitround_k: int = 0
