@@ -1,33 +1,74 @@
 API reference
 =============
 
-Items and entities
--------------------
+Everything below is importable directly from ``bidszarr``.
 
-.. automodule:: bidszarr.items
-.. automodule:: bidszarr.entities
+Repo, Subject, Visit
+--------------------
 
-Writing
--------
+.. autoclass:: bidszarr.Repo
+   :members:
 
-.. automodule:: bidszarr.repo
-.. automodule:: bidszarr.writer
+.. autoclass:: bidszarr.Subject
+   :members:
 
-Reading
--------
+.. autoclass:: bidszarr.Visit
+   :members:
 
-.. automodule:: bidszarr.read
+Data model
+----------
+
+.. autoclass:: bidszarr.Entities
+   :members:
+
+.. autoclass:: bidszarr.Recording
+   :members:
+
+.. autoclass:: bidszarr.Table
+   :members:
+
+.. autoclass:: bidszarr.Attrs
+   :members:
+
+.. autoclass:: bidszarr.Reader
+   :members:
 
 Readers
 -------
 
-.. automodule:: bidszarr.readers.bids
-.. automodule:: bidszarr.readers.manifest
+.. autoclass:: bidszarr.BidsReader
+   :members:
+
+.. autoclass:: bidszarr.ManifestReader
+   :members:
+
+Reading data back
+------------------
+
+.. autoclass:: bidszarr.RecordingView
+   :members:
+
+.. autoclass:: bidszarr.TableView
+   :members:
+
+Writing
+-------
+
+.. autoclass:: bidszarr.Writer
+   :members:
+
+.. autoclass:: bidszarr.CodecConfig
+   :members:
 
 Storage, validation, and verification
 --------------------------------------
 
-.. automodule:: bidszarr.storage
-.. automodule:: bidszarr.validate
-.. automodule:: bidszarr.verify
-.. automodule:: bidszarr.parallel
+.. autofunction:: bidszarr.storage_from
+
+.. autofunction:: bidszarr.set_verbosity
+
+.. autofunction:: bidszarr.validate_source
+
+.. autofunction:: bidszarr.verify
+
+.. autofunction:: bidszarr.export_bids
