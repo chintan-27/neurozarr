@@ -16,12 +16,12 @@ from .log import log_mem
 class CodecConfig:
 	"""How sample data is packed and compressed.
 
-	dtype:       "int16" packs with per-channel scale/offset (lossless for EDF-sourced
-	             data, best compression); "float16" stores rounded physical values.
-	bitround_k:  drop k low bits before compressing -- lossy, smaller. 0 disables.
-	filters/compressors: zarr codecs, defaulting to zstd level 19.
-	chunk_target_bytes / max_chunk_samples: chunking along time. Bigger chunks
-	             compress slightly better; smaller ones make windowed reads cheaper.
+	- ``dtype``: "int16" packs with per-channel scale/offset (lossless for
+	  EDF-sourced data, best compression); "float16" stores rounded physical values.
+	- ``bitround_k``: drop k low bits before compressing -- lossy, smaller. 0 disables.
+	- ``filters``/``compressors``: zarr codecs, defaulting to zstd level 19.
+	- ``chunk_target_bytes`` / ``max_chunk_samples``: chunking along time. Bigger
+	  chunks compress slightly better; smaller ones make windowed reads cheaper.
 	"""
 
 	filters: list = field(default_factory=list)

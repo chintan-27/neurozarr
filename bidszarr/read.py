@@ -100,10 +100,11 @@ class RecordingView:
 		is applied when the samples were packed as int16.
 
 		Reads only the window asked for, so a few seconds out of a long recording
-		costs a few chunks rather than the whole array:
-		  data(start=1000, stop=2000)      by sample index
-		  data(tmin=10, tmax=20)           by seconds (needs a stored sfreq)
-		  data(picks=["LFP_L"])            one channel
+		costs a few chunks rather than the whole array::
+
+		    data(start=1000, stop=2000)      # by sample index
+		    data(tmin=10, tmax=20)           # by seconds (needs a stored sfreq)
+		    data(picks=["LFP_L"])            # one channel
 		"""
 		meta = self.meta
 		if tmin is not None or tmax is not None:

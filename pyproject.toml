@@ -27,6 +27,7 @@ bidszarr = "bidszarr.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest", "tqdm"]
+docs = ["sphinx", "myst-parser", "furo"]
 
 [tool.setuptools.packages.find]
 include = ["bidszarr*"]

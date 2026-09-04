@@ -18,11 +18,11 @@ from .entities import Entities
 class Recording:
 	"""One continuous signal recording (an mne.Raw), e.g. an EDF/BrainVision file.
 
-	entities: where it belongs in the BIDS tree (sub/ses/datatype + task/run/acq/...).
-	raw:      the loaded mne.io.BaseRaw; the Writer reads calibration off it directly.
-	meta:     sidecar-style metadata (an ieeg.json's contents, or whatever the
-	          source has); merged with what the Writer infers from raw itself.
-	prefix:   extra path segments before the entities, e.g. ("derivatives", "my-filter").
+	- ``entities``: where it belongs in the BIDS tree (sub/ses/datatype + task/run/acq/...).
+	- ``raw``: the loaded mne.io.BaseRaw; the Writer reads calibration off it directly.
+	- ``meta``: sidecar-style metadata (an ieeg.json's contents, or whatever the
+	  source has); merged with what the Writer infers from raw itself.
+	- ``prefix``: extra path segments before the entities, e.g. ("derivatives", "my-filter").
 	"""
 	entities: Entities
 	raw: "mne.io.BaseRaw"
@@ -34,8 +34,8 @@ class Recording:
 class Table:
 	"""A row-per-observation table (channels.tsv, events.tsv, a behavioral log, ...).
 
-	name: the table's name within its group ("channels", "events", "table", ...).
-	df:   the data; column dtypes are recorded so reads cast back faithfully.
+	- ``name``: the table's name within its group ("channels", "events", "table", ...).
+	- ``df``: the data; column dtypes are recorded so reads cast back faithfully.
 	"""
 	entities: Entities
 	name: str

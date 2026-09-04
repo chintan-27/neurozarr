@@ -236,3 +236,13 @@ pytest                    # ~30 tests, all in-memory, no files touched
 ```
 
 Tests run against `memory://` stores, so they are fast and leave nothing behind.
+
+## Docs
+
+This README *is* the docs, rendered as a website with the API reference alongside it:
+
+```bash
+pip install -e ".[docs]"
+sphinx-build -b html docs docs/_build
+open docs/_build/index.html
+```

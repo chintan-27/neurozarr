@@ -6,3 +6,4 @@ zarr/
 COMPRESSOR_REPORT.html
 CLAUDE.md
 *.egg-info/
+docs/_build/

@@ -21,8 +21,8 @@ class ManifestReader:
 	"""Reads arbitrary data described by a manifest table (DataFrame or CSV path):
 	one row per file, with columns naming the subject/session/datatype/entities and
 	a path to the file. No assumption about folder layout or naming convention --
-	the caller supplies the mapping. Column names are configurable via *_col kwargs
-	so an existing table doesn't need to be renamed first. Dispatch by file
+	the caller supplies the mapping. Column names are configurable via ``*_col``
+	kwargs so an existing table doesn't need to be renamed first. Dispatch by file
 	extension mirrors BidsReader: .tsv/.csv -> Table, MNE-readable -> Recording,
 	anything else -> a non-crashing Attrs fallback. A row_reader callback bypasses
 	all of this per-row for fully custom handling."""
