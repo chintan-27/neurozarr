@@ -66,7 +66,25 @@ ManifestReader(df, row_reader=lambda row: my_custom_item(row))  # full control p
 
 Files are opened by extension: `.tsv`/`.csv` with pandas, signal formats with `mne.io.read_raw` (EDF, BDF, GDF, BrainVision, EEGLAB, FIF, CNT). Anything else is recorded as a reference rather than crashing the run.
 
-### 3. By hand
+### 3. By writing a Reader
+
+Neither built-in reader fits your source? Implement `bidszarr.Reader` — one method, `read()`, yielding `Recording`/`Table`/`Attrs` (see `bidszarr/items.py`):
+
+```python
+from bidszarr import Recording, Table, Attrs, Entities
+
+class MyReader:
+    def read(self):
+        yield Attrs((), {"Name": "my study"})                      # dataset-wide
+        yield Recording(Entities("sub-001", "ses-1", "ieeg", {"task": "Rest"}), my_raw)
+        yield Table(Entities("sub-001", "ses-1", "beh", {}), "log", my_dataframe)
+
+repo.ingest(MyReader())
+```
+
+The Writer is the only thing that touches Zarr, so however you read your source, the output is guaranteed BIDS-shaped.
+
+### 4. By hand
 
 ```python
 repo = Repo("./study.zarr")
