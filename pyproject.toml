@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "bidszarr"
 version = "0.1.0"
-description = "Convert neural/behavioral recordings into a BIDS-structured Zarr/Icechunk store"
+description = "Put neural/behavioral recordings into a versioned, cloud-ready Zarr/Icechunk store"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

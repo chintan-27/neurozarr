@@ -126,13 +126,13 @@ def cmd_export(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
 	parser = argparse.ArgumentParser(
 		prog="bidszarr",
-		description="Convert recordings into a BIDS-structured Zarr/Icechunk store, and inspect one.",
+		description="Put recordings into a versioned Zarr/Icechunk store, and inspect one.",
 	)
 	parser.add_argument("-v", "--verbose", action="store_true", help="show debug logging")
 	sub = parser.add_subparsers(dest="command", required=True)
 
-	convert = sub.add_parser("convert", help="convert a BIDS folder or manifest into a store")
-	convert.add_argument("source", help="BIDS directory, or a manifest .csv/.tsv")
+	convert = sub.add_parser("convert", help="convert a manifest or BIDS dataset into a store")
+	convert.add_argument("source", help="a manifest .csv/.tsv, or a BIDS directory")
 	convert.add_argument("dest", help="output store: a path or s3://, gs://, az:// URI")
 	convert.add_argument("-m", "--message", default="convert", help="commit message")
 	convert.add_argument("--dtype", choices=["int16", "float16"], help="how to pack sample data")
@@ -154,7 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
 	history.set_defaults(func=cmd_history)
 
 	validate = sub.add_parser("validate", help="check a source before converting")
-	validate.add_argument("source", help="BIDS directory, or a manifest .csv/.tsv")
+	validate.add_argument("source", help="a manifest .csv/.tsv, or a BIDS directory")
 	validate.set_defaults(func=cmd_validate)
 
 	verify = sub.add_parser("verify", help="check a store faithfully matches its source")

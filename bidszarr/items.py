@@ -1,9 +1,9 @@
 """The standardized item stream every Reader yields and every Writer consumes.
 
 A Reader's only job is to turn its source format into a stream of these three
-types; a Writer's only job is to place them correctly in a BIDS-shaped Zarr
-tree. Write a new Reader by yielding these -- nothing else touches Zarr, so
-the output structure can't drift no matter what the source looks like."""
+types; a Writer's only job is to place them correctly in the store's tree.
+Write a new Reader by yielding these -- nothing else touches Zarr, so the
+output structure can't drift no matter what the source looks like."""
 
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Protocol

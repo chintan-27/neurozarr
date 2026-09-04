@@ -14,7 +14,7 @@ into a stream of three standardized items:
 | {class}`~bidszarr.Table` | A row-per-observation table, as a DataFrame |
 | {class}`~bidszarr.Attrs` | Metadata with no data of its own, attached to a point in the tree |
 
-The **writer** understands BIDS structure, and is the only code in the package
+The **writer** owns the store's structure, and is the only code in the package
 that touches Zarr. It decides where each item lands, how sample data is packed,
 and how tables are stored.
 
@@ -23,8 +23,27 @@ malformed store because it cannot write to the store at all — it can only
 describe what it found. Supporting a new source format means writing a reader
 and changing nothing else.
 
-{class}`~bidszarr.Entities` carries the BIDS entities for an item — subject,
-session, datatype, and the rest — and decides the path it maps to.
+{class}`~bidszarr.Entities` carries the entities for an item — subject, session,
+datatype, and the rest — and decides the path it maps to.
+
+## Why the layout follows BIDS
+
+The store files data by subject → session → datatype → entities, which is BIDS
+naming applied to a Zarr tree. This is a decision about the *output* only.
+Nothing about your input has to resemble BIDS, and most of the ways to fill a
+store never mention it.
+
+The convention is worth borrowing because the problem it solves is real:
+recordings need to be identified by *what they are* — which participant, which
+session, which task, which run — rather than by whatever filename they arrived
+with. BIDS is a well-considered answer to that, so there is little reason to
+invent a different one. Following it also means the tree stays legible to anyone
+who has seen a BIDS dataset, and that exporting back out to a real BIDS folder
+is mostly a matter of writing files where the names already say they go.
+
+What this does *not* mean: the store is not a BIDS dataset, and is not
+validated as one. It is a Zarr store whose internal naming follows those
+conventions.
 
 ## One repository per subject
 

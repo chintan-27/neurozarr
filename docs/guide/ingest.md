@@ -1,18 +1,13 @@
 # Getting data in
 
-## From a BIDS folder
-
-`BidsReader` handles any valid BIDS dataset generically: subjects and sessions are discovered by directory, datatype folders (`ieeg`, `eeg`, `meg`, `beh`, `anat`, …) are walked without a fixed list, and JSON sidecars are resolved through the BIDS **inheritance principle** (the nearest matching sidecar wins).
-
-```python
-repo = Repo("./study.zarr")
-repo.ingest(BidsReader("./my_bids_dataset"))
-repo.save("initial conversion")
-```
+There are four ways to fill a store. They all produce the same result, so pick
+whichever matches the shape your data is already in.
 
 ## From a pile of files, via a manifest
 
-No standard layout? Describe your files in a table — one row per file — and `ManifestReader` does the rest.
+The general case: describe your files in a table, one row per file, and
+{class}`~bidszarr.ManifestReader` does the rest. Nothing is assumed about folder
+layout or naming.
 
 | sub | ses | datatype | task | path |
 |---|---|---|---|---|
@@ -20,23 +15,57 @@ No standard layout? Describe your files in a table — one row per file — and 
 | sub-001 | ses-1 | beh | Log | /data/patient1_log.csv |
 
 ```python
-from bidszarr import ManifestReader
+from bidszarr import Repo, ManifestReader
 
+repo = Repo("./study.zarr")
 repo.ingest(ManifestReader("manifest.csv"))
+repo.save("initial conversion")
 ```
 
-Columns beyond the reserved ones (`sub`, `ses`, `datatype`, `name`, `meta`, `path`) become BIDS entities, so `task`/`run`/`acq` land where they should. Column names are configurable, and a `row_reader` callback handles anything unusual:
+Six column names are reserved — `sub`, `ses`, `datatype`, `name`, `meta` and
+`path` — and every other column becomes an entity, so a `task` or `run` column
+files itself correctly. If your table already uses different names, say so
+rather than renaming it:
 
 ```python
-ManifestReader(df, sub_col="subject", path_col="filepath")     # your column names
-ManifestReader(df, row_reader=lambda row: my_custom_item(row))  # full control per row
+ManifestReader(df, sub_col="subject", path_col="filepath")
 ```
 
-Files are opened by extension: `.tsv`/`.csv` with pandas, signal formats with `mne.io.read_raw` (EDF, BDF, GDF, BrainVision, EEGLAB, FIF, CNT). Anything else is recorded as a reference rather than crashing the run.
+And when a row needs handling the columns can't express, take over entirely:
 
-## By writing a Reader
+```python
+ManifestReader(df, row_reader=lambda row: my_custom_item(row))
+```
 
-Neither built-in reader fits your source? Implement {class}`~bidszarr.Reader` — one method, `read()`, yielding {class}`~bidszarr.Recording`/{class}`~bidszarr.Table`/{class}`~bidszarr.Attrs`:
+Files are opened by extension: `.tsv`/`.csv` with pandas, and signal formats
+through `mne.io.read_raw` (EDF, BDF, GDF, BrainVision, EEGLAB, FIF, CNT).
+Anything else is recorded as a reference to the file rather than failing the
+run.
+
+## By hand
+
+When you are building a dataset programmatically, or only have a few
+recordings, skip the readers entirely:
+
+```python
+repo = Repo("./study.zarr")
+
+subject = repo.create_subject("sub-001", attrs={"age": 63, "diagnosis": "PD"})
+visit = subject.add_visit("ses-20220908", attrs={"device": "Percept PC"})
+
+visit.add_recording(my_mne_raw, task="Stream", run=1)
+visit.add_behavioral_table(my_dataframe, task="TherapyHistory")
+
+repo.save("added sub-001")
+```
+
+Keyword arguments are entities, and decide where each item lands.
+
+## By writing a reader
+
+For a source format of your own, implement {class}`~bidszarr.Reader`: one
+method, `read()`, yielding {class}`~bidszarr.Recording`,
+{class}`~bidszarr.Table` and {class}`~bidszarr.Attrs` items.
 
 ```python
 from bidszarr import Recording, Table, Attrs, Entities
@@ -50,18 +79,26 @@ class MyReader:
 repo.ingest(MyReader())
 ```
 
-The Writer is the only thing that touches Zarr, so however you read your source, the output is guaranteed BIDS-shaped.
+There is no base class to inherit from — `Reader` is a `Protocol`, so anything
+with a matching `read()` works. Since the writer is the only thing that touches
+Zarr, a reader cannot produce a malformed store however unusual your source is.
 
-## By hand
+## From a BIDS dataset
+
+If your data already follows BIDS, {class}`~bidszarr.BidsReader` reads it
+directly:
 
 ```python
-repo = Repo("./study.zarr")
+from bidszarr import BidsReader
 
-subject = repo.create_subject("sub-001", attrs={"age": 63, "diagnosis": "PD"})
-visit = subject.add_visit("ses-20220908", attrs={"device": "Percept PC"})
-
-visit.add_recording(my_mne_raw, task="Stream", run=1)
-visit.add_behavioral_table(my_dataframe, task="TherapyHistory")
-
-repo.save("added sub-001")
+repo.ingest(BidsReader("./my_bids_dataset"))
 ```
+
+It handles any valid dataset generically: subjects and sessions are discovered
+by directory rather than requiring a `sessions.tsv`, datatype directories
+(`ieeg`, `eeg`, `meg`, `beh`, `anat`, …) are walked without a fixed list, and
+JSON sidecars are resolved through the BIDS **inheritance principle**, where the
+nearest matching sidecar wins.
+
+This is a convenience for data that happens to be in that form. The store's own
+layout borrows BIDS conventions either way — see {doc}`layout`.

@@ -11,8 +11,12 @@ Convert a source into a store.
 bidszarr convert <source> <dest>
 ```
 
-`source` is either a BIDS dataset directory or a manifest `.csv`/`.tsv`, chosen
+`source` is either a manifest `.csv`/`.tsv` or a BIDS dataset directory, chosen
 by extension. `dest` is a path or a cloud URI.
+
+These are the two sources the command line understands. The other ways of
+filling a store — building it up by hand, or with a reader of your own — are
+Python APIs, since they need code either way.
 
 The source is validated first, and the conversion stops if anything fatal turns
 up. Options:
@@ -33,6 +37,7 @@ A progress bar appears if `tqdm` is installed.
 Check a source before converting it. Writes nothing.
 
 ```bash
+bidszarr validate ./manifest.csv
 bidszarr validate ./my_bids_dataset
 ```
 

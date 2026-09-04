@@ -1,18 +1,23 @@
 # bidszarr
 
-Convert neural and behavioral recordings into a **Zarr/Icechunk store that is always BIDS-shaped inside**, whatever shape the source data is in.
+Put neural and behavioral recordings into a **versioned, cloud-ready Zarr/Icechunk store** — whatever shape your source data is in.
 
-Point it at a BIDS folder, describe a pile of loose files in a table, or build a dataset up by hand — the output is always the same clean, versioned, cloud-ready structure.
+Add recordings one at a time, describe a pile of files in a table, or write a reader for your own format. However the data goes in, it comes out with the same predictable structure, a full version history, and fast reads of any slice of it.
 
 ```python
-from bidszarr import Repo, BidsReader
+from bidszarr import Repo
 
 repo = Repo("./study.zarr")
-repo.ingest(BidsReader("./my_bids_dataset"))
-repo.save("initial conversion")
+
+visit = repo.create_subject("sub-001").add_visit("ses-1")
+visit.add_recording(my_raw, task="Rest", run=1)
+repo.save("first recording")
+
+rec = repo.subject("sub-001").visit("ses-1").recording(task="Rest", run=1)
+values, meta = rec.data(tmin=10, tmax=20)     # ten seconds, without reading the rest
 ```
 
-Reading a source format and writing a well-structured store are two different problems, so they are two different things here: a **Reader** understands *your* data and yields standardized items; the **Writer** understands *BIDS structure* and is the only thing that touches Zarr. Add support for a new input format by writing a Reader — the output structure can't drift, because nothing else can write to the store.
+Inside the store, data is filed by subject → session → datatype → entities, following BIDS naming conventions. That is a choice about the *output*, not a requirement on your *input* — see {doc}`guide/layout`. You do not need BIDS-formatted data to use this; if you happen to have some, there is a reader for it.
 
 ```{toctree}
 :hidden:

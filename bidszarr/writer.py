@@ -54,7 +54,8 @@ class CodecConfig:
 
 
 class Writer:
-	"""Internal engine that writes standardized items into a BIDS-shaped Zarr tree.
+	"""Internal engine that places standardized items in the store's tree, which
+	is laid out by subject/session/datatype/entities following BIDS naming.
 	Not user-facing directly -- use Repo/Subject/Visit, which own a Writer."""
 
 	def __init__(self, session: icechunk.Session, codec: CodecConfig | None = None):

@@ -1,50 +1,51 @@
 # bidszarr
 
-Convert neural and behavioral recordings into a **Zarr/Icechunk store that is always BIDS-shaped inside**, whatever shape the source data is in.
+Put neural and behavioral recordings into a **versioned, cloud-ready Zarr/Icechunk store** — whatever shape your source data is in.
 
-Point it at a BIDS folder, describe a pile of loose files in a table, or build a dataset up by hand — the output is always the same clean, versioned, cloud-ready structure.
+Add recordings one at a time, describe a pile of files in a table, or write a reader for your own format. However the data goes in, it comes out with the same predictable structure, a full version history, and fast reads of any slice of it.
 
 ```python
-from bidszarr import Repo, BidsReader
+from bidszarr import Repo
 
 repo = Repo("./study.zarr")
-repo.ingest(BidsReader("./my_bids_dataset"))
-repo.save("initial conversion")
+
+visit = repo.create_subject("sub-001").add_visit("ses-1")
+visit.add_recording(my_raw, task="Rest", run=1)
+repo.save("first recording")
+
+rec = repo.subject("sub-001").visit("ses-1").recording(task="Rest", run=1)
+values, meta = rec.data(tmin=10, tmax=20)     # ten seconds, without reading the rest
 ```
 
 ## Install
 
 ```bash
 pip install -e .          # from a checkout
-pip install -e ".[dev]"   # plus pytest and tqdm
+pip install -e ".[dev]"   # plus pytest, mypy and tqdm
 ```
 
 Requires Python ≥ 3.11. Dependencies: `icechunk`, `zarr`, `mne`, `pandas`, `numpy`.
 
-## Why
+## How the store is organized
+
+Inside the store, data is filed by subject → session → datatype → entities, following **BIDS naming conventions**. That is a choice about the *output*, not a requirement on your *input*: it gives every dataset you convert the same predictable shape, keeps entities like `task`, `run` and `acq` meaningful, and makes exporting back out to BIDS straightforward for tools that expect it.
+
+You do not need BIDS-formatted data to use this. If you happen to have some, there is a reader for it.
+
+## Why readers and the writer are separate
 
 Reading a source format and writing a well-structured store are two different problems, so they are two different things here:
 
 - A **Reader** understands *your* data and yields standardized items (`Recording`, `Table`, `Attrs`).
-- The **Writer** understands *BIDS structure* and is the only thing that touches Zarr.
+- The **Writer** owns the store's structure, and is the only thing that touches Zarr.
 
-Add support for a new input format by writing a Reader — the output structure is guaranteed to stay consistent, because nothing else can write to the store.
+Support a new input format by writing a Reader — the output stays consistent, because nothing else can write to the store.
 
-## Three ways to get data in
+## Getting data in
 
-### 1. From a BIDS folder
+### 1. From a pile of files, via a manifest
 
-`BidsReader` handles any valid BIDS dataset generically: subjects and sessions are discovered by directory, datatype folders (`ieeg`, `eeg`, `meg`, `beh`, `anat`, …) are walked without a fixed list, and JSON sidecars are resolved through the BIDS **inheritance principle** (the nearest matching sidecar wins).
-
-```python
-repo = Repo("./study.zarr")
-repo.ingest(BidsReader("./my_bids_dataset"))
-repo.save("initial conversion")
-```
-
-### 2. From a pile of files, via a manifest
-
-No standard layout? Describe your files in a table — one row per file — and `ManifestReader` does the rest.
+Describe your files in a table — one row per file — and `ManifestReader` does the rest. No assumptions about folder layout or naming.
 
 | sub | ses | datatype | task | path |
 |---|---|---|---|---|
@@ -66,6 +67,20 @@ ManifestReader(df, row_reader=lambda row: my_custom_item(row))  # full control p
 
 Files are opened by extension: `.tsv`/`.csv` with pandas, signal formats with `mne.io.read_raw` (EDF, BDF, GDF, BrainVision, EEGLAB, FIF, CNT). Anything else is recorded as a reference rather than crashing the run.
 
+### 2. By hand
+
+```python
+repo = Repo("./study.zarr")
+
+subject = repo.create_subject("sub-001", attrs={"age": 63, "diagnosis": "PD"})
+visit = subject.add_visit("ses-20220908", attrs={"device": "Percept PC"})
+
+visit.add_recording(my_mne_raw, task="Stream", run=1)
+visit.add_behavioral_table(my_dataframe, task="TherapyHistory")
+
+repo.save("added sub-001")
+```
+
 ### 3. By writing a Reader
 
 Neither built-in reader fits your source? Implement `bidszarr.Reader` — one method, `read()`, yielding `Recording`/`Table`/`Attrs` (see `bidszarr/items.py`):
@@ -82,20 +97,16 @@ class MyReader:
 repo.ingest(MyReader())
 ```
 
-The Writer is the only thing that touches Zarr, so however you read your source, the output is guaranteed BIDS-shaped.
+The Writer is the only thing that touches Zarr, so however you read your source, the output keeps the same structure.
 
-### 4. By hand
+### 4. From a BIDS dataset
+
+Already have BIDS on disk? `BidsReader` reads any valid dataset generically — subjects and sessions discovered by directory, datatype folders walked without a fixed list, and JSON sidecars resolved through the BIDS inheritance principle.
 
 ```python
-repo = Repo("./study.zarr")
+from bidszarr import BidsReader
 
-subject = repo.create_subject("sub-001", attrs={"age": 63, "diagnosis": "PD"})
-visit = subject.add_visit("ses-20220908", attrs={"device": "Percept PC"})
-
-visit.add_recording(my_mne_raw, task="Stream", run=1)
-visit.add_behavioral_table(my_dataframe, task="TherapyHistory")
-
-repo.save("added sub-001")
+repo.ingest(BidsReader("./my_bids_dataset"))
 ```
 
 ## Reading data back

@@ -1,12 +1,22 @@
-"""Convert neural and behavioral recordings into a BIDS-shaped Zarr/Icechunk store.
+"""Put neural and behavioral recordings into a versioned Zarr/Icechunk store.
 
-Point :class:`Repo` at a destination, hand :meth:`Repo.ingest` a reader, and save::
+Point :class:`Repo` at a destination, add data, and save::
 
-    from bidszarr import Repo, BidsReader
+    from bidszarr import Repo
 
     repo = Repo("./study.zarr")
-    repo.ingest(BidsReader("./my_bids_dataset"))
-    repo.save("initial conversion")
+    visit = repo.create_subject("sub-001").add_visit("ses-1")
+    visit.add_recording(raw, task="Rest", run=1)
+    repo.save("first recording")
+
+To fill a store in bulk instead, hand :meth:`Repo.ingest` a reader:
+:class:`ManifestReader` for files described in a table, :class:`BidsReader`
+for data already in BIDS form, or one of your own implementing
+:class:`Reader`.
+
+Inside the store, data is filed by subject, session, datatype and entities,
+following BIDS naming conventions -- a choice about the output, not a
+requirement on the input.
 """
 
 from importlib.metadata import PackageNotFoundError, version
