@@ -43,3 +43,7 @@ First release.
 - mne annotations stored as an events table and restored on read.
 - Sample data packed as int16 with a per-channel scale and offset, chunked along
   time so windowed reads fetch only the chunks they need.
+- Type annotations throughout, with `py.typed` so downstream type checkers use
+  them. Values that can be absent — `RecordingView.sfreq` and
+  `RecordingView.duration` — are typed as optional, so a checker catches
+  `rec.duration / 2` rather than letting it fail at runtime.
