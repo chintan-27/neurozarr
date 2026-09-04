@@ -1,7 +1,9 @@
 import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any, Iterator
 
-import mne
+import mne  # type: ignore[import-untyped]  # mne ships no type information
 import pandas as pd
 
 from ..entities import Entities
@@ -9,7 +11,7 @@ from ..items import Attrs, Recording, Table
 from .bids import MNE_READABLE_EXTS
 
 
-def _entity_value(value):
+def _entity_value(value: Any) -> Any:
 	"""A whole number reads back as run-1, not run-1.0 -- pandas widens an int
 	column to float as soon as any row in it is blank."""
 	if isinstance(value, float) and value.is_integer():
@@ -60,9 +62,11 @@ class ManifestReader:
 	>>> repo.ingest(ManifestReader(df, sub_col="subject", path_col="filepath"))
 	"""
 
-	def __init__(self, manifest, *, path_col="path", sub_col="sub", ses_col="ses",
-				 datatype_col="datatype", name_col="name", meta_col="meta",
-				 entity_cols: list = None, row_reader=None):
+	def __init__(self, manifest: "pd.DataFrame | str | Path", *, path_col: str = "path",
+				 sub_col: str = "sub", ses_col: str = "ses", datatype_col: str = "datatype",
+				 name_col: str = "name", meta_col: str = "meta",
+				 entity_cols: list[str] | None = None,
+				 row_reader: Callable[[Any], Recording | Table | Attrs] | None = None):
 		self.df = manifest if isinstance(manifest, pd.DataFrame) else pd.read_csv(manifest)
 		self.path_col, self.sub_col, self.ses_col = path_col, sub_col, ses_col
 		self.datatype_col, self.name_col, self.meta_col = datatype_col, name_col, meta_col
@@ -78,7 +82,7 @@ class ManifestReader:
 					"Pass sub_col=/path_col= if your columns are named differently."
 				)
 
-	def read(self):
+	def read(self) -> Iterator[Recording | Table | Attrs]:
 		for _, row in self.df.iterrows():
 			if self.row_reader:
 				yield self.row_reader(row)
@@ -106,12 +110,12 @@ class ManifestReader:
 					"note": f"no in-memory reader registered for {ext!r}",
 				})
 
-	def _extra_entities(self, row) -> dict:
+	def _extra_entities(self, row: Any) -> dict[str, Any]:
 		reserved = {self.path_col, self.sub_col, self.ses_col, self.datatype_col, self.name_col, self.meta_col}
 		cols = self.entity_cols if self.entity_cols is not None else [c for c in row.index if c not in reserved]
 		return {c: _entity_value(row[c]) for c in cols if c in row and pd.notna(row[c])}
 
-	def _parse_meta(self, row) -> dict:
+	def _parse_meta(self, row: Any) -> dict[str, Any]:
 		if self.meta_col not in row or pd.isna(row[self.meta_col]):
 			return {}
 		val = row[self.meta_col]

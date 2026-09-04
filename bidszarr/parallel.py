@@ -8,15 +8,17 @@ this uses processes rather than threads.
 
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+from typing import Iterator
 
-from .items import Attrs
+from .items import Attrs, Reader, Recording, Table
 from .log import logger
 from .readers import BidsReader
 from .repo import Repo
+from .writer import CodecConfig
 
 
-def _subject_ids(source) -> list:
-	from pathlib import Path
+def _subject_ids(source: str | Path) -> list[str]:
 	return sorted(d.name for d in Path(source).glob("sub-*") if d.is_dir())
 
 
@@ -25,17 +27,17 @@ class _SubjectOnly:
 	shared _dataset repo, and every worker writing it would conflict -- the parent
 	writes them once instead."""
 
-	def __init__(self, reader, sub_id: str):
+	def __init__(self, reader: Reader, sub_id: str):
 		self._reader, self._sub_id = reader, sub_id
 
-	def read(self):
+	def read(self) -> Iterator[Recording | Table | Attrs]:
 		for item in self._reader.read():
 			if isinstance(item, Attrs) and not any(p.startswith("sub-") for p in item.path):
 				continue
 			yield item
 
 
-def _convert_subject(job) -> tuple:
+def _convert_subject(job: tuple) -> tuple[str, int]:
 	"""Runs in a worker process: convert exactly one subject into its own repo."""
 	source, dest, sub_id, codec, message, skip_existing = job
 	repo = Repo(dest, codec=codec)
@@ -45,8 +47,9 @@ def _convert_subject(job) -> tuple:
 	return sub_id, len(repo.subject(sub_id).recordings())
 
 
-def convert_parallel(source, dest, workers: int = None, codec=None,
-					 message: str = "convert", skip_existing: bool = False) -> dict:
+def convert_parallel(source: str | Path, dest: str | Path, workers: int | None = None,
+					 codec: CodecConfig | None = None, message: str = "convert",
+					 skip_existing: bool = False) -> dict[str, int]:
 	"""Convert a BIDS dataset using one worker process per subject.
 
 	Since a subject is the unit of work, the wall-clock time is bounded by the

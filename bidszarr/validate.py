@@ -1,17 +1,22 @@
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
 from .readers.bids import MNE_READABLE_EXTS
 
+if TYPE_CHECKING:
+	from .items import Reader
+	from .readers import ManifestReader
+
 TABLE_EXTS = {".tsv", ".csv"}
 
 
-def validate_manifest(reader) -> list:
+def validate_manifest(reader: "ManifestReader") -> list[str]:
 	"""Check a ManifestReader's table without reading any data: required columns
 	present, files exist, extensions are readable. Returns a list of problem
 	strings (empty means fine)."""
-	problems = []
+	problems: list[str] = []
 	df = reader.df
 
 	for col, label in ((reader.sub_col, "subject"), (reader.path_col, "file path")):
@@ -36,11 +41,11 @@ def validate_manifest(reader) -> list:
 	return problems
 
 
-def validate_bids(root_dir) -> list:
+def validate_bids(root_dir: str | Path) -> list[str]:
 	"""Check a BIDS folder is shaped enough to read: it exists, has sub-* dirs,
 	and (warning only) has a dataset_description.json."""
 	root = Path(root_dir)
-	problems = []
+	problems: list[str] = []
 	if not root.exists():
 		return [f"source not found: {root}"]
 	if not root.is_dir():
@@ -60,7 +65,7 @@ def validate_bids(root_dir) -> list:
 	return problems
 
 
-def validate_source(source) -> list:
+def validate_source(source: "Reader | str | Path") -> list[str]:
 	"""Check a source before converting it, without writing anything.
 
 	Parameters

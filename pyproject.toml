@@ -34,7 +34,7 @@ dependencies = [
 bidszarr = "bidszarr.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest", "tqdm"]
+dev = ["pytest", "tqdm", "mypy", "pandas-stubs"]
 docs = ["sphinx", "myst-parser", "furo"]
 
 [tool.setuptools.packages.find]
@@ -45,3 +45,14 @@ bidszarr = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: shells out to a type checker; skip with -m 'not slow'"]
+
+[tool.mypy]
+# No python_version pin: numpy's bundled stubs use 3.12+ syntax, so checking
+# against the floor of requires-python fails inside numpy rather than here.
+files = ["bidszarr"]
+# The package ships py.typed, so its own annotations must hold up.
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true

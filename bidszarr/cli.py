@@ -2,6 +2,7 @@ import argparse
 import logging
 import sys
 from pathlib import Path
+from typing import Any, Callable
 
 from .log import set_verbosity
 from .readers import BidsReader, ManifestReader
@@ -12,7 +13,7 @@ from .writer import CodecConfig
 TABLE_EXTS = {".tsv", ".csv"}
 
 
-def _reader_for(source: str):
+def _reader_for(source: str) -> BidsReader | ManifestReader:
 	"""A BIDS folder or a manifest table -- pick the reader by what the source is."""
 	path = Path(source)
 	if path.suffix in TABLE_EXTS:
@@ -20,18 +21,18 @@ def _reader_for(source: str):
 	return BidsReader(path)
 
 
-def _progress(enabled: bool):
+def _progress(enabled: bool) -> Callable[[Any], Any] | None:
 	"""A tqdm wrapper if tqdm is installed and output is wanted, else None."""
 	if not enabled:
 		return None
 	try:
-		from tqdm import tqdm
+		from tqdm import tqdm  # type: ignore[import-untyped]  # tqdm ships no type information
 	except ImportError:
 		return None
 	return lambda items: tqdm(items, unit="item")
 
 
-def cmd_convert(args) -> int:
+def cmd_convert(args: argparse.Namespace) -> int:
 	problems = validate_source(args.source)
 	fatal = [p for p in problems if "not fatal" not in p]
 	if fatal and not args.force:
@@ -59,7 +60,7 @@ def cmd_convert(args) -> int:
 	return 0
 
 
-def cmd_info(args) -> int:
+def cmd_info(args: argparse.Namespace) -> int:
 	repo = Repo(args.store)
 	subjects = repo.subjects()
 	if not subjects:
@@ -77,7 +78,7 @@ def cmd_info(args) -> int:
 	return 0
 
 
-def cmd_history(args) -> int:
+def cmd_history(args: argparse.Namespace) -> int:
 	repo = Repo(args.store)
 	sub_id = args.subject or (repo.subjects() or ["_dataset"])[0]
 	print(f"history of {sub_id}:")
@@ -88,7 +89,7 @@ def cmd_history(args) -> int:
 	return 0
 
 
-def cmd_validate(args) -> int:
+def cmd_validate(args: argparse.Namespace) -> int:
 	problems = validate_source(args.source)
 	if not problems:
 		print(f"{args.source}: OK")
@@ -99,7 +100,7 @@ def cmd_validate(args) -> int:
 	return 1
 
 
-def cmd_verify(args) -> int:
+def cmd_verify(args: argparse.Namespace) -> int:
 	from .verify import verify
 
 	problems = verify(args.source, args.store, sample_limit=args.limit)
@@ -114,7 +115,7 @@ def cmd_verify(args) -> int:
 	return 1
 
 
-def cmd_export(args) -> int:
+def cmd_export(args: argparse.Namespace) -> int:
 	from .verify import export_bids
 
 	dest = export_bids(args.store, args.dest, subjects=args.subject)
@@ -170,7 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
 	return parser
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
 	args = build_parser().parse_args(argv)
 	if args.verbose:
 		set_verbosity(logging.DEBUG)

@@ -5,7 +5,7 @@ logger = logging.getLogger("bidszarr")
 logger.addHandler(logging.NullHandler())  # library: never configure root logging
 
 
-def set_verbosity(level):
+def set_verbosity(level: int | str) -> None:
 	"""Turn on bidszarr's logging output.
 
 	The package is quiet by default, as a library should be. An application
@@ -29,7 +29,7 @@ def set_verbosity(level):
 	logger.setLevel(level)
 
 
-def log_mem(what: str = ""):
+def log_mem(what: str = "") -> None:
 	"""Peak process memory after an operation -- debug level, so a conversion is
 	quiet by default (it fires once per write, which is thousands of times)."""
 	if logger.isEnabledFor(logging.DEBUG):

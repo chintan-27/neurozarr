@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING, Any, Iterator, cast
+
 import numpy as np
 import pandas as pd
 import zarr
@@ -5,8 +7,21 @@ import zarr
 from .entities import parse_entities
 from .log import logger
 
+if TYPE_CHECKING:
+	import mne  # type: ignore[import-untyped]  # mne ships no type information
 
-def _table_df(node, columns: list = None) -> pd.DataFrame:
+
+def _array(node: zarr.Group, name: str) -> zarr.Array:
+	"""Fetch a child the store's layout guarantees is an array.
+
+	Indexing a zarr Group is typed as returning either an Array or a Group; the
+	writer only ever puts arrays at these names, so narrow it here rather than
+	at every call site.
+	"""
+	return cast(zarr.Array, node[name])
+
+
+def _table_df(node: zarr.Group | zarr.Array, columns: list[str] | None = None) -> pd.DataFrame:
 	"""Rebuild a DataFrame from a stored table.
 
 	Tables are groups of one typed array per column. Stores written before that
@@ -14,16 +29,16 @@ def _table_df(node, columns: list = None) -> pd.DataFrame:
 	column back to the dtype recorded in attrs.
 	"""
 	attrs = node.attrs.asdict()
-	names = attrs.get("columns")
+	names = cast("list[str] | None", attrs.get("columns"))
 
 	if isinstance(node, zarr.Group):  # one array per column
 		wanted = columns or names or sorted(node.array_keys())
-		return pd.DataFrame({name: node[name][:] for name in wanted})
+		return pd.DataFrame({name: _array(node, name)[:] for name in wanted})
 
-	df = pd.DataFrame(node[:], columns=names)  # legacy single string array
-	for name, dtype in zip(df.columns, attrs.get("dtypes", [])):
+	df = pd.DataFrame(cast(Any, node[:]), columns=names)  # legacy single string array
+	for name, dtype in zip(df.columns, cast("list[str]", attrs.get("dtypes", []))):
 		try:
-			df[name] = df[name].astype(dtype)
+			df[name] = df[name].astype(dtype)  # type: ignore[call-overload]
 		except (TypeError, ValueError):
 			logger.warning("column %r could not be cast back to %s, left as strings", name, dtype)
 	return df[columns] if columns else df
@@ -46,19 +61,21 @@ class TableView:
 		Where the table sits in the store, for display and logging.
 	"""
 
-	def __init__(self, group: zarr.Group, name: str, entities: dict, path: str):
+	def __init__(self, group: zarr.Group, name: str, entities: dict[str, str], path: str):
 		self._group, self.name, self.entities, self.path = group, name, entities, path
 
 	@property
-	def meta(self) -> dict:
+	def meta(self) -> dict[str, Any]:
+		"""The table's own metadata, without the bookkeeping the writer added."""
 		return {k: v for k, v in self._group[self.name].attrs.asdict().items()
 				if k not in ("columns", "dtypes")}
 
 	@property
-	def columns(self) -> list:
-		return list(self._group[self.name].attrs.asdict().get("columns", []))
+	def columns(self) -> list[str]:
+		"""Names of the table's columns, without reading any of its values."""
+		return cast("list[str]", self._group[self.name].attrs.asdict().get("columns", []))
 
-	def df(self, columns: list = None) -> pd.DataFrame:
+	def df(self, columns: list[str] | None = None) -> pd.DataFrame:
 		"""Read the table into a :class:`pandas.DataFrame`.
 
 		Column dtypes recorded at write time are restored, so numeric columns
@@ -75,7 +92,7 @@ class TableView:
 		"""
 		return _table_df(self._group[self.name], columns)
 
-	def __repr__(self):
+	def __repr__(self) -> str:
 		return f"<TableView {self.path}/{self.name}>"
 
 
@@ -99,7 +116,7 @@ class RecordingView:
 		self._group, self.entities, self.path = group, entities, path
 
 	@property
-	def meta(self) -> dict:
+	def meta(self) -> dict[str, Any]:
 		"""The recording's metadata (its BIDS sidecar, plus the data_* keys the
 		writer added to describe how the samples are packed)."""
 		return self._group.attrs.asdict()
@@ -108,24 +125,24 @@ class RecordingView:
 	def array(self) -> zarr.Array:
 		"""The underlying zarr array. Slice it directly if you want raw stored
 		values without calibration -- only the chunks you touch are fetched."""
-		return self._group["data"]
+		return _array(self._group, "data")
 
 	@property
-	def shape(self) -> tuple:
+	def shape(self) -> tuple[int, ...]:
 		"""Shape of the stored data as ``(n_channels, n_samples)``."""
-		return self._group["data"].shape
+		return self.array.shape
 
 	@property
-	def sfreq(self) -> float:
+	def sfreq(self) -> float | None:
 		"""Sampling frequency in Hz, or ``None`` if the recording has none stored."""
 		return self.meta.get("SamplingFrequency")
 
 	@property
-	def duration(self) -> float:
+	def duration(self) -> float | None:
 		"""Length in seconds, or ``None`` if no sampling frequency is stored."""
 		return self.shape[-1] / self.sfreq if self.sfreq else None
 
-	def _picks(self, picks) -> list:
+	def _picks(self, picks: "str | int | list[str | int] | None") -> list[int] | None:
 		"""Channel names or indices -> indices."""
 		if picks is None:
 			return None
@@ -134,8 +151,9 @@ class RecordingView:
 		names = self.ch_names()
 		return [names.index(p) if isinstance(p, str) else p for p in picks]
 
-	def data(self, start: int = None, stop: int = None, tmin: float = None,
-			 tmax: float = None, picks=None):
+	def data(self, start: int | None = None, stop: int | None = None, tmin: float | None = None,
+			 tmax: float | None = None,
+			 picks: "str | int | list[str | int] | None" = None) -> tuple[np.ndarray, dict[str, Any]]:
 		"""Read samples, converted back to physical units.
 
 		Only the requested window is fetched from storage, so reading a few
@@ -185,11 +203,14 @@ class RecordingView:
 
 		indices = self._picks(picks)
 		window = slice(start, stop)
-		values = self.array[:, window] if indices is None else self.array[indices, window]
+		# zarr types __getitem__ as possibly returning a scalar; selecting along
+		# two axes of a 2-D array always gives an array back.
+		values = cast(np.ndarray, self.array[:, window] if indices is None
+					  else self.array[indices, window])  # type: ignore[index]
 
-		scale, offset = meta.get("data_scale"), meta.get("data_offset")
-		if scale is not None and offset is not None:
-			scale, offset = np.array(scale), np.array(offset)
+		raw_scale, raw_offset = meta.get("data_scale"), meta.get("data_offset")
+		if raw_scale is not None and raw_offset is not None:
+			scale, offset = np.array(raw_scale), np.array(raw_offset)
 			if indices is not None:
 				scale, offset = scale[indices], offset[indices]
 			values = values.astype(np.float64) * scale[:, None] + offset[:, None]
@@ -232,9 +253,9 @@ class RecordingView:
 		channels = self.channels()
 		if "name" in channels.columns:
 			return list(channels["name"])
-		return list(self.meta.get("ch_names", []))
+		return cast("list[str]", self.meta.get("ch_names", []))
 
-	def raw(self, sfreq: float = None, **window) -> "mne.io.RawArray":
+	def raw(self, sfreq: float | None = None, **window: Any) -> "mne.io.RawArray":
 		"""Reconstruct this recording as an :class:`mne.io.RawArray`.
 
 		Channel names come from the stored channels table, and any stored events
@@ -266,16 +287,17 @@ class RecordingView:
 		import mne
 
 		values, meta = self.data(**window)
-		sfreq = sfreq or meta.get("SamplingFrequency") or meta.get("sfreq")
-		if not sfreq:
+		rate = sfreq or meta.get("SamplingFrequency") or meta.get("sfreq")
+		if not rate:
 			raise ValueError(
 				f"{self.path}: no sampling frequency stored (looked for 'SamplingFrequency' "
 				"in this recording's metadata) -- pass raw(sfreq=...) explicitly"
 			)
 		names = self.ch_names() or [f"ch{i}" for i in range(values.shape[0])]
-		if window.get("picks") is not None:
-			names = [names[i] for i in self._picks(window["picks"])]
-		info = mne.create_info(names, sfreq=float(sfreq), ch_types="eeg", verbose=False)
+		picked = self._picks(window.get("picks"))
+		if picked is not None:
+			names = [names[i] for i in picked]
+		info = mne.create_info(names, sfreq=float(rate), ch_types="eeg", verbose=False)
 		raw = mne.io.RawArray(values, info, verbose=False)
 
 		# put the events table back on as annotations, so a Raw survives the round trip
@@ -288,17 +310,17 @@ class RecordingView:
 			), verbose=False)
 		return raw
 
-	def __repr__(self):
+	def __repr__(self) -> str:
 		return f"<RecordingView {self.path} shape={self.shape}>"
 
 
-def _is_table(node) -> bool:
+def _is_table(node: zarr.Group | zarr.Array) -> bool:
 	"""A table is a group of one array per column (or, in older stores, a single
 	string array) -- either way it carries a "columns" attr."""
 	return "columns" in node.attrs.asdict()
 
 
-def views_in(root: zarr.Group, base_path: str = ""):
+def views_in(root: zarr.Group, base_path: str = "") -> Iterator["RecordingView | TableView"]:
 	"""Walk a subject's tree and yield every RecordingView/TableView in it. A group
 	holding a "data" array is a recording; anything carrying a "columns" attr is a
 	table (channels, events, electrodes, a beh table, ...)."""

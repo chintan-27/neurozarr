@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
+from typing import Any
 
 import icechunk
+import mne  # type: ignore[import-untyped]  # mne ships no type information
 import numpy as np
 import pandas as pd
 import zarr
@@ -43,8 +45,8 @@ class CodecConfig:
 	>>> repo = Repo("./study.zarr", codec=CodecConfig(dtype="float16"))
 	"""
 
-	filters: list = field(default_factory=list)
-	compressors: list = field(default_factory=lambda: [ZstdCodec(level=19)])
+	filters: list[Any] = field(default_factory=list)
+	compressors: list[Any] = field(default_factory=lambda: [ZstdCodec(level=19)])
 	bitround_k: int = 0
 	dtype: str = "int16"
 	chunk_target_bytes: int = 8 * 1024 * 1024
@@ -55,14 +57,14 @@ class Writer:
 	"""Internal engine that writes standardized items into a BIDS-shaped Zarr tree.
 	Not user-facing directly -- use Repo/Subject/Visit, which own a Writer."""
 
-	def __init__(self, session: icechunk.Session, codec: CodecConfig = None):
+	def __init__(self, session: icechunk.Session, codec: CodecConfig | None = None):
 		self._session = session
 		self._codec = codec or CodecConfig()
 		# mode="a" (create if missing), never "w" -- "w" means "overwrite if exists",
 		# which silently wipes a store you reopened to add more data to.
 		self.root = zarr.open_group(store=session.store, mode="a")
 
-	def _group_for(self, prefix: tuple, entities: Entities) -> zarr.Group:
+	def _group_for(self, prefix: tuple[str, ...], entities: Entities) -> zarr.Group:
 		# a Writer always scopes to one subject's own repo, so the leading
 		# sub-XXX from entities.path() is redundant -- the repo already is that subject.
 		path = (*prefix, *entities.path()[1:])
@@ -71,7 +73,7 @@ class Writer:
 			group = group.require_group(part)
 		return group
 
-	def add_recording(self, item: Recording):
+	def add_recording(self, item: Recording) -> None:
 		group = self._group_for(item.prefix, item.entities)
 		physical = item.raw.get_data()
 		attrs = dict(item.meta)
@@ -118,7 +120,7 @@ class Writer:
 		)
 		log_mem()
 
-	def _add_annotations(self, group: zarr.Group, raw):
+	def _add_annotations(self, group: zarr.Group, raw: "mne.io.BaseRaw") -> None:
 		"""An mne.Raw's annotations are events -- store them the way BIDS does, as an
 		events table, so they survive a round trip. A recording that already has an
 		events table from its BIDS sidecar keeps that one."""
@@ -131,19 +133,19 @@ class Writer:
 			"trial_type": [str(d) for d in annotations.description],
 		}), {"source": "mne.Raw.annotations"})
 
-	def add_table(self, item: Table):
+	def add_table(self, item: Table) -> None:
 		group = self._group_for(item.prefix, item.entities)
 		util.create_table(group, item.name, item.df, item.meta)
 		log_mem()
 
-	def add_attrs(self, item: Attrs):
+	def add_attrs(self, item: Attrs) -> None:
 		group = self.root
 		for part in item.path:
 			group = group.require_group(part)
 		util.set_attrs(group, item.attrs)
 		log_mem()
 
-	def dispatch(self, item):
+	def dispatch(self, item: Recording | Table | Attrs) -> None:
 		if isinstance(item, Recording):
 			self.add_recording(item)
 		elif isinstance(item, Table):
@@ -153,7 +155,7 @@ class Writer:
 		else:
 			raise TypeError(f"unknown item type {type(item)!r}")
 
-	def save(self, message: str):
+	def save(self, message: str) -> str | None:
 		"""Commit this subject's session. A session with nothing new in it is left
 		alone -- icechunk refuses empty commits, and reopening a store to touch one
 		subject shouldn't fail because the others had no changes."""

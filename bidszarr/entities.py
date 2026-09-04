@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Any
 
 # Canonical BIDS entity key order (per the BIDS spec's entity table).
 # Only a subset is ever populated for a given datatype; unrecognized keys
@@ -14,11 +15,11 @@ BIDS_ENTITY_ORDER = [
 @dataclass(frozen=True)
 class Entities:
 	sub: str
-	ses: str = None  # None for session-less BIDS datasets -- a valid, real layout
-	datatype: str = None
-	extra: dict = field(default_factory=dict)
+	ses: str | None = None  # None for session-less BIDS datasets -- a valid, real layout
+	datatype: str | None = None
+	extra: dict[str, Any] = field(default_factory=dict)
 
-	def path(self) -> tuple:
+	def path(self) -> tuple[str, ...]:
 		"""(sub[, ses], datatype[, group_name]) -- the Zarr group path for this entity set."""
 		parts = [self.sub]
 		if self.ses:
@@ -36,7 +37,7 @@ class Entities:
 		return "_".join(known + unknown)
 
 
-def parse_entities(stem: str) -> dict:
+def parse_entities(stem: str) -> dict[str, str]:
 	"""Split a BIDS filename stem (e.g. 'task-BrainSenseStream_acq-Power_run-3')
 	into an entity dict ({'task': 'BrainSenseStream', 'acq': 'Power', 'run': '3'}).
 	Parts without a '-' (i.e. the suffix) are silently dropped -- use split_stem
@@ -44,11 +45,12 @@ def parse_entities(stem: str) -> dict:
 	return split_stem(stem)[0]
 
 
-def split_stem(stem: str) -> tuple:
+def split_stem(stem: str) -> tuple[dict[str, str], str]:
 	"""Split a full BIDS filename stem into (entities dict, suffix string).
 	E.g. 'sub-001_ses-1_task-rest_run-1_channels' ->
 	({'sub': '001', 'ses': '1', 'task': 'rest', 'run': '1'}, 'channels')."""
-	entities, suffix_parts = {}, []
+	entities: dict[str, str] = {}
+	suffix_parts: list[str] = []
 	for part in stem.split("_"):
 		key, sep, value = part.partition("-")
 		if sep:

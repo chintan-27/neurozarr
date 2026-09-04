@@ -6,9 +6,9 @@ tree. Write a new Reader by yielding these -- nothing else touches Zarr, so
 the output structure can't drift no matter what the source looks like."""
 
 from dataclasses import dataclass, field
-from typing import Iterator, Protocol
+from typing import Any, Iterator, Protocol
 
-import mne
+import mne  # type: ignore[import-untyped]  # mne ships no type information
 import pandas as pd
 
 from .entities import Entities
@@ -26,8 +26,8 @@ class Recording:
 	"""
 	entities: Entities
 	raw: "mne.io.BaseRaw"
-	meta: dict = field(default_factory=dict)
-	prefix: tuple = ()
+	meta: dict[str, Any] = field(default_factory=dict)
+	prefix: tuple[str, ...] = ()
 
 
 @dataclass
@@ -40,8 +40,8 @@ class Table:
 	entities: Entities
 	name: str
 	df: pd.DataFrame
-	meta: dict = field(default_factory=dict)
-	prefix: tuple = ()
+	meta: dict[str, Any] = field(default_factory=dict)
+	prefix: tuple[str, ...] = ()
 
 
 @dataclass
@@ -52,8 +52,8 @@ class Attrs:
 	means dataset-wide. A "sub-XXX" segment anywhere in path routes this to
 	that subject's own repo (see Repo._route_attrs); no such segment means it
 	goes to the shared _dataset repo."""
-	path: tuple
-	attrs: dict
+	path: tuple[str, ...]
+	attrs: dict[str, Any]
 
 
 class Reader(Protocol):

@@ -1,13 +1,14 @@
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import zarr
 
 
-def chunk_shape(shape: tuple, itemsize: int, target_bytes: int = 8 * 1024 * 1024,
-				max_samples: int = 65536) -> tuple:
+def chunk_shape(shape: tuple[int, ...], itemsize: int, target_bytes: int = 8 * 1024 * 1024,
+				max_samples: int = 65536) -> tuple[int, ...]:
 	"""Pick a chunk shape, dividing along the last (time) axis only.
 
 	Two limits apply, whichever is smaller: a byte target, which keeps chunks
@@ -27,12 +28,13 @@ def chunk_shape(shape: tuple, itemsize: int, target_bytes: int = 8 * 1024 * 1024
 	return shape[:-1] + (chunk_len,)
 
 
-def set_attrs(node, attrs: dict):
+def set_attrs(node: zarr.Group | zarr.Array, attrs: dict[str, Any]) -> None:
 	"""Merge attrs into a zarr node's existing attributes."""
 	node.attrs.put({**node.attrs.asdict(), **attrs})
 
 
-def create_table(group: zarr.Group, name: str, df: pd.DataFrame, extra_attrs: dict = None):
+def create_table(group: zarr.Group, name: str, df: pd.DataFrame,
+				 extra_attrs: dict[str, Any] | None = None) -> None:
 	"""Store a DataFrame as one string array, recording each column's dtype in
 	attrs so readers cast the values back faithfully (see ``read._table_df``).
 	"""
@@ -48,13 +50,13 @@ def create_table(group: zarr.Group, name: str, df: pd.DataFrame, extra_attrs: di
 	})
 
 
-def load_json(path: Path) -> dict:
+def load_json(path: Path) -> dict[str, Any]:
 	return json.loads(path.read_text()) if path.exists() else {}
 
 
-def clean_nan(meta_data: dict) -> dict:
+def clean_nan(meta_data: dict[str, Any]) -> dict[str, Any]:
 	"""NaN isn't valid JSON, and zarr attrs are JSON -- swap them for None."""
-	clean = {}
+	clean: dict[str, Any] = {}
 	for key, value in meta_data.items():
 		if isinstance(value, dict):
 			clean[key] = clean_nan(value)

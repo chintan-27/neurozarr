@@ -1,14 +1,16 @@
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import icechunk
 
 # One in-memory Storage per logical path, so a memory:// store can be reopened
 # within a process (icechunk.in_memory_storage() makes a fresh empty one each call).
-_MEMORY_STORES = {}
+_MEMORY_STORES: dict[str, icechunk.Storage] = {}
 
 
-def storage_from(target, sub_path: str = "", **options) -> icechunk.Storage:
+def storage_from(target: "str | Path | icechunk.Storage", sub_path: str = "",
+				 **options: Any) -> icechunk.Storage:
 	"""Build an :class:`icechunk.Storage` for ``target/sub_path``.
 
 	Parameters

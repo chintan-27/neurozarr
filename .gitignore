@@ -7,3 +7,6 @@ COMPRESSOR_REPORT.html
 CLAUDE.md
 *.egg-info/
 docs/_build/
+build/
+.mypy_cache/
+.pytest_cache/

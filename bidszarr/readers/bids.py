@@ -1,6 +1,7 @@
 from pathlib import Path
+from typing import Any, Iterator
 
-import mne
+import mne  # type: ignore[import-untyped]  # mne ships no type information
 import pandas as pd
 
 from ..entities import Entities, split_stem
@@ -12,6 +13,15 @@ from ..util import clean_nan, load_json
 # isn't a dependency here; files with any other extension fall back to an
 # "unread" Attrs placeholder instead of crashing (see _read_datatype_dir).
 MNE_READABLE_EXTS = {".edf", ".bdf", ".gdf", ".vhdr", ".set", ".fif", ".cnt"}
+
+
+def _row_dict(row: "pd.Series") -> dict[str, Any]:
+	"""A DataFrame row as a plain dict.
+
+	to_dict() rather than dict(row): it converts numpy scalars to Python natives,
+	and these end up in zarr attrs, which must be JSON-serializable.
+	"""
+	return {str(k): v for k, v in row.to_dict().items()}
 
 
 class BidsReader:
@@ -41,7 +51,7 @@ class BidsReader:
 	>>> repo.ingest(BidsReader("./my_bids_dataset"))
 	"""
 
-	def __init__(self, root_dir, subjects: list = None):
+	def __init__(self, root_dir: str | Path, subjects: list[str] | None = None):
 		# Dataset-level metadata is yielded whatever `subjects` says, so parallel
 		# workers each converting one subject still agree on it.
 		self.root_dir = Path(root_dir)
@@ -50,7 +60,7 @@ class BidsReader:
 	def _wanted(self, sub: str) -> bool:
 		return self.subjects is None or sub in self.subjects
 
-	def read(self):
+	def read(self) -> Iterator[Recording | Table | Attrs]:
 		yield Attrs((), clean_nan(load_json(self.root_dir / "dataset_description.json")))
 
 		participantAttrs, participantsFieldInfo = self._load_participants()
@@ -71,7 +81,7 @@ class BidsReader:
 				yield Attrs((sub, "sessions_description"), sessionsFieldInfo)
 
 			sesDirs = sorted(subDir.glob("ses-*"))
-			levels = [(d.name, d) for d in sesDirs if d.is_dir()] or [(None, subDir)]
+			levels: list[tuple[str | None, Path]] = [(d.name, d) for d in sesDirs if d.is_dir()] or [(None, subDir)]
 			for ses, sesDir in levels:
 				if ses and ses in sessionAttrs:
 					yield Attrs((sub, ses), sessionAttrs[ses])
@@ -81,7 +91,7 @@ class BidsReader:
 
 		yield from self._read_derivatives()
 
-	def _load_participants(self) -> tuple:
+	def _load_participants(self) -> tuple[dict[str, Any], dict[str, Any]]:
 		path = self.root_dir / "participants.tsv"
 		if not path.exists():
 			return {}, {}
@@ -90,12 +100,12 @@ class BidsReader:
 		subjectIds = load_json(self.root_dir / ".bravo_subject_ids.json")  # optional BRAVO extra
 		subToHash = {f"sub-{num:03d}": h for h, num in subjectIds.items()}
 		attrs = {
-			sub: clean_nan({**row.to_dict(), **({"bravo_hash": subToHash[sub]} if sub in subToHash else {})})
+			str(sub): clean_nan({**_row_dict(row), **({"bravo_hash": subToHash[str(sub)]} if str(sub) in subToHash else {})})
 			for sub, row in participants.iterrows()
 		}
 		return attrs, fieldInfo
 
-	def _load_sessions(self, sub: str) -> tuple:
+	def _load_sessions(self, sub: str) -> tuple[dict[str, Any], dict[str, Any]]:
 		subDir = self.root_dir / sub
 		path = subDir / f"{sub}_sessions.tsv"
 		if not path.exists():
@@ -105,13 +115,14 @@ class BidsReader:
 		devices = load_json(subDir / f"{sub}_devices.json")  # optional BRAVO extra
 		manifest = {e["Session"]: e for e in load_json(subDir / f"{sub}_manifest.json").get("Sessions", [])}
 		attrs = {
-			ses: clean_nan({**row.to_dict(), **devices.get(ses, {}), "manifest": manifest.get(ses, {})})
+			str(ses): clean_nan({**_row_dict(row), **devices.get(str(ses), {}), "manifest": manifest.get(str(ses), {})})
 			for ses, row in sessions.iterrows()
 		}
 		return attrs, fieldInfo
 
-	def _read_datatype_dir(self, sub, ses, datatype, dir_path, prefix=()):
-		groups = {}
+	def _read_datatype_dir(self, sub: str, ses: str | None, datatype: str, dir_path: Path,
+						   prefix: tuple[str, ...] = ()) -> Iterator[Recording | Table | Attrs]:
+		groups: dict[tuple[tuple[tuple[str, str], ...], str], dict[str, Path]] = {}
 		for f in sorted(dir_path.iterdir()):
 			if not f.is_file():
 				continue
@@ -122,14 +133,14 @@ class BidsReader:
 			groups.setdefault(key, {})[f.suffix] = f
 
 		for (entityItems, suffix), exts in groups.items():
-			entities = Entities(sub, ses, datatype, dict(entityItems))
+			item_entities = Entities(sub, ses, datatype, dict(entityItems))
 			dataExts = [e for e in exts if e != ".json"]
 			if not dataExts:
 				# pure sidecar json with no data of its own (e.g. coordsystem.json) --
 				# still materialized here, and independently discoverable via
 				# _find_sidecar for any sibling group that needs it as inherited meta.
 				if ".json" in exts:
-					yield Attrs((*prefix, *entities.path(), suffix), clean_nan(load_json(exts[".json"])))
+					yield Attrs((*prefix, *item_entities.path(), suffix), clean_nan(load_json(exts[".json"])))
 				continue
 
 			meta = clean_nan(load_json(exts[".json"])) if ".json" in exts \
@@ -138,17 +149,17 @@ class BidsReader:
 			ext = dataExts[0]
 			path = exts[ext]
 			if ext == ".tsv":
-				yield Table(entities, suffix, pd.read_csv(path, sep="\t"), meta, prefix)
+				yield Table(item_entities, suffix, pd.read_csv(path, sep="\t"), meta, prefix)
 			elif ext in MNE_READABLE_EXTS:
 				raw = mne.io.read_raw(path, preload=True, verbose=False)
-				yield Recording(entities, raw, meta, prefix)
+				yield Recording(item_entities, raw, meta, prefix)
 			else:
-				yield Attrs((*prefix, *entities.path(), suffix), {
+				yield Attrs((*prefix, *item_entities.path(), suffix), {
 					**meta, "unread_file": str(path),
 					"note": f"no in-memory reader registered for {ext!r}",
 				})
 
-	def _find_sidecar(self, start_dir: Path, entities: dict, suffix: str) -> dict:
+	def _find_sidecar(self, start_dir: Path, entities: dict[str, str], suffix: str) -> dict[str, Any]:
 		"""BIDS inheritance principle: nearest matching JSON sidecar wins,
 		walking from the file's own directory up to the dataset root."""
 		d = start_dir
@@ -163,7 +174,7 @@ class BidsReader:
 				return {}
 			d = d.parent
 
-	def _read_derivatives(self):
+	def _read_derivatives(self) -> Iterator[Recording | Table | Attrs]:
 		derivativesDir = self.root_dir / "derivatives"
 		if not derivativesDir.exists():
 			return
@@ -179,7 +190,8 @@ class BidsReader:
 				if not self._wanted(sub):
 					continue
 				sesDirs = sorted(derivDir.glob(f"{sub}/ses-*"))
-				levels = [(d.name, d) for d in sesDirs if d.is_dir()] or [(None, subDir)]
+				levels: list[tuple[str | None, Path]] = \
+					[(d.name, d) for d in sesDirs if d.is_dir()] or [(None, subDir)]
 				for ses, sesDir in levels:
 					for dtDir in sorted(sesDir.iterdir()):
 						if dtDir.is_dir():

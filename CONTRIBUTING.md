@@ -3,12 +3,34 @@
 ## Setup
 
 ```bash
-pip install -e ".[dev]"     # pytest, tqdm
-pytest
+pip install -e ".[dev]"     # pytest, tqdm, mypy
+pytest                      # the whole suite
+pytest -m "not slow"        # skip the type-checker tests, ~2s
 ```
 
 Tests build their stores on `memory://`, so they run in a couple of seconds and
 leave nothing on disk.
+
+## Type checking
+
+```bash
+mypy
+```
+
+The package ships `py.typed`, which promises downstream type checkers that its
+annotations can be trusted, so `mypy` must stay clean. Two rules follow from
+that promise:
+
+- Annotate what a function really returns. `-> float` on something that returns
+  `None` when a value is missing is worse than no annotation at all, because a
+  checker will then accept `rec.duration / 2` and let it fail at runtime.
+- Silence untyped third-party imports with `# type: ignore[import-untyped]` at
+  the import itself, never with an `ignore_missing_imports` override in
+  `pyproject.toml`. A downstream project's mypy never reads this repo's config,
+  so an override here would leave them seeing errors from our internals.
+
+`tests/test_typing.py` checks both by type checking snippets against the built
+package.
 
 ## Building the docs
 

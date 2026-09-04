@@ -3,6 +3,7 @@ back out as a BIDS folder."""
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
@@ -11,8 +12,14 @@ from .readers import BidsReader
 from .repo import Repo
 from .items import Recording, Table
 
+if TYPE_CHECKING:
+	import icechunk
+	import mne  # type: ignore[import-untyped]  # mne ships no type information
+	import zarr
 
-def verify(source, store, tolerance: float = 1e-9, sample_limit: int = None) -> list:
+
+def verify(source: "str | Path", store: "str | Path | icechunk.Storage",
+		   tolerance: float = 1e-9, sample_limit: int | None = None) -> list[str]:
 	"""Check that a store faithfully matches the source it was converted from.
 
 	Re-reads the source and compares each recording's samples and each table's
@@ -40,9 +47,9 @@ def verify(source, store, tolerance: float = 1e-9, sample_limit: int = None) -> 
 	from .read import RecordingView, _table_df
 
 	repo = Repo(store)
-	problems = []
+	problems: list[str] = []
 	checked = 0
-	roots = {}
+	roots: dict[str, "zarr.Group | None"] = {}
 
 	for item in BidsReader(source).read():
 		if sample_limit is not None and checked >= sample_limit:
@@ -65,10 +72,13 @@ def verify(source, store, tolerance: float = 1e-9, sample_limit: int = None) -> 
 		name = "data" if isinstance(item, Recording) else item.name
 		where = f"{sub_id}/{group_path}/{name}"
 
-		if root is None or group_path not in root or name not in root[group_path]:
+		if root is None or group_path not in root:
 			problems.append(f"missing from store: {where}")
 			continue
-		group = root[group_path]
+		group = cast("zarr.Group", root[group_path])
+		if name not in group:
+			problems.append(f"missing from store: {where}")
+			continue
 		checked += 1
 
 		if isinstance(item, Recording):
@@ -87,7 +97,8 @@ def verify(source, store, tolerance: float = 1e-9, sample_limit: int = None) -> 
 	return problems
 
 
-def export_bids(store, dest, subjects: list = None) -> Path:
+def export_bids(store: "str | Path | icechunk.Storage", dest: "str | Path",
+				subjects: list[str] | None = None) -> Path:
 	"""Write a store back out as a BIDS dataset on disk.
 
 	Recordings become signal files, tables become ``.tsv``, and metadata becomes
@@ -128,22 +139,22 @@ def export_bids(store, dest, subjects: list = None) -> Path:
 
 	for sub_id in (subjects or repo.subjects()):
 		subject = repo.subject(sub_id)
-		for view in subject.recordings():
-			out_dir = dest / _bids_dir(view.path)
+		for recording in subject.recordings():
+			out_dir = dest / _bids_dir(recording.path)
 			out_dir.mkdir(parents=True, exist_ok=True)
-			stem = _bids_stem(view.path)
-			_write_raw(out_dir, stem, view.raw())
-			meta = {k: v for k, v in view.meta.items() if not k.startswith("data_")}
+			stem = _bids_stem(recording.path)
+			_write_raw(out_dir, stem, recording.raw())
+			meta = {k: v for k, v in recording.meta.items() if not k.startswith("data_")}
 			(out_dir / f"{stem}.json").write_text(json.dumps(meta, indent=2, default=str))
-		for view in subject.tables():
-			out_dir = dest / _bids_dir(view.path)
+		for table in subject.tables():
+			out_dir = dest / _bids_dir(table.path)
 			out_dir.mkdir(parents=True, exist_ok=True)
-			name = f"{_bids_stem(view.path)}_{view.name}" if view.entities else view.name
-			view.df().to_csv(out_dir / f"{name}.tsv", sep="\t", index=False)
+			name = f"{_bids_stem(table.path)}_{table.name}" if table.entities else table.name
+			table.df().to_csv(out_dir / f"{name}.tsv", sep="\t", index=False)
 	return dest
 
 
-def _write_raw(out_dir: Path, stem: str, raw) -> Path:
+def _write_raw(out_dir: Path, stem: str, raw: "mne.io.BaseRaw") -> Path:
 	"""Write a Raw in the most BIDS-appropriate format available.
 
 	BrainVision and EDF are what BIDS wants for ieeg/eeg, but mne needs pybv and

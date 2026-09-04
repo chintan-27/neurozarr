@@ -1,7 +1,8 @@
 from pathlib import Path
+from typing import Any, Iterator, cast
 
 import icechunk
-import mne
+import mne  # type: ignore[import-untyped]  # mne ships no type information
 import pandas as pd
 import zarr
 
@@ -12,7 +13,7 @@ from .storage import storage_from
 from .writer import CodecConfig, Writer
 
 
-def _open_writer(icechunk_repo: icechunk.Repository, codec: CodecConfig) -> Writer:
+def _open_writer(icechunk_repo: icechunk.Repository, codec: CodecConfig | None) -> Writer:
 	return Writer(icechunk_repo.writable_session("main"), codec)
 
 
@@ -49,13 +50,14 @@ class Repo:
 	>>> repo.save("initial conversion")
 	"""
 
-	def __init__(self, target, codec: CodecConfig = None, **storage_options):
+	def __init__(self, target: "str | Path | icechunk.Storage", codec: CodecConfig | None = None,
+				 **storage_options: Any):
 		self.target = target
 		self._codec = codec
 		self._storage_options = storage_options
-		self._repos = {}    # sub_id -> icechunk.Repository, opened lazily
-		self._writers = {}  # sub_id -> Writer, opened lazily on first write
-		self._new_subjects = set()  # written into the _dataset index on save()
+		self._repos: dict[str, icechunk.Repository] = {}  # opened lazily
+		self._writers: dict[str, Writer] = {}  # opened lazily on first write
+		self._new_subjects: set[str] = set()  # written into the _dataset index on save()
 
 	def _icechunk_repo(self, sub_id: str) -> icechunk.Repository:
 		if sub_id not in self._repos:
@@ -70,15 +72,15 @@ class Repo:
 				self._new_subjects.add(sub_id)
 		return self._writers[sub_id]
 
-	def _subject_index(self) -> list:
+	def _subject_index(self) -> list[str]:
 		"""Subject ids recorded in the _dataset repo. Object stores can't be listed
 		like a directory, so the store keeps its own index of which subjects exist."""
 		try:
-			return list(self.root_of("_dataset").attrs.asdict().get("subjects", []))
+			return cast("list[str]", self.root_of("_dataset").attrs.asdict().get("subjects", []))
 		except Exception:  # no _dataset repo yet, or nothing committed to it
 			return []
 
-	def create_subject(self, sub_id: str, attrs: dict = None) -> "Subject":
+	def create_subject(self, sub_id: str, attrs: dict[str, Any] | None = None) -> "Subject":
 		"""Add a subject to the store.
 
 		Parameters
@@ -98,7 +100,7 @@ class Repo:
 			self._writer_for(sub_id).add_attrs(Attrs((), attrs))
 		return Subject(self, sub_id)
 
-	def ingest(self, reader: Reader, progress=None, skip_existing: bool = False):
+	def ingest(self, reader: Reader, progress: Any = None, skip_existing: bool = False) -> None:
 		"""Write everything a reader yields into the store.
 
 		Items are written as they arrive, so memory use stays flat no matter how
@@ -129,9 +131,9 @@ class Repo:
 			elif existing is None or not self._already_stored(item, existing):
 				self._writer_for(item.entities.sub).dispatch(item)
 
-	def _existing_paths(self) -> set:
+	def _existing_paths(self) -> set[str]:
 		"""Every group path already in the store, as "sub-XXX/rest/of/path"."""
-		paths = set()
+		paths: set[str] = set()
 		for sub_id in self.subjects():
 			try:
 				root = self.root_of(sub_id)
@@ -140,12 +142,12 @@ class Repo:
 			paths.update(f"{sub_id}/{path}" for path, _ in root.members(max_depth=None))
 		return paths
 
-	def _already_stored(self, item, existing: set) -> bool:
+	def _already_stored(self, item: Recording | Table, existing: set[str]) -> bool:
 		group_path = "/".join((*item.prefix, *item.entities.path()))
 		name = "data" if isinstance(item, Recording) else item.name
 		return f"{group_path}/{name}" in existing
 
-	def _route_attrs(self, item: Attrs):
+	def _route_attrs(self, item: Attrs) -> None:
 		"""An Attrs' path may embed a sub-XXX segment anywhere in it (e.g. a
 		derivatives path is ("derivatives", name, sub-XXX, ...)). Whichever segment
 		looks like a subject id decides which repo it belongs to; that segment is
@@ -158,7 +160,7 @@ class Repo:
 				return
 		self._writer_for("_dataset").add_attrs(item)
 
-	def save(self, message: str):
+	def save(self, message: str) -> None:
 		"""Commit every subject repository touched since the last save.
 
 		Each subject is committed independently; subjects with no changes are
@@ -178,7 +180,7 @@ class Repo:
 
 	# ---- reading ----------------------------------------------------------
 
-	def root_of(self, sub_id: str, version: str = None) -> zarr.Group:
+	def root_of(self, sub_id: str, version: str | None = None) -> zarr.Group:
 		"""Open one subject's tree for reading.
 
 		Parameters
@@ -201,7 +203,7 @@ class Repo:
 			else repo.readonly_session("main")
 		return zarr.open_group(store=session.store, mode="r")
 
-	def subjects(self) -> list:
+	def subjects(self) -> list[str]:
 		"""List the subjects in the store.
 
 		Returns
@@ -232,7 +234,8 @@ class Repo:
 		"""
 		return Subject(self, sub_id)
 
-	def find(self, datatype: str = None, sub: str = None, **entities):
+	def find(self, datatype: str | None = None, sub: str | None = None,
+			 **entities: Any) -> Iterator[RecordingView]:
 		"""Search the whole store for recordings matching a set of BIDS entities.
 
 		Because each subject is a separate repository, searching every subject
@@ -268,7 +271,7 @@ class Repo:
 
 	# ---- versioning -------------------------------------------------------
 
-	def history(self, sub_id: str = None) -> list:
+	def history(self, sub_id: str | None = None) -> list[tuple[str, str, Any]]:
 		"""Read the commit history of one subject's repository.
 
 		Parameters
@@ -285,7 +288,7 @@ class Repo:
 		sub_id = sub_id or (self.subjects() or ["_dataset"])[0]
 		return [(s.id, s.message, s.written_at) for s in self._icechunk_repo(sub_id).ancestry(branch="main")]
 
-	def tag(self, name: str):
+	def tag(self, name: str) -> None:
 		"""Name the store's current state so it can be read back later.
 
 		A version of the dataset spans every subject's repository, so the tag is
@@ -303,7 +306,7 @@ class Repo:
 				continue
 			repo.create_tag(name, repo.lookup_branch("main"))
 
-	def tags(self, sub_id: str = None) -> list:
+	def tags(self, sub_id: str | None = None) -> list[str]:
 		"""List the tags on the store.
 
 		Parameters
@@ -338,7 +341,7 @@ class Subject:
 		self._repo = repo
 		self.sub_id = sub_id
 
-	def add_visit(self, ses_id: str, attrs: dict = None) -> "Visit":
+	def add_visit(self, ses_id: str, attrs: dict[str, Any] | None = None) -> "Visit":
 		"""Add a session to this subject — typically one clinic visit or upload day.
 
 		Parameters
@@ -359,7 +362,7 @@ class Subject:
 
 	# ---- reading ----------------------------------------------------------
 
-	def root(self, version: str = None) -> zarr.Group:
+	def root(self, version: str | None = None) -> zarr.Group:
 		"""Open this subject's tree directly, for cases the view API doesn't cover.
 
 		Parameters
@@ -374,11 +377,11 @@ class Subject:
 		return self._repo.root_of(self.sub_id, version)
 
 	@property
-	def attrs(self) -> dict:
+	def attrs(self) -> dict[str, Any]:
 		"""This subject's metadata, typically their ``participants.tsv`` row."""
 		return self.root().attrs.asdict()
 
-	def visits(self, version: str = None) -> list:
+	def visits(self, version: str | None = None) -> list[str]:
 		"""List this subject's sessions.
 
 		Parameters
@@ -408,7 +411,7 @@ class Subject:
 		"""
 		return Visit(self._repo, self.sub_id, ses_id)
 
-	def recordings(self, version: str = None) -> list:
+	def recordings(self, version: str | None = None) -> list[RecordingView]:
 		"""Every recording belonging to this subject, across all their sessions.
 
 		Parameters
@@ -424,7 +427,7 @@ class Subject:
 		"""
 		return [v for v in views_in(self.root(version), self.sub_id) if isinstance(v, RecordingView)]
 
-	def tables(self, version: str = None) -> list:
+	def tables(self, version: str | None = None) -> list[TableView]:
 		"""Every table belonging to this subject, across all their sessions.
 
 		Tables stored alongside a recording — its channels and events — belong to
@@ -463,7 +466,9 @@ class Visit:
 		self.sub_id = sub_id
 		self.ses_id = ses_id
 
-	def add(self, datatype: str, payload, meta: dict = None, prefix: tuple = (), **entities):
+	def add(self, datatype: str, payload: "mne.io.BaseRaw | pd.DataFrame",
+			meta: dict[str, Any] | None = None, prefix: tuple[str, ...] = (),
+			**entities: Any) -> None:
 		"""Store a recording or a table under any datatype.
 
 		Parameters
@@ -492,6 +497,7 @@ class Visit:
 		add_derivative : Store processed results under ``derivatives/``.
 		"""
 		e = Entities(self.sub_id, self.ses_id, datatype, entities)
+		item: Recording | Table
 		if isinstance(payload, mne.io.BaseRaw):
 			item = Recording(e, payload, meta or {}, prefix)
 		elif isinstance(payload, pd.DataFrame):
@@ -500,7 +506,8 @@ class Visit:
 			raise TypeError(f"unsupported recording/table payload type {type(payload)!r}")
 		self._repo._writer_for(self.sub_id).dispatch(item)
 
-	def add_recording(self, raw: "mne.io.BaseRaw", meta: dict = None, **entities):
+	def add_recording(self, raw: "mne.io.BaseRaw", meta: dict[str, Any] | None = None,
+					  **entities: Any) -> None:
 		"""Store a recording under the ``ieeg`` datatype.
 
 		Parameters
@@ -515,7 +522,8 @@ class Visit:
 		"""
 		self.add("ieeg", raw, meta, **entities)
 
-	def add_behavioral_table(self, df: pd.DataFrame, meta: dict = None, **entities):
+	def add_behavioral_table(self, df: pd.DataFrame, meta: dict[str, Any] | None = None,
+							 **entities: Any) -> None:
 		"""Store a table under the ``beh`` datatype.
 
 		Parameters
@@ -529,8 +537,9 @@ class Visit:
 		"""
 		self.add("beh", df, meta, **entities)
 
-	def add_derivative(self, pipeline: str, payload, datatype: str = "ieeg",
-					   meta: dict = None, **entities):
+	def add_derivative(self, pipeline: str, payload: "mne.io.BaseRaw | pd.DataFrame",
+					   datatype: str = "ieeg", meta: dict[str, Any] | None = None,
+					   **entities: Any) -> None:
 		"""Store a processed result under ``derivatives/<pipeline>/``.
 
 		This keeps analysis outputs separate from raw data, the way BIDS does.
@@ -562,18 +571,18 @@ class Visit:
 
 	# ---- reading ----------------------------------------------------------
 
-	def _group(self, version: str = None) -> zarr.Group:
+	def _group(self, version: str | None = None) -> zarr.Group:
 		root = self._repo.root_of(self.sub_id, version)
 		if self.ses_id not in root:
 			raise KeyError(f"{self.sub_id} has no {self.ses_id} (have: {', '.join(root.keys())})")
-		return root[self.ses_id]
+		return cast(zarr.Group, root[self.ses_id])
 
 	@property
-	def attrs(self) -> dict:
+	def attrs(self) -> dict[str, Any]:
 		"""This session's metadata, such as its ``sessions.tsv`` row."""
 		return self._group().attrs.asdict()
 
-	def recordings(self, version: str = None) -> list:
+	def recordings(self, version: str | None = None) -> list[RecordingView]:
 		"""Every recording in this session.
 
 		Parameters
@@ -588,7 +597,7 @@ class Visit:
 		base = f"{self.sub_id}/{self.ses_id}"
 		return [v for v in views_in(self._group(version), base) if isinstance(v, RecordingView)]
 
-	def tables(self, version: str = None) -> list:
+	def tables(self, version: str | None = None) -> list[TableView]:
 		"""Every table in this session.
 
 		Parameters
@@ -603,7 +612,7 @@ class Visit:
 		base = f"{self.sub_id}/{self.ses_id}"
 		return [v for v in views_in(self._group(version), base) if isinstance(v, TableView)]
 
-	def recording(self, **entities) -> "RecordingView":
+	def recording(self, **entities: Any) -> "RecordingView":
 		"""Get the single recording in this session matching the given entities.
 
 		Parameters
