@@ -14,14 +14,33 @@ from .log import log_mem
 
 @dataclass
 class CodecConfig:
-	"""How sample data is packed and compressed.
+	"""How sample data is packed and compressed. Pass one to :class:`Repo`.
 
-	- ``dtype``: "int16" packs with per-channel scale/offset (lossless for
-	  EDF-sourced data, best compression); "float16" stores rounded physical values.
-	- ``bitround_k``: drop k low bits before compressing -- lossy, smaller. 0 disables.
-	- ``filters``/``compressors``: zarr codecs, defaulting to zstd level 19.
-	- ``chunk_target_bytes`` / ``max_chunk_samples``: chunking along time. Bigger
-	  chunks compress slightly better; smaller ones make windowed reads cheaper.
+	Parameters
+	----------
+	filters : list, optional
+		Zarr filter codecs applied before compression. Empty by default.
+	compressors : list, optional
+		Zarr compression codecs. Defaults to zstd at level 19.
+	bitround_k : int, default 0
+		Drop this many low bits from each sample before compressing. Lossy, but
+		compresses better. 0 disables it.
+	dtype : {"int16", "float16"}, default "int16"
+		How samples are packed. ``"int16"`` stores integers with a per-channel
+		scale and offset, which is lossless for data that arrived as integers,
+		as EDF does, and compresses best. ``"float16"`` stores physical values
+		rounded to half precision. Recordings whose source carries no
+		calibration are stored as float32 regardless.
+	chunk_target_bytes : int, default 8 MiB
+		Target size of one chunk, which bounds chunk size for arrays with many
+		channels.
+	max_chunk_samples : int, default 65536
+		Cap on samples per chunk. Smaller chunks make reading short windows
+		cheaper and full reads slightly more expensive.
+
+	Examples
+	--------
+	>>> repo = Repo("./study.zarr", codec=CodecConfig(dtype="float16"))
 	"""
 
 	filters: list = field(default_factory=list)

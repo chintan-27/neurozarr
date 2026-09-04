@@ -30,8 +30,21 @@ def _table_df(node, columns: list = None) -> pd.DataFrame:
 
 
 class TableView:
-	"""A stored table (channels, events, electrodes, a beh table...). Lazy: the
-	array is only read when df() is called."""
+	"""A stored table: channels, events, electrodes, a behavioral log, and so on.
+
+	Nothing is read from storage until :meth:`df` is called. Obtained from
+	:meth:`Subject.tables`, :meth:`Visit.tables`, or as an attribute of a
+	recording — not constructed directly.
+
+	Attributes
+	----------
+	name : str
+		The table's name within its group, e.g. ``"channels"``.
+	entities : dict
+		BIDS entities parsed from the group name, e.g. ``{"task": "Rest"}``.
+	path : str
+		Where the table sits in the store, for display and logging.
+	"""
 
 	def __init__(self, group: zarr.Group, name: str, entities: dict, path: str):
 		self._group, self.name, self.entities, self.path = group, name, entities, path
@@ -46,8 +59,20 @@ class TableView:
 		return list(self._group[self.name].attrs.asdict().get("columns", []))
 
 	def df(self, columns: list = None) -> pd.DataFrame:
-		"""The table as a DataFrame. Pass columns to read only those -- each column
-		is its own array, so the rest is never fetched."""
+		"""Read the table into a :class:`pandas.DataFrame`.
+
+		Column dtypes recorded at write time are restored, so numeric columns
+		come back as numbers rather than strings.
+
+		Parameters
+		----------
+		columns : list of str, optional
+			Read only these columns. Default reads all of them.
+
+		Returns
+		-------
+		pandas.DataFrame
+		"""
 		return _table_df(self._group[self.name], columns)
 
 	def __repr__(self):
@@ -55,7 +80,20 @@ class TableView:
 
 
 class RecordingView:
-	"""A stored recording. Lazy: nothing is read until data() or raw() is called."""
+	"""A stored recording — one continuous run of sample data plus its metadata.
+
+	Nothing is read from storage until :meth:`data` or :meth:`raw` is called, so
+	holding a view is cheap. Obtained from :meth:`Visit.recording`,
+	:meth:`Subject.recordings` or :meth:`Repo.find` — not constructed directly.
+
+	Attributes
+	----------
+	entities : dict
+		BIDS entities parsed from the group name, e.g. ``{"task": "Rest", "run": "1"}``.
+	path : str
+		Where the recording sits in the store, e.g.
+		``"sub-001/ses-1/ieeg/task-Rest_run-1"``.
+	"""
 
 	def __init__(self, group: zarr.Group, entities: dict, path: str):
 		self._group, self.entities, self.path = group, entities, path
@@ -74,15 +112,17 @@ class RecordingView:
 
 	@property
 	def shape(self) -> tuple:
+		"""Shape of the stored data as ``(n_channels, n_samples)``."""
 		return self._group["data"].shape
 
 	@property
 	def sfreq(self) -> float:
+		"""Sampling frequency in Hz, or ``None`` if the recording has none stored."""
 		return self.meta.get("SamplingFrequency")
 
 	@property
 	def duration(self) -> float:
-		"""Length in seconds, or None if no sampling frequency is stored."""
+		"""Length in seconds, or ``None`` if no sampling frequency is stored."""
 		return self.shape[-1] / self.sfreq if self.sfreq else None
 
 	def _picks(self, picks) -> list:
@@ -96,15 +136,45 @@ class RecordingView:
 
 	def data(self, start: int = None, stop: int = None, tmin: float = None,
 			 tmax: float = None, picks=None):
-		"""(ndarray, meta) in physical units -- the stored per-channel scale/offset
-		is applied when the samples were packed as int16.
+		"""Read samples, converted back to physical units.
 
-		Reads only the window asked for, so a few seconds out of a long recording
-		costs a few chunks rather than the whole array::
+		Only the requested window is fetched from storage, so reading a few
+		seconds out of a long recording costs a few chunks rather than the
+		whole array.
 
-		    data(start=1000, stop=2000)      # by sample index
-		    data(tmin=10, tmax=20)           # by seconds (needs a stored sfreq)
-		    data(picks=["LFP_L"])            # one channel
+		Parameters
+		----------
+		start, stop : int, optional
+			Window bounds as sample indices, following Python slice semantics
+			(``stop`` exclusive). Default is the whole recording.
+		tmin, tmax : float, optional
+			Window bounds in seconds. Converted to sample indices using the
+			stored sampling frequency, and may not be combined meaningfully
+			with ``start``/``stop`` for the same edge.
+		picks : str or int or list, optional
+			Channels to read, as names (matched against :meth:`ch_names`) or
+			integer indices. Default reads every channel.
+
+		Returns
+		-------
+		values : numpy.ndarray
+			Array of shape ``(n_channels, n_samples)``. When the recording was
+			packed as int16, the stored per-channel scale and offset are applied
+			so the result is in the channel's native physical unit.
+		meta : dict
+			The recording's metadata, as stored.
+
+		Raises
+		------
+		ValueError
+			If ``tmin`` or ``tmax`` is given but the recording has no stored
+			sampling frequency. Use ``start``/``stop`` instead in that case.
+
+		Examples
+		--------
+		>>> values, meta = rec.data(start=1000, stop=2000)
+		>>> values, meta = rec.data(tmin=10, tmax=20)
+		>>> values, meta = rec.data(tmin=10, tmax=20, picks=["LFP_L"])
 		"""
 		meta = self.meta
 		if tmin is not None or tmax is not None:
@@ -126,30 +196,73 @@ class RecordingView:
 		return values, meta
 
 	def channels(self) -> pd.DataFrame:
-		"""The channels table stored next to this recording (empty if absent)."""
+		"""Read the channels table stored alongside this recording.
+
+		Returns
+		-------
+		pandas.DataFrame
+			The BIDS ``channels.tsv`` contents, or an empty frame if the
+			recording has no channels table.
+		"""
 		if "channels" not in self._group:
 			return pd.DataFrame()
 		return _table_df(self._group["channels"])
 
 	def events(self) -> pd.DataFrame:
-		"""The events table stored next to this recording (empty if absent)."""
+		"""Read the events table stored alongside this recording.
+
+		Returns
+		-------
+		pandas.DataFrame
+			The BIDS ``events.tsv`` contents — which also carry any annotations
+			the source recording had — or an empty frame if there are none.
+		"""
 		if "events" not in self._group:
 			return pd.DataFrame()
 		return _table_df(self._group["events"])
 
 	def ch_names(self) -> list:
-		"""Channel names: from the stored channels table (BIDS channels.tsv) if there
-		is one, else the names the writer captured off the source Raw."""
+		"""Channel names, taken from the stored channels table when there is one
+		and otherwise from the names captured off the source recording.
+
+		Returns
+		-------
+		list of str
+		"""
 		channels = self.channels()
 		if "name" in channels.columns:
 			return list(channels["name"])
 		return list(self.meta.get("ch_names", []))
 
 	def raw(self, sfreq: float = None, **window) -> "mne.io.RawArray":
-		"""Reconstruct an mne.io.RawArray in physical units, with channel names from
-		the stored channels table. sfreq comes from the recording's metadata
-		(SamplingFrequency, the BIDS key) unless passed explicitly. Accepts the same
-		start/stop/tmin/tmax/picks window arguments as data()."""
+		"""Reconstruct this recording as an :class:`mne.io.RawArray`.
+
+		Channel names come from the stored channels table, and any stored events
+		are restored as annotations when the whole recording is read.
+
+		Parameters
+		----------
+		sfreq : float, optional
+			Sampling frequency in Hz. Defaults to the recording's stored
+			``SamplingFrequency``.
+		**window
+			Any of the ``start``, ``stop``, ``tmin``, ``tmax`` and ``picks``
+			arguments accepted by :meth:`data`.
+
+		Returns
+		-------
+		mne.io.RawArray
+			The recording in physical units, ready to pass to mne.
+
+		Raises
+		------
+		ValueError
+			If no sampling frequency is stored and none was passed.
+
+		See Also
+		--------
+		data : Read the samples as a plain array.
+		"""
 		import mne
 
 		values, meta = self.data(**window)

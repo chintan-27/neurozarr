@@ -61,8 +61,23 @@ def validate_bids(root_dir) -> list:
 
 
 def validate_source(source) -> list:
-	"""Validate whatever a user is about to ingest: a ManifestReader, a BidsReader,
-	or a path to a BIDS folder / manifest CSV."""
+	"""Check a source before converting it, without writing anything.
+
+	Parameters
+	----------
+	source : Reader or str or pathlib.Path
+		A :class:`BidsReader`, a :class:`ManifestReader`, or a path — treated
+		as a manifest if it ends in ``.csv`` or ``.tsv``, and as a BIDS dataset
+		otherwise.
+
+	Returns
+	-------
+	list of str
+		One message per problem found: missing files, formats with no reader,
+		missing manifest columns, or a source that isn't shaped like BIDS. An
+		empty list means the source looks convertible. Messages containing
+		"not fatal" are warnings rather than blockers.
+	"""
 	from .readers import BidsReader, ManifestReader
 
 	if isinstance(source, ManifestReader):

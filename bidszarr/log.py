@@ -6,9 +6,22 @@ logger.addHandler(logging.NullHandler())  # library: never configure root loggin
 
 
 def set_verbosity(level):
-	"""Turn on bidszarr's own logging. level is a logging level (logging.DEBUG,
-	logging.INFO, ...) or its name. Applications that already configure logging
-	themselves can ignore this and just set the "bidszarr" logger directly."""
+	"""Turn on bidszarr's logging output.
+
+	The package is quiet by default, as a library should be. An application
+	that configures logging itself can skip this and set the ``"bidszarr"``
+	logger directly.
+
+	Parameters
+	----------
+	level : int or str
+		A logging level, such as ``logging.DEBUG`` or ``"INFO"``.
+
+	Examples
+	--------
+	>>> import logging
+	>>> bidszarr.set_verbosity(logging.INFO)
+	"""
 	if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
 		handler = logging.StreamHandler()
 		handler.setFormatter(logging.Formatter("%(message)s"))

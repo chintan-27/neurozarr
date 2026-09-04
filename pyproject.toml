@@ -8,11 +8,19 @@ version = "0.1.0"
 description = "Convert neural/behavioral recordings into a BIDS-structured Zarr/Icechunk store"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Chintan Acharya" }]
 keywords = ["bids", "zarr", "icechunk", "neuroscience", "ieeg", "eeg", "dbs"]
 classifiers = [
+    "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Typing :: Typed",
 ]
 dependencies = [
     "icechunk",

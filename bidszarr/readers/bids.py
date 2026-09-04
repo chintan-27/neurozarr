@@ -15,17 +15,35 @@ MNE_READABLE_EXTS = {".edf", ".bdf", ".gdf", ".vhdr", ".set", ".fif", ".cnt"}
 
 
 class BidsReader:
-	"""Reads any valid BIDS dataset generically: subjects/sessions are
-	discovered by directory, not by a required sessions.tsv; datatype
-	directories (ieeg, eeg, beh, anat, ...) are walked without a fixed list;
-	JSON sidecars are resolved via the BIDS inheritance principle (closest
-	matching sidecar wins). BRAVO-specific extras (.bravo_subject_ids.json,
-	_devices.json, _manifest.json) are used only if present -- never required."""
+	"""Read a BIDS dataset from disk.
+
+	Works on any valid BIDS dataset: subjects and sessions are discovered by
+	directory rather than requiring a ``sessions.tsv``, datatype directories
+	(``ieeg``, ``eeg``, ``beh``, ``anat``, …) are walked without a fixed list,
+	and JSON sidecars are resolved through the BIDS inheritance principle, where
+	the closest matching sidecar wins.
+
+	Data files are read by extension: ``.tsv`` with pandas, and EDF, BDF, GDF,
+	BrainVision, EEGLAB, FIF and CNT through mne. A file in any other format is
+	recorded as a reference to its path rather than failing the run.
+
+	Parameters
+	----------
+	root_dir : str or pathlib.Path
+		The dataset root — the directory holding ``dataset_description.json``
+		and the ``sub-*`` directories.
+	subjects : list of str, optional
+		Read only these subjects. An empty list reads none, which is how
+		dataset-level metadata is ingested on its own. Default reads all.
+
+	Examples
+	--------
+	>>> repo.ingest(BidsReader("./my_bids_dataset"))
+	"""
 
 	def __init__(self, root_dir, subjects: list = None):
-		"""subjects, if given, restricts which sub-* directories are read (an empty
-		list reads none). Dataset-level metadata is always yielded, so workers
-		converting one subject each still agree on it."""
+		# Dataset-level metadata is yielded whatever `subjects` says, so parallel
+		# workers each converting one subject still agree on it.
 		self.root_dir = Path(root_dir)
 		self.subjects = None if subjects is None else set(subjects)
 

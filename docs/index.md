@@ -28,8 +28,8 @@ guide/ingest
 
 guide/read
 guide/versioning
-guide/cloud
 guide/derivatives
+guide/cloud
 guide/performance
 guide/cli
 guide/layout
@@ -40,4 +40,5 @@ guide/layout
 :caption: Reference
 
 api
+changelog
 ```

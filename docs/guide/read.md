@@ -1,39 +1,98 @@
 # Reading data back
 
+Open a store the same way you created one, then navigate down from it:
+
 ```python
+from bidszarr import Repo
+
 repo = Repo("./study.zarr")
 
 repo.subjects()                       # ['sub-001', 'sub-002', ...]
 subject = repo.subject("sub-001")
-subject.attrs                         # {'age': 63, ...}
+subject.attrs                         # {'age': 63, 'diagnosis': 'PD', ...}
 subject.visits()                      # ['ses-20220908', ...]
-
-rec = subject.visit("ses-20220908").recording(task="Stream", run=1)
-values, meta = rec.data()             # ndarray in physical units + its metadata
-raw = rec.raw()                       # a real mne.io.RawArray, ready for mne
-df = rec.channels()                   # the channels table as a DataFrame
-events = rec.events()                 # events / annotations
-
-# search across every subject in the store
-for rec in repo.find(task="BrainSenseStream", acq="TD"):
-    print(rec.path, rec.shape)
 ```
 
-Recordings are stored as int16 with per-channel scale/offset; `.data()` and `.raw()` undo that for you, so what you read back matches the source to floating-point precision. Table columns keep their dtypes — numbers come back as numbers. `mne` annotations are stored as an events table and put back on the `Raw` when you read it.
+## Getting to a recording
 
-## Reading only part of a recording
-
-Data is chunked along time, so you can pull a window without fetching the whole array — the point of storing it this way:
+A {class}`~bidszarr.RecordingView` is a handle, not the data — nothing is read
+from storage until you ask for values. Get one by naming its entities within a
+session:
 
 ```python
-values, meta = rec.data(tmin=10, tmax=20)          # ten seconds, by time
-values, meta = rec.data(start=1000, stop=2000)     # or by sample index
-values, meta = rec.data(tmin=10, tmax=20, picks=["LFP_L"])   # one channel
-raw = rec.raw(tmin=10, tmax=20)                    # same window as an mne.Raw
-
-rec.array          # the underlying zarr array, slice it yourself
-rec.duration       # seconds
-rec.sfreq          # sampling rate
+rec = subject.visit("ses-20220908").recording(task="Stream", run=1)
 ```
 
-On a 3708-second recording, reading a 10-second window this way is ~8× faster than reading the whole thing.
+Or collect them in bulk, from a session, a subject, or the whole store:
+
+```python
+subject.visit("ses-20220908").recordings()   # one session
+subject.recordings()                          # every session of one subject
+repo.find(task="BrainSenseStream", acq="TD")  # across every subject
+```
+
+{meth}`~bidszarr.Repo.find` opens one session per subject, so pass `sub=` when
+you already know which subject you want.
+
+## Reading the values
+
+```python
+values, meta = rec.data()   # ndarray (n_channels, n_samples) + its metadata
+raw = rec.raw()             # an mne.io.RawArray, ready to pass to mne
+df = rec.channels()         # the channels table as a DataFrame
+events = rec.events()       # events and annotations
+```
+
+Recordings are stored as integers with a per-channel scale and offset.
+{meth}`~bidszarr.RecordingView.data` and {meth}`~bidszarr.RecordingView.raw`
+undo that for you and hand back physical units, so values match the source to
+floating-point precision. Table columns keep their dtypes, so numbers come back
+as numbers rather than strings. Annotations on the source recording are stored
+as an events table and put back on the `Raw` when you read it whole.
+
+## Reading part of a recording
+
+Sample data is chunked along the time axis, so a window can be fetched without
+reading the whole array — worth doing whenever you want seconds out of a
+recording that runs for hours:
+
+```python
+values, meta = rec.data(tmin=10, tmax=20)                    # by seconds
+values, meta = rec.data(start=1000, stop=2000)               # by sample index
+values, meta = rec.data(tmin=10, tmax=20, picks=["LFP_L"])   # one channel
+raw = rec.raw(tmin=10, tmax=20)                              # same, as an mne.Raw
+```
+
+Reading by seconds needs a stored sampling frequency; if a recording has none,
+`tmin`/`tmax` raise `ValueError` and you can use `start`/`stop` instead.
+
+How much a windowed read actually saves depends on chunk size, set by
+{class}`~bidszarr.CodecConfig` when the data was written: the window is rounded
+out to whole chunks, so a chunk far larger than your typical window means you
+fetch more than you asked for.
+
+Some useful properties for sizing a read before making it:
+
+```python
+rec.shape       # (n_channels, n_samples)
+rec.sfreq       # sampling rate in Hz, or None
+rec.duration    # seconds, or None
+rec.array       # the underlying zarr array, to slice yourself
+```
+
+## Reading tables
+
+Tables that stand on their own — behavioral logs, therapy history — come back as
+{class}`~bidszarr.TableView`:
+
+```python
+for table in subject.tables():
+    print(table.path, table.columns)
+    df = table.df()                     # all of it
+    df = table.df(columns=["onset"])    # or just some columns
+```
+
+Tables belonging to a recording are reached through that recording instead, with
+{meth}`~bidszarr.RecordingView.channels` and
+{meth}`~bidszarr.RecordingView.events`, rather than appearing in
+{meth}`~bidszarr.Subject.tables`.

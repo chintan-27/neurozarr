@@ -1,0 +1,54 @@
+# Contributing
+
+## Setup
+
+```bash
+pip install -e ".[dev]"     # pytest, tqdm
+pytest
+```
+
+Tests build their stores on `memory://`, so they run in a couple of seconds and
+leave nothing on disk.
+
+## Building the docs
+
+```bash
+pip install -e ".[docs]"
+sphinx-build -b html docs docs/_build
+```
+
+The build should stay warning-free. Docstrings are rendered into the API
+reference, so they are written as numpydoc — a summary line, then
+`Parameters`/`Returns`/`Raises` sections. Keep implementation rationale
+(measurements, why an approach was rejected) in `#` comments rather than
+docstrings: comments serve maintainers, docstrings serve users of the package.
+
+## Where things go
+
+- `bidszarr/readers/` — one module per source format. A reader turns its source
+  into `Recording`, `Table` and `Attrs` items and nothing else.
+- `bidszarr/writer.py` — the only code that writes Zarr. Keeping it that way is
+  what guarantees the output structure stays consistent across readers.
+- `scripts/` — entry points and benchmarks, not part of the package.
+- `reference/` — reference-only material, not imported by the package.
+
+## Adding support for a new source format
+
+Write a reader. It needs one method:
+
+```python
+class MyReader:
+    def read(self):
+        yield Attrs((), {"Name": "my study"})
+        yield Recording(Entities("sub-001", "ses-1", "ieeg", {"task": "Rest"}), raw)
+```
+
+There is no base class to inherit from — `Reader` is a `Protocol`, so anything
+with a matching `read()` works. Add tests against a `memory://` store.
+
+## Conventions
+
+- Tabs for indentation, matching the existing files.
+- Public API is snake_case.
+- Deliberate simplifications are marked with a `ponytail:` comment naming the
+  ceiling and the upgrade path.

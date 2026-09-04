@@ -18,14 +18,47 @@ def _entity_value(value):
 
 
 class ManifestReader:
-	"""Reads arbitrary data described by a manifest table (DataFrame or CSV path):
-	one row per file, with columns naming the subject/session/datatype/entities and
-	a path to the file. No assumption about folder layout or naming convention --
-	the caller supplies the mapping. Column names are configurable via ``*_col``
-	kwargs so an existing table doesn't need to be renamed first. Dispatch by file
-	extension mirrors BidsReader: .tsv/.csv -> Table, MNE-readable -> Recording,
-	anything else -> a non-crashing Attrs fallback. A row_reader callback bypasses
-	all of this per-row for fully custom handling."""
+	"""Read data described by a manifest table, one row per file.
+
+	Use this when the data has no standard layout: instead of inferring
+	structure from directory names, you describe each file in a table and say
+	which columns mean what. Nothing is assumed about folder layout or naming.
+
+	Files are read by extension, as :class:`BidsReader` does: ``.tsv``/``.csv``
+	with pandas, and EDF, BDF, GDF, BrainVision, EEGLAB, FIF and CNT through
+	mne. A file in any other format is recorded as a reference to its path
+	rather than failing the run.
+
+	Parameters
+	----------
+	manifest : pandas.DataFrame or str or pathlib.Path
+		The table itself, or a path to a CSV of it.
+	path_col, sub_col : str, default "path", "sub"
+		Columns holding the file path and the subject label. Both are required
+		unless ``row_reader`` is given.
+	ses_col, datatype_col, name_col, meta_col : str
+		Columns holding the session label, BIDS datatype, stored name, and
+		per-row metadata. Metadata may be a dict or a JSON string. Each is
+		optional in the table; only the column *name* is configured here.
+	entity_cols : list of str, optional
+		Columns to treat as BIDS entities. By default every column that isn't
+		one of the six named above becomes an entity, so a ``task`` or ``run``
+		column lands where it should.
+	row_reader : callable, optional
+		Called with each row, returning the item to store. Bypasses all
+		column handling above, for sources that need custom logic.
+
+	Raises
+	------
+	ValueError
+		If the subject or path column is missing, unless ``row_reader`` is
+		given. The message lists the columns the table does have.
+
+	Examples
+	--------
+	>>> repo.ingest(ManifestReader("manifest.csv"))
+	>>> repo.ingest(ManifestReader(df, sub_col="subject", path_col="filepath"))
+	"""
 
 	def __init__(self, manifest, *, path_col="path", sub_col="sub", ses_col="ses",
 				 datatype_col="datatype", name_col="name", meta_col="meta",

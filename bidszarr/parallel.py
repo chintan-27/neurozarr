@@ -47,10 +47,41 @@ def _convert_subject(job) -> tuple:
 
 def convert_parallel(source, dest, workers: int = None, codec=None,
 					 message: str = "convert", skip_existing: bool = False) -> dict:
-	"""Convert a BIDS dataset with one worker process per subject.
+	"""Convert a BIDS dataset using one worker process per subject.
 
-	Returns {subject_id: recording_count}. Speedup is bounded by the largest
-	subject, since a subject is the unit of work.
+	Since a subject is the unit of work, the wall-clock time is bounded by the
+	largest single subject however many workers are available.
+
+	Parameters
+	----------
+	source : str or pathlib.Path
+		The BIDS dataset to convert.
+	dest : str or pathlib.Path
+		Where to write the store.
+	workers : int, optional
+		Number of worker processes. Defaults to what
+		:class:`~concurrent.futures.ProcessPoolExecutor` chooses.
+	codec : CodecConfig, optional
+		How sample data is packed and compressed.
+	message : str, default "convert"
+		Commit message for each subject's commit.
+	skip_existing : bool, default False
+		Write only what isn't in the store yet.
+
+	Returns
+	-------
+	dict
+		Number of recordings converted, keyed by subject label.
+
+	Raises
+	------
+	ValueError
+		If ``source`` contains no ``sub-*`` directories.
+
+	Examples
+	--------
+	>>> convert_parallel("./BIDS", "./study.zarr", workers=6)
+	{'sub-001': 412, 'sub-002': 173, ...}
 	"""
 	subjects = _subject_ids(source)
 	if not subjects:

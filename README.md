@@ -228,21 +228,27 @@ study.zarr/
 
 Inside a subject's repo the tree starts at its sessions — no redundant `sub-001/` level, because the repository already *is* that subject.
 
-## Development
+## Documentation
 
-```bash
-pip install -e ".[dev]"
-pytest                    # ~30 tests, all in-memory, no files touched
-```
-
-Tests run against `memory://` stores, so they are fast and leave nothing behind.
-
-## Docs
-
-This README *is* the docs, rendered as a website with the API reference alongside it:
+Full documentation — user guide and API reference — builds from `docs/`:
 
 ```bash
 pip install -e ".[docs]"
 sphinx-build -b html docs docs/_build
 open docs/_build/index.html
 ```
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest                    # 42 tests, all in-memory, no files touched
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how the package is organized and how
+to add support for a new source format. Release notes are in
+[CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+[MIT](LICENSE).

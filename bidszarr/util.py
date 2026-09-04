@@ -8,16 +8,17 @@ import zarr
 
 def chunk_shape(shape: tuple, itemsize: int, target_bytes: int = 8 * 1024 * 1024,
 				max_samples: int = 65536) -> tuple:
-	"""Chunk along the last (time) axis only.
+	"""Pick a chunk shape, dividing along the last (time) axis only.
 
-	Two limits, whichever is smaller: a byte target (keeps chunks reasonable for
-	wide, many-channel arrays) and a sample cap. The sample cap is what makes
-	windowed reads worth doing -- with few channels a byte target alone puts an
-	entire multi-hour recording in one chunk, so reading 10 seconds costs the whole
-	array. Measured on a 2ch/927k-sample recording: 65536 samples read a 10 s window
-	6x faster than a single chunk and full reads ~2x faster, for ~14% more storage;
-	going smaller (16k) made full reads 3x slower.
+	Two limits apply, whichever is smaller: a byte target, which keeps chunks
+	reasonable for wide many-channel arrays, and a cap on samples per chunk,
+	which is what keeps windowed reads cheap.
 	"""
+	# The sample cap matters because a byte target alone puts an entire
+	# multi-hour 2-channel recording in a single chunk, making a 10 s read cost
+	# the whole array. Measured on a 2ch/927k-sample recording: at 65536 samples
+	# a 10 s window read 6x faster than a single chunk and full reads ~2x faster,
+	# for ~14% more storage; dropping to 16k made full reads 3x slower.
 	row_bytes = itemsize
 	for dim in shape[:-1]:
 		row_bytes *= dim
@@ -32,14 +33,13 @@ def set_attrs(node, attrs: dict):
 
 
 def create_table(group: zarr.Group, name: str, df: pd.DataFrame, extra_attrs: dict = None):
-	"""Store a DataFrame as one string array, recording each column's dtype in attrs
-	so readers cast back faithfully (see read._table_df).
-
-	One array per column was measured and rejected: BIDS datasets are mostly many
-	small tables (tens to hundreds of rows), so a separate zarr array per column
-	costs more in per-array metadata than typed values save -- it made a real
-	dataset 33% larger (144MB -> 192MB). Readers still understand that layout.
+	"""Store a DataFrame as one string array, recording each column's dtype in
+	attrs so readers cast the values back faithfully (see ``read._table_df``).
 	"""
+	# One zarr array per column was measured and rejected: BIDS datasets are
+	# mostly many small tables (tens to hundreds of rows), so per-array metadata
+	# costs more than typed values save -- it made a real dataset 33% larger
+	# (144MB -> 192MB). Readers still understand that layout if it turns up.
 	table = group.create_array(name, data=df.astype(str).to_numpy().astype(str), overwrite=True)
 	set_attrs(table, {
 		"columns": [str(c) for c in df.columns],

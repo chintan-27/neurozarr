@@ -60,6 +60,11 @@ Writing
 .. autoclass:: bidszarr.CodecConfig
    :members:
 
+Parallel conversion
+-------------------
+
+.. autofunction:: bidszarr.parallel.convert_parallel
+
 Storage, validation, and verification
 --------------------------------------
 

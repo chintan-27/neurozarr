@@ -13,9 +13,30 @@ from .items import Recording, Table
 
 
 def verify(source, store, tolerance: float = 1e-9, sample_limit: int = None) -> list:
-	"""Re-read the source and compare every recording and table against what is in
-	the store. Returns a list of problem strings (empty means the conversion is
-	faithful). sample_limit stops after that many items, for a quick spot check."""
+	"""Check that a store faithfully matches the source it was converted from.
+
+	Re-reads the source and compares each recording's samples and each table's
+	row count against what the store holds.
+
+	Parameters
+	----------
+	source : str or pathlib.Path
+		The BIDS dataset the store was converted from.
+	store : str or pathlib.Path or icechunk.Storage
+		The store to check.
+	tolerance : float, default 1e-9
+		Absolute tolerance when comparing sample values.
+	sample_limit : int, optional
+		Stop after checking this many items, for a quick spot check. Default
+		checks everything.
+
+	Returns
+	-------
+	list of str
+		One message per problem found: data missing from the store, a shape
+		mismatch, differing values, or a differing row count. An empty list
+		means the conversion is faithful.
+	"""
 	from .read import RecordingView, _table_df
 
 	repo = Repo(store)
@@ -67,9 +88,30 @@ def verify(source, store, tolerance: float = 1e-9, sample_limit: int = None) -> 
 
 
 def export_bids(store, dest, subjects: list = None) -> Path:
-	"""Write a store back out as a BIDS folder: recordings as BrainVision (a format
-	mne always writes without extra dependencies), tables as .tsv, metadata as JSON
-	sidecars. Useful for handing data to tools that only speak BIDS on disk."""
+	"""Write a store back out as a BIDS dataset on disk.
+
+	Recordings become signal files, tables become ``.tsv``, and metadata becomes
+	JSON sidecars. Use it to hand data to tools that only read BIDS from a
+	filesystem.
+
+	Recordings are written as BrainVision if ``pybv`` is installed, EDF if
+	``edfio`` is, and otherwise FIF, which mne reads but which is not
+	BIDS-conformant for ieeg or eeg data. A warning is logged in that case.
+
+	Parameters
+	----------
+	store : str or pathlib.Path or icechunk.Storage
+		The store to export.
+	dest : str or pathlib.Path
+		Directory to write the dataset into. Created if it does not exist.
+	subjects : list of str, optional
+		Export only these subjects. Default exports all of them.
+
+	Returns
+	-------
+	pathlib.Path
+		The dataset directory that was written.
+	"""
 	import mne
 
 	repo = Repo(store)

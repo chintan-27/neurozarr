@@ -9,13 +9,31 @@ _MEMORY_STORES = {}
 
 
 def storage_from(target, sub_path: str = "", **options) -> icechunk.Storage:
-	"""Build an icechunk.Storage for target/sub_path.
+	"""Build an :class:`icechunk.Storage` for ``target/sub_path``.
 
-	target may be a local path, a URI ("s3://bucket/prefix", "gs://...",
-	"az://account/container/prefix", "memory://name"), or an already-built
-	icechunk.Storage (returned as-is, sub_path ignored -- the caller owns it).
-	Extra keyword options pass straight through to the icechunk constructor,
-	e.g. region=/anonymous=/from_env= for s3."""
+	Parameters
+	----------
+	target : str or pathlib.Path or icechunk.Storage
+		A local path, a URI, or a pre-built storage. Supported URI schemes are
+		``s3://bucket/prefix``, ``r2://``, ``gs://``, ``az://account/container/prefix``
+		and ``memory://name``, the last being an in-memory store useful for
+		tests. A pre-built storage is returned unchanged, ignoring ``sub_path``.
+	sub_path : str, optional
+		Path segment appended to the target, used to give each subject its own
+		repository.
+	**options
+		Passed to the underlying icechunk storage constructor, e.g.
+		``region=``, ``anonymous=``, ``from_env=``.
+
+	Returns
+	-------
+	icechunk.Storage
+
+	Raises
+	------
+	ValueError
+		If the URI scheme is not one of those listed above.
+	"""
 	if isinstance(target, icechunk.Storage):
 		return target
 
