@@ -1,5 +1,5 @@
-project = "bidszarr"
-copyright = "2026, bidszarr contributors"
+project = "neurozarr"
+copyright = "2026, neurozarr contributors"
 
 extensions = [
     "myst_parser",

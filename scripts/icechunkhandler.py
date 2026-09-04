@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from bidszarr import BidsReader, Repo
+from neurozarr import BidsReader, Repo
 
 HOME_DIR = Path("./")
 

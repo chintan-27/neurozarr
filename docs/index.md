@@ -1,11 +1,11 @@
-# bidszarr
+# neurozarr
 
 Put neural and behavioral recordings into a **versioned, cloud-ready Zarr/Icechunk store** — whatever shape your source data is in.
 
 Add recordings one at a time, describe a pile of files in a table, or write a reader for your own format. However the data goes in, it comes out with the same predictable structure, a full version history, and fast reads of any slice of it.
 
 ```python
-from bidszarr import Repo
+from neurozarr import Repo
 
 repo = Repo("./study.zarr")
 

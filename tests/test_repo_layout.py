@@ -1,6 +1,6 @@
 """Layout and durability: one repo per subject, and reopening never destroys data."""
 
-from bidszarr import Repo
+from neurozarr import Repo
 
 
 def test_reopening_does_not_wipe_existing_data(store, raw):
@@ -45,7 +45,7 @@ def test_each_subject_is_an_independent_repo(store, raw):
 
 
 def test_dataset_level_attrs_go_to_their_own_repo(store):
-	from bidszarr import Attrs
+	from neurozarr import Attrs
 
 	repo = Repo(store)
 	repo._route_attrs(Attrs((), {"Name": "My Study"}))

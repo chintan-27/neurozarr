@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "bidszarr"
+name = "neurozarr"
 version = "0.1.0"
 description = "Put neural/behavioral recordings into a versioned, cloud-ready Zarr/Icechunk store"
 readme = "README.md"
@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Chintan Acharya" }]
-keywords = ["bids", "zarr", "icechunk", "neuroscience", "ieeg", "eeg", "dbs"]
+keywords = ["zarr", "icechunk", "neuroscience", "ieeg", "eeg", "dbs", "bids"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3",
@@ -31,17 +31,17 @@ dependencies = [
 ]
 
 [project.scripts]
-bidszarr = "bidszarr.cli:main"
+neurozarr = "neurozarr.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest", "tqdm", "mypy", "pandas-stubs"]
 docs = ["sphinx", "myst-parser", "furo"]
 
 [tool.setuptools.packages.find]
-include = ["bidszarr*"]
+include = ["neurozarr*"]
 
 [tool.setuptools.package-data]
-bidszarr = ["py.typed"]
+neurozarr = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -50,7 +50,7 @@ markers = ["slow: shells out to a type checker; skip with -m 'not slow'"]
 [tool.mypy]
 # No python_version pin: numpy's bundled stubs use 3.12+ syntax, so checking
 # against the floor of requires-python fails inside numpy rather than here.
-files = ["bidszarr"]
+files = ["neurozarr"]
 # The package ships py.typed, so its own annotations must hold up.
 disallow_untyped_defs = true
 disallow_incomplete_defs = true

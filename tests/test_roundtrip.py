@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from bidszarr import Repo
+from neurozarr import Repo
 
 
 def test_recording_data_roundtrips(written, raw):
@@ -22,7 +22,7 @@ def test_recording_rebuilds_mne_raw(written, raw):
 def test_raw_without_sfreq_raises_clearly(store):
 	"""Data stored without any sampling rate (e.g. by an older version) should say
 	so plainly rather than guessing, and still be readable with an explicit sfreq."""
-	from bidszarr.read import RecordingView
+	from neurozarr.read import RecordingView
 
 	repo = Repo(store)
 	group = repo._writer_for("sub-001").root.require_group("ses-1/ieeg/task-X")

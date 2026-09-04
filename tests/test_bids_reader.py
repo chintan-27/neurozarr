@@ -5,9 +5,9 @@ import json
 import pandas as pd
 import pytest
 
-from bidszarr import Repo
-from bidszarr.readers import BidsReader
-from bidszarr.validate import validate_bids
+from neurozarr import Repo
+from neurozarr.readers import BidsReader
+from neurozarr.validate import validate_bids
 
 
 @pytest.fixture

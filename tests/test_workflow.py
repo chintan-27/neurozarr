@@ -7,9 +7,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from bidszarr import Repo
-from bidszarr.readers import BidsReader
-from bidszarr.verify import export_bids, verify
+from neurozarr import Repo
+from neurozarr.readers import BidsReader
+from neurozarr.verify import export_bids, verify
 
 
 @pytest.fixture
@@ -35,8 +35,8 @@ def test_skip_existing_leaves_stored_data_alone(store, raw):
 
 	class OneRecording:
 		def read(self):
-			from bidszarr.entities import Entities
-			from bidszarr.items import Recording
+			from neurozarr.entities import Entities
+			from neurozarr.items import Recording
 			yield Recording(Entities("sub-001", "ses-1", "ieeg", {"task": "X"}), other, {})
 
 	repo = Repo(store)

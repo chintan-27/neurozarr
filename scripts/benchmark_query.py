@@ -2,7 +2,7 @@
 
 	python scripts/benchmark_query.py ./study.zarr
 
-Ported to the bidszarr read API: each subject is its own Icechunk repository now,
+Ported to the neurozarr read API: each subject is its own Icechunk repository now,
 so there is no single root to index into with root["sub-001"].
 """
 
@@ -12,7 +12,7 @@ import time
 
 import zarr
 
-from bidszarr import Repo
+from neurozarr import Repo
 
 STORE = "zarr"
 SUBJECT = "sub-001"

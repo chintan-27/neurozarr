@@ -6,7 +6,7 @@
 import logging
 import sys
 
-from bidszarr import BidsReader, Repo, set_verbosity
+from neurozarr import BidsReader, Repo, set_verbosity
 
 
 def main(source="./BIDS", dest="./study.zarr"):

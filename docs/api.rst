@@ -1,79 +1,79 @@
 API reference
 =============
 
-Everything below is importable directly from ``bidszarr``.
+Everything below is importable directly from ``neurozarr``.
 
 Repo, Subject, Visit
 --------------------
 
-.. autoclass:: bidszarr.Repo
+.. autoclass:: neurozarr.Repo
    :members:
 
-.. autoclass:: bidszarr.Subject
+.. autoclass:: neurozarr.Subject
    :members:
 
-.. autoclass:: bidszarr.Visit
+.. autoclass:: neurozarr.Visit
    :members:
 
 Data model
 ----------
 
-.. autoclass:: bidszarr.Entities
+.. autoclass:: neurozarr.Entities
    :members:
 
-.. autoclass:: bidszarr.Recording
+.. autoclass:: neurozarr.Recording
    :members:
 
-.. autoclass:: bidszarr.Table
+.. autoclass:: neurozarr.Table
    :members:
 
-.. autoclass:: bidszarr.Attrs
+.. autoclass:: neurozarr.Attrs
    :members:
 
-.. autoclass:: bidszarr.Reader
+.. autoclass:: neurozarr.Reader
    :members:
 
 Readers
 -------
 
-.. autoclass:: bidszarr.BidsReader
+.. autoclass:: neurozarr.BidsReader
    :members:
 
-.. autoclass:: bidszarr.ManifestReader
+.. autoclass:: neurozarr.ManifestReader
    :members:
 
 Reading data back
 ------------------
 
-.. autoclass:: bidszarr.RecordingView
+.. autoclass:: neurozarr.RecordingView
    :members:
 
-.. autoclass:: bidszarr.TableView
+.. autoclass:: neurozarr.TableView
    :members:
 
 Writing
 -------
 
-.. autoclass:: bidszarr.Writer
+.. autoclass:: neurozarr.Writer
    :members:
 
-.. autoclass:: bidszarr.CodecConfig
+.. autoclass:: neurozarr.CodecConfig
    :members:
 
 Parallel conversion
 -------------------
 
-.. autofunction:: bidszarr.parallel.convert_parallel
+.. autofunction:: neurozarr.parallel.convert_parallel
 
 Storage, validation, and verification
 --------------------------------------
 
-.. autofunction:: bidszarr.storage_from
+.. autofunction:: neurozarr.storage_from
 
-.. autofunction:: bidszarr.set_verbosity
+.. autofunction:: neurozarr.set_verbosity
 
-.. autofunction:: bidszarr.validate_source
+.. autofunction:: neurozarr.validate_source
 
-.. autofunction:: bidszarr.verify
+.. autofunction:: neurozarr.verify
 
-.. autofunction:: bidszarr.export_bids
+.. autofunction:: neurozarr.export_bids

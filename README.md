@@ -1,11 +1,11 @@
-# bidszarr
+# neurozarr
 
 Put neural and behavioral recordings into a **versioned, cloud-ready Zarr/Icechunk store** — whatever shape your source data is in.
 
 Add recordings one at a time, describe a pile of files in a table, or write a reader for your own format. However the data goes in, it comes out with the same predictable structure, a full version history, and fast reads of any slice of it.
 
 ```python
-from bidszarr import Repo
+from neurozarr import Repo
 
 repo = Repo("./study.zarr")
 
@@ -53,7 +53,7 @@ Describe your files in a table — one row per file — and `ManifestReader` doe
 | sub-001 | ses-1 | beh | Log | /data/patient1_log.csv |
 
 ```python
-from bidszarr import ManifestReader
+from neurozarr import ManifestReader
 
 repo.ingest(ManifestReader("manifest.csv"))
 ```
@@ -83,10 +83,10 @@ repo.save("added sub-001")
 
 ### 3. By writing a Reader
 
-Neither built-in reader fits your source? Implement `bidszarr.Reader` — one method, `read()`, yielding `Recording`/`Table`/`Attrs` (see `bidszarr/items.py`):
+Neither built-in reader fits your source? Implement `neurozarr.Reader` — one method, `read()`, yielding `Recording`/`Table`/`Attrs` (see `neurozarr/items.py`):
 
 ```python
-from bidszarr import Recording, Table, Attrs, Entities
+from neurozarr import Recording, Table, Attrs, Entities
 
 class MyReader:
     def read(self):
@@ -104,7 +104,7 @@ The Writer is the only thing that touches Zarr, so however you read your source,
 Already have BIDS on disk? `BidsReader` reads any valid dataset generically — subjects and sessions discovered by directory, datatype folders walked without a fixed list, and JSON sidecars resolved through the BIDS inheritance principle.
 
 ```python
-from bidszarr import BidsReader
+from neurozarr import BidsReader
 
 repo.ingest(BidsReader("./my_bids_dataset"))
 ```
@@ -147,7 +147,7 @@ rec.duration       # seconds
 rec.sfreq          # sampling rate
 ```
 
-On a 3708-second recording, reading a 10-second window this way is ~8× faster than reading the whole thing.
+How much this saves depends on the chunk size the data was written with: a window is rounded out to whole chunks, so chunks much larger than your typical read fetch more than you asked for.
 
 ## Versioning
 
@@ -191,25 +191,25 @@ They read back like anything else — `subject.recordings()` returns them with `
 ## Faster and repeat conversions
 
 ```python
-from bidszarr.parallel import convert_parallel
+from neurozarr.parallel import convert_parallel
 
 convert_parallel("./BIDS", "./study.zarr", workers=6)   # one process per subject
 repo.ingest(reader, skip_existing=True)                  # only write what's new
 ```
 
-Subjects are independent repositories, so they convert concurrently — on the reference dataset that's 85s → 55s, bounded by the largest subject. `skip_existing` makes a re-run after new data arrives ~11× faster, since it writes only what isn't stored yet.
+Subjects are independent repositories, so they convert concurrently. A subject is the unit of work, so the total time is bounded by the largest single subject however many workers you give it. `skip_existing` checks each incoming item against what the store already holds, so a re-run after new data arrives writes only what is missing.
 
 ## Command line
 
 ```bash
-bidszarr validate ./my_bids_dataset          # check before converting
-bidszarr convert ./my_bids_dataset ./out     # BIDS folder or manifest.csv
-bidszarr convert ./BIDS ./out -j 6           # one worker per subject
-bidszarr convert ./BIDS ./out --skip-existing   # only what's new
-bidszarr info ./out                          # subjects, visits, counts
-bidszarr history ./out                       # versions and tags
-bidszarr verify ./BIDS ./out                 # confirm the store matches its source
-bidszarr export ./out ./bids_again           # write the store back out as BIDS
+neurozarr validate ./my_bids_dataset          # check before converting
+neurozarr convert ./my_bids_dataset ./out     # BIDS folder or manifest.csv
+neurozarr convert ./BIDS ./out -j 6           # one worker per subject
+neurozarr convert ./BIDS ./out --skip-existing   # only what's new
+neurozarr info ./out                          # subjects, visits, counts
+neurozarr history ./out                       # versions and tags
+neurozarr verify ./BIDS ./out                 # confirm the store matches its source
+neurozarr export ./out ./bids_again           # write the store back out as BIDS
 ```
 
 `convert` takes `--dtype {int16,float16}`, `-m` for the commit message, `-q` to quiet it, and `--force` to convert despite validation warnings. `-v` turns on debug logging.

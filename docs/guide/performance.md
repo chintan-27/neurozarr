@@ -4,10 +4,10 @@
 
 Each subject is a separate repository, so subjects can be written at the same
 time without coordinating — no shared session, no write conflicts.
-{func}`~bidszarr.parallel.convert_parallel` runs one worker process per subject:
+{func}`~neurozarr.parallel.convert_parallel` runs one worker process per subject:
 
 ```python
-from bidszarr.parallel import convert_parallel
+from neurozarr.parallel import convert_parallel
 
 convert_parallel("./BIDS", "./study.zarr", workers=6)
 ```
@@ -41,5 +41,5 @@ small amount of new data.
 On the command line both are flags:
 
 ```bash
-bidszarr convert ./BIDS ./out -j 6 --skip-existing
+neurozarr convert ./BIDS ./out -j 6 --skip-existing
 ```

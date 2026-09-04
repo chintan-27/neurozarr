@@ -10,7 +10,7 @@ import zarr
 from zarr.codecs import BloscCodec, BloscShuffle, ZstdCodec
 from zarr.codecs.numcodecs import BZ2, LZ4, LZMA, Delta
 
-from bidszarr import BidsReader, CodecConfig, Repo
+from neurozarr import BidsReader, CodecConfig, Repo
 
 verbose = False
 BIDS_DIR = Path("./BIDS")

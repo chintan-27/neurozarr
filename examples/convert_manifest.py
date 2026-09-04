@@ -12,7 +12,7 @@ import mne
 import numpy as np
 import pandas as pd
 
-from bidszarr import ManifestReader, Repo
+from neurozarr import ManifestReader, Repo
 
 scratch = Path(tempfile.mkdtemp())
 

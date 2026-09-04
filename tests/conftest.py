@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from bidszarr import Repo
+from neurozarr import Repo
 
 _counter = itertools.count()
 

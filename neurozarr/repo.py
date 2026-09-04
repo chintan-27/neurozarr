@@ -121,7 +121,7 @@ class Repo:
 		See Also
 		--------
 		save : Commit what was ingested.
-		bidszarr.parallel.convert_parallel : Ingest subjects concurrently.
+		neurozarr.parallel.convert_parallel : Ingest subjects concurrently.
 		"""
 		existing = self._existing_paths() if skip_existing else None
 		items = reader.read()

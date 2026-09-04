@@ -8,7 +8,7 @@ repo.ingest(reader)
 repo.save("initial conversion")     # commit
 ```
 
-{meth}`~bidszarr.Repo.save` commits each subject that changed and skips the
+{meth}`~neurozarr.Repo.save` commits each subject that changed and skips the
 rest, so re-saving after touching one subject doesn't churn the others.
 
 ## Looking at history
@@ -18,7 +18,7 @@ repo.history()          # [(snapshot_id, message, written_at), ...] newest first
 ```
 
 A store spans one repository per subject, so history belongs to a subject rather
-than the store as a whole. {meth}`~bidszarr.Repo.history` reads the first
+than the store as a whole. {meth}`~neurozarr.Repo.history` reads the first
 subject by default; pass `sub_id` for a particular one.
 
 ## Naming a state
@@ -31,7 +31,7 @@ repo.tags()             # ['v1']
 ```
 
 Because a version of the dataset spans every subject's repository,
-{meth}`~bidszarr.Repo.tag` applies the same name to all of them.
+{meth}`~neurozarr.Repo.tag` applies the same name to all of them.
 
 ## Reading an earlier state
 
@@ -49,5 +49,5 @@ comparing a reprocessing run against what it replaced.
 On the command line:
 
 ```bash
-bidszarr history ./study.zarr
+neurozarr history ./study.zarr
 ```

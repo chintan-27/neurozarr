@@ -3,7 +3,7 @@
 Open a store the same way you created one, then navigate down from it:
 
 ```python
-from bidszarr import Repo
+from neurozarr import Repo
 
 repo = Repo("./study.zarr")
 
@@ -15,7 +15,7 @@ subject.visits()                      # ['ses-20220908', ...]
 
 ## Getting to a recording
 
-A {class}`~bidszarr.RecordingView` is a handle, not the data — nothing is read
+A {class}`~neurozarr.RecordingView` is a handle, not the data — nothing is read
 from storage until you ask for values. Get one by naming its entities within a
 session:
 
@@ -31,7 +31,7 @@ subject.recordings()                          # every session of one subject
 repo.find(task="BrainSenseStream", acq="TD")  # across every subject
 ```
 
-{meth}`~bidszarr.Repo.find` opens one session per subject, so pass `sub=` when
+{meth}`~neurozarr.Repo.find` opens one session per subject, so pass `sub=` when
 you already know which subject you want.
 
 ## Reading the values
@@ -44,7 +44,7 @@ events = rec.events()       # events and annotations
 ```
 
 Recordings are stored as integers with a per-channel scale and offset.
-{meth}`~bidszarr.RecordingView.data` and {meth}`~bidszarr.RecordingView.raw`
+{meth}`~neurozarr.RecordingView.data` and {meth}`~neurozarr.RecordingView.raw`
 undo that for you and hand back physical units, so values match the source to
 floating-point precision. Table columns keep their dtypes, so numbers come back
 as numbers rather than strings. Annotations on the source recording are stored
@@ -67,7 +67,7 @@ Reading by seconds needs a stored sampling frequency; if a recording has none,
 `tmin`/`tmax` raise `ValueError` and you can use `start`/`stop` instead.
 
 How much a windowed read actually saves depends on chunk size, set by
-{class}`~bidszarr.CodecConfig` when the data was written: the window is rounded
+{class}`~neurozarr.CodecConfig` when the data was written: the window is rounded
 out to whole chunks, so a chunk far larger than your typical window means you
 fetch more than you asked for.
 
@@ -83,7 +83,7 @@ rec.array       # the underlying zarr array, to slice yourself
 ## Reading tables
 
 Tables that stand on their own — behavioral logs, therapy history — come back as
-{class}`~bidszarr.TableView`:
+{class}`~neurozarr.TableView`:
 
 ```python
 for table in subject.tables():
@@ -93,6 +93,6 @@ for table in subject.tables():
 ```
 
 Tables belonging to a recording are reached through that recording instead, with
-{meth}`~bidszarr.RecordingView.channels` and
-{meth}`~bidszarr.RecordingView.events`, rather than appearing in
-{meth}`~bidszarr.Subject.tables`.
+{meth}`~neurozarr.RecordingView.channels` and
+{meth}`~neurozarr.RecordingView.events`, rather than appearing in
+{meth}`~neurozarr.Subject.tables`.

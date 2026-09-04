@@ -1,9 +1,9 @@
 import pandas as pd
 import pytest
 
-from bidszarr import Repo
-from bidszarr.items import Attrs, Table
-from bidszarr.readers import ManifestReader
+from neurozarr import Repo
+from neurozarr.items import Attrs, Table
+from neurozarr.readers import ManifestReader
 
 
 @pytest.fixture

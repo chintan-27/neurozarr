@@ -1,15 +1,15 @@
 import logging
 import resource
 
-logger = logging.getLogger("bidszarr")
+logger = logging.getLogger("neurozarr")
 logger.addHandler(logging.NullHandler())  # library: never configure root logging
 
 
 def set_verbosity(level: int | str) -> None:
-	"""Turn on bidszarr's logging output.
+	"""Turn on neurozarr's logging output.
 
 	The package is quiet by default, as a library should be. An application
-	that configures logging itself can skip this and set the ``"bidszarr"``
+	that configures logging itself can skip this and set the ``"neurozarr"``
 	logger directly.
 
 	Parameters
@@ -20,7 +20,7 @@ def set_verbosity(level: int | str) -> None:
 	Examples
 	--------
 	>>> import logging
-	>>> bidszarr.set_verbosity(logging.INFO)
+	>>> neurozarr.set_verbosity(logging.INFO)
 	"""
 	if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
 		handler = logging.StreamHandler()

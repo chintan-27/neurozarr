@@ -7,7 +7,7 @@ Nothing about the API changes -- only the target you hand Repo().
 
 import icechunk
 
-from bidszarr import BidsReader, Repo
+from neurozarr import BidsReader, Repo
 
 
 def to_s3():

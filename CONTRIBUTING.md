@@ -47,9 +47,9 @@ docstrings: comments serve maintainers, docstrings serve users of the package.
 
 ## Where things go
 
-- `bidszarr/readers/` — one module per source format. A reader turns its source
+- `neurozarr/readers/` — one module per source format. A reader turns its source
   into `Recording`, `Table` and `Attrs` items and nothing else.
-- `bidszarr/writer.py` — the only code that writes Zarr. Keeping it that way is
+- `neurozarr/writer.py` — the only code that writes Zarr. Keeping it that way is
   what guarantees the output structure stays consistent across readers.
 - `scripts/` — entry points and benchmarks, not part of the package.
 - `reference/` — reference-only material, not imported by the package.

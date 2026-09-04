@@ -1,6 +1,6 @@
 # Command line
 
-Installing the package puts a `bidszarr` command on your path. Every command
+Installing the package puts a `neurozarr` command on your path. Every command
 takes `-v` to turn on debug logging.
 
 ## convert
@@ -8,7 +8,7 @@ takes `-v` to turn on debug logging.
 Convert a source into a store.
 
 ```bash
-bidszarr convert <source> <dest>
+neurozarr convert <source> <dest>
 ```
 
 `source` is either a manifest `.csv`/`.tsv` or a BIDS dataset directory, chosen
@@ -37,8 +37,8 @@ A progress bar appears if `tqdm` is installed.
 Check a source before converting it. Writes nothing.
 
 ```bash
-bidszarr validate ./manifest.csv
-bidszarr validate ./my_bids_dataset
+neurozarr validate ./manifest.csv
+neurozarr validate ./my_bids_dataset
 ```
 
 Reports missing files, formats with no reader, missing manifest columns, and
@@ -50,7 +50,7 @@ Show what a store contains — subjects, and each one's visit, recording and tab
 counts.
 
 ```bash
-bidszarr info ./study.zarr
+neurozarr info ./study.zarr
 ```
 
 ## history
@@ -58,8 +58,8 @@ bidszarr info ./study.zarr
 Show a store's commits and tags.
 
 ```bash
-bidszarr history ./study.zarr
-bidszarr history ./study.zarr --subject sub-002
+neurozarr history ./study.zarr
+neurozarr history ./study.zarr --subject sub-002
 ```
 
 History belongs to a subject, since each subject is a separate repository.
@@ -71,8 +71,8 @@ Check that a store faithfully matches the source it came from, comparing sample
 values and row counts.
 
 ```bash
-bidszarr verify ./BIDS ./study.zarr
-bidszarr verify ./BIDS ./study.zarr --limit 30    # quick spot check
+neurozarr verify ./BIDS ./study.zarr
+neurozarr verify ./BIDS ./study.zarr --limit 30    # quick spot check
 ```
 
 Exits non-zero and lists the mismatches if any are found.
@@ -83,8 +83,8 @@ Write a store back out as a BIDS dataset on disk, for tools that only read BIDS
 from a filesystem.
 
 ```bash
-bidszarr export ./study.zarr ./bids_again
-bidszarr export ./study.zarr ./bids_again --subject sub-001
+neurozarr export ./study.zarr ./bids_again
+neurozarr export ./study.zarr ./bids_again --subject sub-001
 ```
 
 Recordings are written as BrainVision if `pybv` is installed, EDF if `edfio` is,

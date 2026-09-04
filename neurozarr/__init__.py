@@ -2,7 +2,7 @@
 
 Point :class:`Repo` at a destination, add data, and save::
 
-    from bidszarr import Repo
+    from neurozarr import Repo
 
     repo = Repo("./study.zarr")
     visit = repo.create_subject("sub-001").add_visit("ses-1")
@@ -33,7 +33,7 @@ from .verify import export_bids, verify
 from .writer import CodecConfig, Writer
 
 try:
-	__version__ = version("bidszarr")
+	__version__ = version("neurozarr")
 except PackageNotFoundError:  # running from a source tree that was never installed
 	__version__ = "0.0.0.dev0"
 

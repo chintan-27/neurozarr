@@ -38,7 +38,7 @@ First release.
 - `verify`, comparing a store against the source it was converted from, and
   `export_bids`, writing a store back out as a BIDS dataset.
 - `validate_source`, checking a source before converting it.
-- `bidszarr` command line: `convert`, `validate`, `info`, `history`, `verify`
+- `neurozarr` command line: `convert`, `validate`, `info`, `history`, `verify`
   and `export`.
 - mne annotations stored as an events table and restored on read.
 - Sample data packed as int16 with a per-channel scale and offset, chunked along

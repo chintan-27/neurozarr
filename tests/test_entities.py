@@ -1,4 +1,4 @@
-from bidszarr.entities import Entities, parse_entities, split_stem
+from neurozarr.entities import Entities, parse_entities, split_stem
 
 
 def test_parses_real_bids_filename_fragments():

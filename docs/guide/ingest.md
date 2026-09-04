@@ -6,7 +6,7 @@ whichever matches the shape your data is already in.
 ## From a pile of files, via a manifest
 
 The general case: describe your files in a table, one row per file, and
-{class}`~bidszarr.ManifestReader` does the rest. Nothing is assumed about folder
+{class}`~neurozarr.ManifestReader` does the rest. Nothing is assumed about folder
 layout or naming.
 
 | sub | ses | datatype | task | path |
@@ -15,7 +15,7 @@ layout or naming.
 | sub-001 | ses-1 | beh | Log | /data/patient1_log.csv |
 
 ```python
-from bidszarr import Repo, ManifestReader
+from neurozarr import Repo, ManifestReader
 
 repo = Repo("./study.zarr")
 repo.ingest(ManifestReader("manifest.csv"))
@@ -63,12 +63,12 @@ Keyword arguments are entities, and decide where each item lands.
 
 ## By writing a reader
 
-For a source format of your own, implement {class}`~bidszarr.Reader`: one
-method, `read()`, yielding {class}`~bidszarr.Recording`,
-{class}`~bidszarr.Table` and {class}`~bidszarr.Attrs` items.
+For a source format of your own, implement {class}`~neurozarr.Reader`: one
+method, `read()`, yielding {class}`~neurozarr.Recording`,
+{class}`~neurozarr.Table` and {class}`~neurozarr.Attrs` items.
 
 ```python
-from bidszarr import Recording, Table, Attrs, Entities
+from neurozarr import Recording, Table, Attrs, Entities
 
 class MyReader:
     def read(self):
@@ -85,11 +85,11 @@ Zarr, a reader cannot produce a malformed store however unusual your source is.
 
 ## From a BIDS dataset
 
-If your data already follows BIDS, {class}`~bidszarr.BidsReader` reads it
+If your data already follows BIDS, {class}`~neurozarr.BidsReader` reads it
 directly:
 
 ```python
-from bidszarr import BidsReader
+from neurozarr import BidsReader
 
 repo.ingest(BidsReader("./my_bids_dataset"))
 ```

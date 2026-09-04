@@ -6,7 +6,7 @@ subjects, and look at the version history.
 
 import sys
 
-from bidszarr import Repo
+from neurozarr import Repo
 
 
 def main(store="./study.zarr"):

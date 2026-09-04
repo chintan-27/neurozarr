@@ -35,10 +35,10 @@ one subject rather than a whole store.
 
 Object stores can't be listed like a directory, so a store keeps its own index
 of which subjects it contains, written when you call
-{meth}`~bidszarr.Repo.save`. {meth}`~bidszarr.Repo.subjects` reads that index.
+{meth}`~neurozarr.Repo.save`. {meth}`~neurozarr.Repo.subjects` reads that index.
 
 Because each subject is a separate repository, operations that span subjects —
-{meth}`~bidszarr.Repo.find`, {meth}`~bidszarr.Repo.tag` — open a session per
+{meth}`~neurozarr.Repo.find`, {meth}`~neurozarr.Repo.tag` — open a session per
 subject. Over a network that cost is per subject rather than per recording, but
 it is no longer free the way it is on local disk.
 

@@ -21,8 +21,8 @@ result carries a record of where it came from.
 ## Reading them back
 
 Derivatives are stored like any other data and read back the same way. They
-appear in {meth}`~bidszarr.Subject.recordings` and
-{meth}`~bidszarr.Repo.find` alongside raw recordings, distinguished by
+appear in {meth}`~neurozarr.Subject.recordings` and
+{meth}`~neurozarr.Repo.find` alongside raw recordings, distinguished by
 `derivatives/<pipeline>/` in their path:
 
 ```python

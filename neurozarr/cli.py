@@ -125,7 +125,7 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
 	parser = argparse.ArgumentParser(
-		prog="bidszarr",
+		prog="neurozarr",
 		description="Put recordings into a versioned Zarr/Icechunk store, and inspect one.",
 	)
 	parser.add_argument("-v", "--verbose", action="store_true", help="show debug logging")

@@ -41,7 +41,7 @@ def test_optional_returns_are_caught(tmp_path):
 	"""duration and sfreq return None when a recording has no sampling frequency.
 	Annotating them as plain floats would let this through silently."""
 	out = _check(
-		"from bidszarr import Repo\n"
+		"from neurozarr import Repo\n"
 		"rec = Repo('s').subject('sub-001').visit('ses-1').recording(task='Rest')\n"
 		"half = rec.duration / 2\n"
 		"rate: float = rec.sfreq\n",
@@ -53,7 +53,7 @@ def test_optional_returns_are_caught(tmp_path):
 
 def test_wrong_argument_types_are_caught(tmp_path):
 	out = _check(
-		"from bidszarr import Repo\n"
+		"from neurozarr import Repo\n"
 		"rec = Repo('s').subject('sub-001').visit('ses-1').recording(task='Rest')\n"
 		"rec.data(tmin='ten')\n",
 		tmp_path,
@@ -64,13 +64,13 @@ def test_wrong_argument_types_are_caught(tmp_path):
 def test_correct_usage_passes(tmp_path):
 	"""The flip side: ordinary correct code must not be flagged.
 
-	Also guards against leaking noise: bidszarr imports mne, which ships no
+	Also guards against leaking noise: neurozarr imports mne, which ships no
 	types, and those errors must be silenced in this package's own source. A
 	config-file override would not help, since a downstream project's mypy
 	never reads this repo's pyproject.
 	"""
 	out = _check(
-		"from bidszarr import Repo\n"
+		"from neurozarr import Repo\n"
 		"repo = Repo('s')\n"
 		"for sub_id in repo.subjects():\n"
 		"    subject = repo.subject(sub_id)\n"
