@@ -130,3 +130,82 @@ def test_migrating_a_missing_store_does_not_create_one(tmp_path):
 	with np.testing.assert_raises(FileNotFoundError):
 		Repo(missing).migrate()
 	assert not missing.exists()
+
+
+def _with_manifest(repo, mangle):
+	"""Repo whose manifest is read back mangled, simulating catalog drift."""
+	real = repo._manifest
+
+	def patched(version=None):
+		manifest = real(version)
+		if manifest is not None:
+			mangle(manifest)
+		return manifest
+
+	repo._manifest = patched
+	return repo
+
+
+def _two_subjects(store, raw):
+	repo = Repo.create(store)
+	for sub_id in ("sub-001", "sub-002"):
+		repo.create_subject(sub_id).add_visit("ses-1").add_recording(raw, task="Rest", run=1)
+	repo.save("two subjects")
+	return store
+
+
+def test_catalog_entries_record_the_snapshot_they_describe(store, raw):
+	_two_subjects(store, raw)
+	manifest = Repo.open(store)._manifest()
+	for sub_id, snapshot in manifest.subject_snapshots.items():
+		assert manifest.catalog[sub_id]["snapshot"] == snapshot, "catalog entry is not keyed by its snapshot"
+
+
+def test_a_valid_catalog_still_prunes_subjects_that_cannot_match(store, raw):
+	repo = Repo.create(store)
+	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="Rest")
+	repo.create_subject("sub-002").add_visit("ses-1").add_recording(raw, task="Other")
+	repo.save("two tasks")
+
+	opened, scanned = Repo.open(store), []
+	real_subject = opened.subject
+	opened.subject = lambda sub_id: (scanned.append(sub_id), real_subject(sub_id))[1]
+	assert [view.entities["task"] for view in opened.find(task="Rest")] == ["Rest"]
+	assert scanned == ["sub-001"], "the catalog should have spared sub-002 from being opened"
+
+
+def test_find_does_not_hide_subjects_whose_catalog_entry_is_unusable(store, raw):
+	"""Regression: find() pruned on the catalog without checking it was current, so a
+	missing, stale or unstamped entry silently dropped recordings that were really there."""
+	_two_subjects(store, raw)
+	both = {"sub-001", "sub-002"}
+
+	drifts = {
+		"missing": lambda m: m.catalog.pop("sub-002", None),
+		"stale": lambda m: m.catalog["sub-002"].__setitem__("snapshot", "OUTDATEDSNAPSHOT0000"),
+		"unstamped": lambda m: m.catalog["sub-002"].pop("snapshot", None),
+	}
+	for label, mangle in drifts.items():
+		repo = _with_manifest(Repo.open(store), mangle)
+		found = {view.path.split("/")[0] for view in repo.find(task="Rest")}
+		assert found == both, f"{label} catalog entry hid a subject from find()"
+
+
+def test_doctor_reports_a_stale_catalog_entry(store, raw, monkeypatch):
+	_two_subjects(store, raw)
+	assert inspect_store(store).ok
+
+	real = Repo._manifest
+
+	def patched(self, version=None):
+		manifest = real(self, version)
+		if manifest is not None and "sub-002" in manifest.catalog:
+			manifest.catalog["sub-002"]["snapshot"] = "OUTDATEDSNAPSHOT0000"
+		return manifest
+
+	monkeypatch.setattr(Repo, "_manifest", patched)
+
+	report = inspect_store(store)
+	stale = [issue for issue in report if issue.code == "store.stale_catalog_entry"]
+	assert [issue.location for issue in stale] == ["sub-002"]
+	assert report.ok, "a stale catalog entry costs a scan; it is not a corrupt store"

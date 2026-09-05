@@ -16,6 +16,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   N-dimensional arrays, source provenance, and reader plugin registration.
 - A lean Python 3.11 quality workflow with deterministic test timeouts.
 
+### Fixed
+
+- `find()` no longer hides subjects whose manifest catalog entry is missing or out
+  of date. Catalog entries now record the snapshot they describe, and an entry that
+  does not match the published snapshot falls back to scanning that subject instead
+  of being read as an authoritative list of matches.
+- `doctor` reports a catalog entry that describes an unpublished snapshot as
+  `store.stale_catalog_entry`.
+
 ### Changed
 
 - MNE recordings are opened lazily and written one time chunk at a time.

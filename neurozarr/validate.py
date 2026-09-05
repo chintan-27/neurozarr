@@ -171,10 +171,18 @@ def inspect_store(target: object) -> ValidationReport:
 			f"legacy store has no schema manifest; run `neurozarr migrate` to upgrade to schema {SCHEMA_VERSION}",
 			str(target)))
 		return report
-	missing_catalog = sorted(set(manifest.subject_snapshots) - set(manifest.catalog))
-	for sub_id in missing_catalog:
-		report.add(_issue("store.missing_catalog_entry", Severity.WARNING,
-			"subject has no catalog entry; searches will scan its repository", sub_id))
+	for sub_id in sorted(manifest.subject_snapshots):
+		if sub_id not in manifest.catalog:
+			report.add(_issue("store.missing_catalog_entry", Severity.WARNING,
+				"subject has no catalog entry; searches will scan its repository", sub_id))
+		elif not Repo._catalog_is_current(manifest, sub_id):
+			# Not corruption: the summary is simply about a version this dataset no
+			# longer publishes, so searches fall back to scanning until the next save.
+			report.add(_issue("store.stale_catalog_entry", Severity.WARNING,
+				"catalog entry describes a different snapshot than the one published; "
+				"searches will scan this repository until it is rewritten", sub_id,
+				published_snapshot=manifest.subject_snapshots[sub_id],
+				catalog_snapshot=manifest.catalog[sub_id].get("snapshot")))
 
 	for sub_id, snapshot in manifest.subject_snapshots.items():
 		if not repo._repo_exists(sub_id):

@@ -39,6 +39,14 @@ references with warnings.
 Run `neurozarr doctor STORE` after an interrupted job. It detects missing
 snapshots and subject commits not yet published by the dataset manifest.
 
+The manifest also carries a catalog: a per-subject summary of visits and
+recordings, so listing and searching a store does not have to open every
+subject repository. It is only a cache, and each entry records the snapshot it
+was read from. An entry that does not describe the snapshot the dataset
+currently publishes is never used to answer a query — {meth}`neurozarr.Repo.find`
+falls back to scanning that subject, and `doctor` reports it as
+`store.stale_catalog_entry`. The result is slower, never wrong.
+
 Stores written by 0.1 remain readable. Preview and apply the metadata-only
 migration with `neurozarr migrate STORE --dry-run` and then without
 `--dry-run`. Newer unknown schemas are never opened optimistically.

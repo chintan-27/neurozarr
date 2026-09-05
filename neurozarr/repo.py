@@ -416,11 +416,29 @@ class Repo:
 		self._base_manifest = manifest
 		return dataset_snapshot
 
+	@staticmethod
+	def _catalog_is_current(manifest: StoreManifest, sub_id: str) -> bool:
+		"""Whether the catalog can be trusted to describe a subject's published snapshot.
+
+		The catalog is a cache, not a source of truth: it is only usable for the exact
+		snapshot it was read from. Both :meth:`find` and ``neurozarr doctor`` ask this
+		one question, so a reader and its integrity check cannot disagree.
+		"""
+		entry = manifest.catalog.get(sub_id)
+		if not isinstance(entry, dict):
+			return False
+		return entry.get("snapshot") == manifest.subject_snapshots.get(sub_id)
+
 	def _catalog_entry(self, sub_id: str, snapshot: str) -> dict[str, Any]:
 		repo = self._icechunk_repo(sub_id)
 		root = zarr.open_group(store=repo.readonly_session(snapshot_id=snapshot).store, mode="r")
 		views = list(views_in(root, sub_id))
 		return {
+			# The snapshot this summary was read from. A snapshot id names immutable
+			# content, so a stamped entry is a permanently true statement about that
+			# version -- which is what lets readers tell a usable entry from one
+			# describing a version the dataset no longer publishes.
+			"snapshot": snapshot,
 			"visits": sorted(name for name, node in root.members()
 							 if isinstance(node, zarr.Group) and name.startswith("ses-")),
 			"recordings": [
@@ -588,10 +606,16 @@ class Repo:
 		candidate_subjects = [sub] if sub else self.subjects()
 		manifest = self._manifest()
 		if manifest is not None and sub is None and entities:
+			# The catalog only ever prunes subjects it can currently vouch for. An entry
+			# that is missing, unstamped (written before entries carried a snapshot) or
+			# stamped with a snapshot this version no longer publishes means "unknown",
+			# never "no match" -- treating it as a match list would silently drop
+			# recordings that are really there.
 			candidate_subjects = [
 				sub_id for sub_id in candidate_subjects
-				if any(all(str(entry.get("entities", {}).get(k)) == str(v) for k, v in entities.items())
-					   for entry in manifest.catalog.get(sub_id, {}).get("recordings", []))
+				if not self._catalog_is_current(manifest, sub_id)
+				or any(all(str(entry.get("entities", {}).get(k)) == str(v) for k, v in entities.items())
+					   for entry in manifest.catalog[sub_id].get("recordings", []))
 			]
 		for sub_id in candidate_subjects:
 			for view in self.subject(sub_id).recordings():
