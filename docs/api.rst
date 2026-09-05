@@ -11,9 +11,14 @@ Building a store:
 .. autosummary::
 
    neurozarr.Repo
+   neurozarr.Repo.create
+   neurozarr.Repo.open
    neurozarr.Repo.create_subject
    neurozarr.Repo.ingest
    neurozarr.Repo.save
+   neurozarr.Repo.transaction
+   neurozarr.Repo.abort
+   neurozarr.Repo.migrate
    neurozarr.Repo.subjects
    neurozarr.Repo.subject
    neurozarr.Repo.find
@@ -67,6 +72,29 @@ The item stream a reader yields and the writer consumes:
    neurozarr.Writer
    neurozarr.CodecConfig
    neurozarr.ExistingPolicy
+
+Supporting a new source format:
+
+.. autosummary::
+
+   neurozarr.register_reader
+   neurozarr.available_readers
+   neurozarr.reader_for
+   neurozarr.open_reader
+
+When something is wrong:
+
+.. autosummary::
+
+   neurozarr.NeurozarrError
+   neurozarr.ValidationError
+   neurozarr.SchemaVersionError
+   neurozarr.StoreIntegrityError
+   neurozarr.WriteConflictError
+   neurozarr.UnsupportedFormatError
+   neurozarr.ValidationReport
+   neurozarr.ValidationIssue
+   neurozarr.Severity
 
 Everything else:
 
@@ -126,9 +154,13 @@ Readers
 .. autoclass:: neurozarr.ManifestReader
    :members:
 
-.. autofunction:: neurozarr.open_reader
-
 .. autofunction:: neurozarr.register_reader
+
+.. autofunction:: neurozarr.available_readers
+
+.. autofunction:: neurozarr.reader_for
+
+.. autofunction:: neurozarr.open_reader
 
 Reading data back
 ------------------
@@ -167,6 +199,10 @@ Storage, validation, and verification
 
 .. autofunction:: neurozarr.storage_from
 
+.. autodata:: neurozarr.StorageTarget
+
+.. autodata:: neurozarr.StorageFactory
+
 .. autofunction:: neurozarr.set_verbosity
 
 .. autofunction:: neurozarr.validate_source
@@ -178,3 +214,45 @@ Storage, validation, and verification
 .. autofunction:: neurozarr.verify
 
 .. autofunction:: neurozarr.export_bids
+
+Diagnostics
+-----------
+
+A :func:`~neurozarr.inspect_source` or :func:`~neurozarr.inspect_store` call
+returns a report of structured issues rather than strings, so callers can filter
+on ``code`` and ``severity`` instead of parsing messages.
+
+.. autoclass:: neurozarr.ValidationReport
+   :members:
+
+.. autoclass:: neurozarr.ValidationIssue
+   :members:
+
+.. autoclass:: neurozarr.Severity
+   :members:
+
+Exceptions
+----------
+
+Everything neurozarr raises deliberately derives from
+:class:`~neurozarr.NeurozarrError`, so one ``except`` clause catches the package
+without also catching unrelated bugs. Several also derive from the built-in that
+best describes them, so existing ``except ValueError`` handlers keep working.
+
+.. autoexception:: neurozarr.NeurozarrError
+   :members:
+
+.. autoexception:: neurozarr.ValidationError
+   :members:
+
+.. autoexception:: neurozarr.SchemaVersionError
+   :members:
+
+.. autoexception:: neurozarr.StoreIntegrityError
+   :members:
+
+.. autoexception:: neurozarr.WriteConflictError
+   :members:
+
+.. autoexception:: neurozarr.UnsupportedFormatError
+   :members:

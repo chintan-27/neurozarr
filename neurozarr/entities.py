@@ -17,6 +17,38 @@ BIDS_ENTITY_ORDER = [
 
 @dataclass(frozen=True)
 class Entities:
+	"""Where one item belongs in the store, and the path that follows from it.
+
+	Every :class:`~neurozarr.Recording`, :class:`~neurozarr.Table`,
+	:class:`~neurozarr.Array` and :class:`~neurozarr.ExternalFile` carries one of
+	these. Labels are validated on construction, so an item that cannot be filed
+	safely fails before anything is written.
+
+	Parameters
+	----------
+	sub : str
+		Subject label including the prefix, e.g. ``"sub-001"``.
+	ses : str, optional
+		Session label including the prefix, e.g. ``"ses-1"``. ``None`` for
+		session-less datasets, which BIDS allows.
+	datatype : str, optional
+		BIDS datatype directory, e.g. ``"ieeg"`` or ``"beh"``.
+	extra : dict, optional
+		The remaining BIDS entities — ``task``, ``run``, ``acq`` and the rest.
+		Unrecognized keys are kept, not rejected.
+
+	Raises
+	------
+	neurozarr.ValidationError
+		If a label is missing its prefix, or any label or entity contains
+		characters that cannot be stored as a path segment.
+
+	Examples
+	--------
+	>>> Entities("sub-001", "ses-1", "ieeg", {"task": "Rest", "run": 1}).path()
+	('sub-001', 'ses-1', 'ieeg', 'task-Rest_run-1')
+	"""
+
 	sub: str
 	ses: str | None = None  # None for session-less BIDS datasets -- a valid, real layout
 	datatype: str | None = None
