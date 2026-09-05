@@ -7,13 +7,13 @@ Add recordings one at a time, describe a pile of files in a table, or write a re
 ```python
 from neurozarr import Repo
 
-repo = Repo("./study.zarr")
+repo = Repo.create("./study.zarr")
 
 visit = repo.create_subject("sub-001").add_visit("ses-1")
 visit.add_recording(my_raw, task="Rest", run=1)
 repo.save("first recording")
 
-rec = repo.subject("sub-001").visit("ses-1").recording(task="Rest", run=1)
+rec = Repo.open("./study.zarr").subject("sub-001").visit("ses-1").recording(task="Rest", run=1)
 values, meta = rec.data(tmin=10, tmax=20)     # ten seconds, without reading the rest
 ```
 
@@ -38,6 +38,8 @@ guide/cloud
 guide/performance
 guide/cli
 guide/layout
+guide/reliability
+guide/extensions
 ```
 
 ```{toctree}

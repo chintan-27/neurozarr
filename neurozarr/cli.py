@@ -1,24 +1,23 @@
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
 from typing import Any, Callable
 
 from .log import set_verbosity
-from .readers import BidsReader, ManifestReader
+from .readers import BidsReader, ManifestReader, reader_for
 from .repo import Repo
-from .validate import validate_source
-from .writer import CodecConfig
+from .validate import inspect_source, inspect_store
+from .writer import CodecConfig, ExistingPolicy
+from .errors import NeurozarrError
 
 TABLE_EXTS = {".tsv", ".csv"}
 
 
-def _reader_for(source: str) -> BidsReader | ManifestReader:
+def _reader_for(source: str, name: str | None = None) -> BidsReader | ManifestReader | Any:
 	"""A BIDS folder or a manifest table -- pick the reader by what the source is."""
-	path = Path(source)
-	if path.suffix in TABLE_EXTS:
-		return ManifestReader(path)
-	return BidsReader(path)
+	return reader_for(source, name)
 
 
 def _progress(enabled: bool) -> Callable[[Any], Any] | None:
@@ -33,26 +32,34 @@ def _progress(enabled: bool) -> Callable[[Any], Any] | None:
 
 
 def cmd_convert(args: argparse.Namespace) -> int:
-	problems = validate_source(args.source)
-	fatal = [p for p in problems if "not fatal" not in p]
-	if fatal and not args.force:
+	reader = _reader_for(args.source, args.reader)
+	report = inspect_source(reader)
+	if report.errors:
 		print(f"{args.source}: cannot convert", file=sys.stderr)
-		for p in fatal:
-			print(f"  - {p}", file=sys.stderr)
-		print("re-run with --force to convert anyway", file=sys.stderr)
+		for issue in report.errors:
+			print(f"  - [{issue.code}] {issue}", file=sys.stderr)
+		if args.force:
+			print("--force cannot bypass malformed input; fix the errors above", file=sys.stderr)
 		return 1
+	for issue in report.warnings:
+		print(f"warning [{issue.code}]: {issue}", file=sys.stderr)
 
 	codec = CodecConfig(dtype=args.dtype) if args.dtype else None
 
 	if args.workers and args.workers != 1:
+		if args.reader not in (None, "bids"):
+			raise ValueError("parallel conversion currently supports only the BIDS reader")
 		from .parallel import convert_parallel
 		convert_parallel(args.source, args.dest, workers=args.workers, codec=codec,
-						 message=args.message, skip_existing=args.skip_existing)
-		repo = Repo(args.dest)
+						 message=args.message, existing=args.existing)
+		repo = Repo.open(args.dest)
 	else:
-		repo = Repo(args.dest, codec=codec)
-		repo.ingest(_reader_for(args.source), progress=_progress(not args.quiet),
-					skip_existing=args.skip_existing)
+		try:
+			repo = Repo.open(args.dest, mode="a", codec=codec)
+		except FileNotFoundError:
+			repo = Repo.create(args.dest, codec=codec)
+		repo.ingest(reader, progress=_progress(not args.quiet),
+					existing=args.existing)
 		repo.save(args.message)
 
 	if not args.quiet:
@@ -61,7 +68,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
 
 
 def cmd_info(args: argparse.Namespace) -> int:
-	repo = Repo(args.store)
+	repo = Repo.open(args.store)
 	subjects = repo.subjects()
 	if not subjects:
 		print(f"{args.store}: no subjects found", file=sys.stderr)
@@ -71,7 +78,8 @@ def cmd_info(args: argparse.Namespace) -> int:
 		subject = repo.subject(sub_id)
 		visits = subject.visits()
 		print(f"  {sub_id}: {len(visits)} visit(s), "
-			  f"{len(subject.recordings())} recording(s), {len(subject.tables())} table(s)")
+			  f"{len(subject.recordings())} recording(s), {len(subject.tables())} table(s), "
+			  f"{len(subject.arrays())} array(s), {len(subject.external_files())} external file(s)")
 		if args.verbose:
 			for ses in visits:
 				print(f"      {ses}")
@@ -79,8 +87,8 @@ def cmd_info(args: argparse.Namespace) -> int:
 
 
 def cmd_history(args: argparse.Namespace) -> int:
-	repo = Repo(args.store)
-	sub_id = args.subject or (repo.subjects() or ["_dataset"])[0]
+	repo = Repo.open(args.store)
+	sub_id = args.subject or "_dataset"
 	print(f"history of {sub_id}:")
 	for snapshot_id, message, written_at in repo.history(sub_id):
 		print(f"  {str(snapshot_id)[:12]}  {written_at:%Y-%m-%d %H:%M}  {message}")
@@ -90,14 +98,20 @@ def cmd_history(args: argparse.Namespace) -> int:
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-	problems = validate_source(args.source)
-	if not problems:
+	report = inspect_source(args.source)
+	if not report:
 		print(f"{args.source}: OK")
 		return 0
-	print(f"{args.source}: {len(problems)} problem(s)")
-	for p in problems:
-		print(f"  - {p}")
-	return 1
+	if args.json:
+		print(json.dumps([{
+			"code": issue.code, "severity": issue.severity.value, "message": issue.message,
+			"location": issue.location, "context": issue.context,
+		} for issue in report], indent=2))
+	else:
+		print(f"{args.source}: {len(report)} issue(s)")
+		for issue in report:
+			print(f"  - {issue.severity.value} [{issue.code}] {issue}")
+	return 1 if report.errors else 0
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
@@ -123,6 +137,26 @@ def cmd_export(args: argparse.Namespace) -> int:
 	return 0
 
 
+def cmd_migrate(args: argparse.Namespace) -> int:
+	repo = Repo(args.store)
+	result = repo.migrate(dry_run=args.dry_run)
+	action = "would migrate" if args.dry_run else "migrated"
+	if not result["changed"] and not args.dry_run:
+		action = "already current"
+	print(f"{args.store}: {action}; schema {result['schema_version']}, {len(result['subjects'])} subject(s)")
+	return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+	report = inspect_store(args.store)
+	if not report:
+		print(f"{args.store}: OK")
+		return 0
+	for issue in report:
+		print(f"{issue.severity.value} [{issue.code}]: {issue}")
+	return 1 if report.errors else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
 	parser = argparse.ArgumentParser(
 		prog="neurozarr",
@@ -136,12 +170,14 @@ def build_parser() -> argparse.ArgumentParser:
 	convert.add_argument("dest", help="output store: a path or s3://, gs://, az:// URI")
 	convert.add_argument("-m", "--message", default="convert", help="commit message")
 	convert.add_argument("--dtype", choices=["int16", "float16"], help="how to pack sample data")
+	convert.add_argument("--reader", help="explicit built-in or installed reader name")
 	convert.add_argument("-q", "--quiet", action="store_true", help="no progress or summary")
-	convert.add_argument("--force", action="store_true", help="convert despite validation problems")
+	convert.add_argument("--force", action="store_true",
+						 help="deprecated; malformed input is always rejected")
 	convert.add_argument("-j", "--workers", type=int, metavar="N",
 						 help="convert N subjects in parallel (BIDS sources only)")
-	convert.add_argument("--skip-existing", action="store_true",
-						 help="only write what isn't in the store yet")
+	convert.add_argument("--existing", choices=[policy.value for policy in ExistingPolicy], default="error",
+						 help="what to do when an item path already exists (default: error)")
 	convert.set_defaults(func=cmd_convert)
 
 	info = sub.add_parser("info", help="show what's in a store")
@@ -150,11 +186,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 	history = sub.add_parser("history", help="show a store's versions and tags")
 	history.add_argument("store")
-	history.add_argument("--subject", help="which subject's repo (default: the first)")
+	history.add_argument("--subject", help="show one subject's internal history (default: global history)")
 	history.set_defaults(func=cmd_history)
 
 	validate = sub.add_parser("validate", help="check a source before converting")
 	validate.add_argument("source", help="a manifest .csv/.tsv, or a BIDS directory")
+	validate.add_argument("--json", action="store_true", help="emit machine-readable diagnostics")
 	validate.set_defaults(func=cmd_validate)
 
 	verify = sub.add_parser("verify", help="check a store faithfully matches its source")
@@ -168,6 +205,15 @@ def build_parser() -> argparse.ArgumentParser:
 	export.add_argument("dest", help="output BIDS directory")
 	export.add_argument("--subject", action="append", help="export only this subject (repeatable)")
 	export.set_defaults(func=cmd_export)
+
+	migrate = sub.add_parser("migrate", help="upgrade a legacy store to the current schema")
+	migrate.add_argument("store")
+	migrate.add_argument("--dry-run", action="store_true", help="report the migration without writing")
+	migrate.set_defaults(func=cmd_migrate)
+
+	doctor = sub.add_parser("doctor", help="check a store's schema and snapshot integrity")
+	doctor.add_argument("store")
+	doctor.set_defaults(func=cmd_doctor)
 	return parser
 
 
@@ -177,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
 		set_verbosity(logging.DEBUG)
 	try:
 		return args.func(args)
-	except (ValueError, KeyError, FileNotFoundError) as e:
+	except (NeurozarrError, ValueError, KeyError, FileNotFoundError, FileExistsError) as e:
 		print(f"error: {e}", file=sys.stderr)
 		return 1
 

@@ -5,11 +5,12 @@ overwriting it. Nothing is written permanently until you commit:
 
 ```python
 repo.ingest(reader)
-repo.save("initial conversion")     # commit
+dataset_version = repo.save("initial conversion")
 ```
 
-{meth}`~neurozarr.Repo.save` commits each subject that changed and skips the
-rest, so re-saving after touching one subject doesn't churn the others.
+{meth}`~neurozarr.Repo.save` commits each changed subject, then atomically
+publishes a dataset manifest that pins every subject to an exact snapshot. The
+returned ID identifies that complete dataset state.
 
 ## Looking at history
 
@@ -17,9 +18,8 @@ rest, so re-saving after touching one subject doesn't churn the others.
 repo.history()          # [(snapshot_id, message, written_at), ...] newest first
 ```
 
-A store spans one repository per subject, so history belongs to a subject rather
-than the store as a whole. {meth}`~neurozarr.Repo.history` reads the first
-subject by default; pass `sub_id` for a particular one.
+By default history is the global dataset history. Pass `sub_id` to inspect the
+internal commit history of one subject repository.
 
 ## Naming a state
 
@@ -30,8 +30,8 @@ repo.tag("v1")
 repo.tags()             # ['v1']
 ```
 
-Because a version of the dataset spans every subject's repository,
-{meth}`~neurozarr.Repo.tag` applies the same name to all of them.
+A tag is applied only to the dataset manifest; its pinned subject snapshot IDs
+make the tag atomic even though subjects use independent repositories.
 
 ## Reading an earlier state
 

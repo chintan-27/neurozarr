@@ -25,7 +25,8 @@ def test_reconverting_the_same_source_is_idempotent(store, raw):
 	it used to fail with a bare "An array exists in store"."""
 	for message in ("first pass", "second pass"):
 		repo = Repo(store)
-		repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="X", run=1)
+		repo.create_subject("sub-001").add_visit("ses-1").add_recording(
+			raw, task="X", run=1, existing="replace")
 		repo.save(message)
 
 	subject = Repo(store).subject("sub-001")
@@ -62,4 +63,5 @@ def test_history_and_tags(written):
 	assert any(message == "test data" for _, message, _ in history)
 
 	repo.tag("v1")
-	assert "v1" in repo.tags("sub-001")
+	assert "v1" in repo.tags()
+	assert "v1" not in repo.tags("sub-001")

@@ -5,7 +5,7 @@ Open a store the same way you created one, then navigate down from it:
 ```python
 from neurozarr import Repo
 
-repo = Repo("./study.zarr")
+repo = Repo.open("./study.zarr")
 
 repo.subjects()                       # ['sub-001', 'sub-002', ...]
 subject = repo.subject("sub-001")

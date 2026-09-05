@@ -7,13 +7,13 @@ Add recordings one at a time, describe a pile of files in a table, or write a re
 ```python
 from neurozarr import Repo
 
-repo = Repo("./study.zarr")
+repo = Repo.create("./study.zarr")
 
 visit = repo.create_subject("sub-001").add_visit("ses-1")
 visit.add_recording(my_raw, task="Rest", run=1)
 repo.save("first recording")
 
-rec = repo.subject("sub-001").visit("ses-1").recording(task="Rest", run=1)
+rec = Repo.open("./study.zarr").subject("sub-001").visit("ses-1").recording(task="Rest", run=1)
 values, meta = rec.data(tmin=10, tmax=20)     # ten seconds, without reading the rest
 ```
 
@@ -70,7 +70,7 @@ Files are opened by extension: `.tsv`/`.csv` with pandas, signal formats with `m
 ### 2. By hand
 
 ```python
-repo = Repo("./study.zarr")
+repo = Repo.create("./study.zarr")
 
 subject = repo.create_subject("sub-001", attrs={"age": 63, "diagnosis": "PD"})
 visit = subject.add_visit("ses-20220908", attrs={"device": "Percept PC"})
@@ -112,7 +112,7 @@ repo.ingest(BidsReader("./my_bids_dataset"))
 ## Reading data back
 
 ```python
-repo = Repo("./study.zarr")
+repo = Repo.open("./study.zarr")
 
 repo.subjects()                       # ['sub-001', 'sub-002', ...]
 subject = repo.subject("sub-001")
@@ -131,6 +131,10 @@ for rec in repo.find(task="BrainSenseStream", acq="TD"):
 ```
 
 Recordings are stored as int16 with per-channel scale/offset; `.data()` and `.raw()` undo that for you, so what you read back matches the source to floating-point precision. Table columns keep their dtypes — numbers come back as numbers. `mne` annotations are stored as an events table and put back on the `Raw` when you read it.
+
+Typed nullable table columns are preserved with explicit masks. Other
+N-dimensional neuroscience data can be stored with `visit.add_array(...)` and
+read lazily through `visit.arrays()`.
 
 ### Reading only part of a recording
 
@@ -154,7 +158,7 @@ How much this saves depends on the chunk size the data was written with: a windo
 Every store is an Icechunk repository, so history is free:
 
 ```python
-repo.save("reprocessed with new filter")   # a commit
+version = repo.save("reprocessed with new filter")  # global dataset snapshot
 repo.history()                             # [(snapshot_id, message, timestamp), ...]
 repo.tag("v1")                             # name this state
 repo.tags()                                # ['v1']
@@ -167,11 +171,11 @@ subject.recordings(version="v1")           # read the data as it was at v1
 Anywhere Icechunk can write, this can write — pass a URI instead of a path:
 
 ```python
-Repo("s3://my-bucket/study", region="us-east-1")
-Repo("gs://my-bucket/study")
-Repo("az://account/container/study")
-Repo("memory://scratch")                   # in-memory, handy for tests
-Repo(icechunk.s3_storage(...))             # or a Storage you built yourself
+Repo.create("s3://my-bucket/study", region="us-east-1")
+Repo.open("gs://my-bucket/study")
+Repo.open("az://account/container/study")
+Repo.create("memory://scratch")             # in-memory, handy for tests
+Repo.create(lambda sub: make_storage(sub))   # custom storage per subject repo
 ```
 
 Extra keyword arguments (`region=`, `anonymous=`, `from_env=`, …) pass straight through to Icechunk.
@@ -194,10 +198,10 @@ They read back like anything else — `subject.recordings()` returns them with `
 from neurozarr.parallel import convert_parallel
 
 convert_parallel("./BIDS", "./study.zarr", workers=6)   # one process per subject
-repo.ingest(reader, skip_existing=True)                  # only write what's new
+repo.ingest(reader, existing="skip")                    # only write what's new
 ```
 
-Subjects are independent repositories, so they convert concurrently. A subject is the unit of work, so the total time is bounded by the largest single subject however many workers you give it. `skip_existing` checks each incoming item against what the store already holds, so a re-run after new data arrives writes only what is missing.
+Subjects are independent repositories, so they convert concurrently. A subject is the unit of work, so the total time is bounded by the largest single subject however many workers you give it. Existing paths fail by default; select `existing="skip"` for incremental conversion or `existing="replace"` for deliberate replacement.
 
 ## Command line
 
@@ -205,14 +209,18 @@ Subjects are independent repositories, so they convert concurrently. A subject i
 neurozarr validate ./my_bids_dataset          # check before converting
 neurozarr convert ./my_bids_dataset ./out     # BIDS folder or manifest.csv
 neurozarr convert ./BIDS ./out -j 6           # one worker per subject
-neurozarr convert ./BIDS ./out --skip-existing   # only what's new
+neurozarr convert ./BIDS ./out --existing skip   # only what's new
 neurozarr info ./out                          # subjects, visits, counts
 neurozarr history ./out                       # versions and tags
 neurozarr verify ./BIDS ./out                 # confirm the store matches its source
 neurozarr export ./out ./bids_again           # write the store back out as BIDS
+neurozarr doctor ./out                        # check schema and snapshots
+neurozarr migrate ./old-store --dry-run       # preview a 0.1 migration
 ```
 
-`convert` takes `--dtype {int16,float16}`, `-m` for the commit message, `-q` to quiet it, and `--force` to convert despite validation warnings. `-v` turns on debug logging.
+`convert` takes `--dtype {int16,float16}`, `--existing {error,skip,replace}`,
+`--reader NAME`, `-m` for the commit message, and `-q` to quiet it. `-v` turns
+on debug logging. Malformed inputs are never forced through.
 
 `export` writes BrainVision if `pybv` is installed, EDF if `edfio` is, and otherwise FIF (readable by mne, but not BIDS-conformant for ieeg/eeg).
 
@@ -228,7 +236,7 @@ study.zarr/
       ieeg/
         task-BrainSenseStream_acq-TD_run-1/
           data         # (channels x samples) int16 + scale/offset
-          channels     # the channels table
+          channels/    # typed column arrays + logical dtype schema
           events       # if present
       beh/
         task-TherapyHistory/
@@ -253,7 +261,7 @@ open docs/_build/index.html
 
 ```bash
 pip install -e ".[dev]"
-pytest                    # 42 tests, all in-memory, no files touched
+pytest -m "not slow"      # fast in-memory tests
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how the package is organized and how

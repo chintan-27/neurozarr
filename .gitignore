@@ -10,3 +10,4 @@ docs/_build/
 build/
 .mypy_cache/
 .pytest_cache/
+AGENTS.md

@@ -6,7 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- Explicit `Repo.create`, `Repo.open`, and transactional write APIs.
+- A schema-v2 dataset manifest that atomically pins exact subject snapshots,
+  plus `doctor` and explicit metadata-only migration commands.
+- Structured validation reports and a public neurozarr exception hierarchy.
+- Safe duplicate policies, external-file references, typed nullable tables,
+  N-dimensional arrays, source provenance, and reader plugin registration.
+- A lean Python 3.11 quality workflow with deterministic test timeouts.
+
+### Changed
+
+- MNE recordings are opened lazily and written one time chunk at a time.
+- BIDS JSON inheritance merges applicable sidecars from root to leaf and
+  BrainVision companion files are treated as one bundle.
+- Storage URIs reject embedded credentials; custom cloud storage now uses a
+  per-repository factory instead of one aliased `Storage` object.
+- Existing item paths fail by default; replacement or skipping must be explicit.
+
+### Deprecated
+
+- `Repo(target)` in favor of explicit create/open operations.
+- `skip_existing` in favor of `existing="skip"`.
 
 ## [0.1.0] — 2026-09-04
 

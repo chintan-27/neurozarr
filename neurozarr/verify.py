@@ -46,7 +46,7 @@ def verify(source: "str | Path", store: "str | Path | icechunk.Storage",
 	"""
 	from .read import RecordingView, _table_df
 
-	repo = Repo(store)
+	repo = Repo.open(store)
 	problems: list[str] = []
 	checked = 0
 	roots: dict[str, "zarr.Group | None"] = {}
@@ -125,7 +125,7 @@ def export_bids(store: "str | Path | icechunk.Storage", dest: "str | Path",
 	"""
 	import mne
 
-	repo = Repo(store)
+	repo = Repo.open(store)
 	dest = Path(dest)
 	dest.mkdir(parents=True, exist_ok=True)
 
@@ -133,6 +133,8 @@ def export_bids(store: "str | Path | icechunk.Storage", dest: "str | Path",
 		description = repo.root_of("_dataset").attrs.asdict()
 	except Exception:
 		description = {}
+	description = {key: value for key, value in description.items()
+				   if not key.startswith("_neurozarr") and key != "subjects"}
 	description.setdefault("Name", dest.name)
 	description.setdefault("BIDSVersion", "1.10.0")
 	(dest / "dataset_description.json").write_text(json.dumps(description, indent=2, default=str))
@@ -144,7 +146,8 @@ def export_bids(store: "str | Path | icechunk.Storage", dest: "str | Path",
 			out_dir.mkdir(parents=True, exist_ok=True)
 			stem = _bids_stem(recording.path)
 			_write_raw(out_dir, stem, recording.raw())
-			meta = {k: v for k, v in recording.meta.items() if not k.startswith("data_")}
+			meta = {k: v for k, v in recording.meta.items()
+					if not k.startswith("data_") and not k.startswith("_neurozarr")}
 			(out_dir / f"{stem}.json").write_text(json.dumps(meta, indent=2, default=str))
 		for table in subject.tables():
 			out_dir = dest / _bids_dir(table.path)

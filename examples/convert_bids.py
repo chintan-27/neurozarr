@@ -12,7 +12,7 @@ from neurozarr import BidsReader, Repo, set_verbosity
 def main(source="./BIDS", dest="./study.zarr"):
 	set_verbosity(logging.INFO)
 
-	repo = Repo(dest)
+	repo = Repo.create(dest)
 	repo.ingest(BidsReader(source))
 	repo.save(f"convert {source}")
 	repo.tag("v1")

@@ -10,7 +10,7 @@ from neurozarr import Repo
 
 
 def main(store="./study.zarr"):
-	repo = Repo(store)
+	repo = Repo.open(store)
 	print(f"{store}: {len(repo.subjects())} subject(s)\n")
 
 	for sub_id in repo.subjects():

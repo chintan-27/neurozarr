@@ -1,8 +1,8 @@
 import pandas as pd
 import pytest
 
-from neurozarr import Repo
-from neurozarr.items import Attrs, Table
+from neurozarr import Repo, inspect_source
+from neurozarr.items import Attrs, ExternalFile, Table
 from neurozarr.readers import ManifestReader
 
 
@@ -29,17 +29,27 @@ def test_column_names_are_configurable(tsv_file):
 	assert items[0].entities.sub == "sub-002"
 
 
-def test_unsupported_extension_falls_back_to_attrs(tmp_path):
+def test_unsupported_extension_becomes_an_explicit_reference(tmp_path):
 	odd = tmp_path / "scan.dcm"
 	odd.write_text("not a real dicom")
 	items = list(ManifestReader(pd.DataFrame([{"sub": "sub-003", "path": str(odd)}])).read())
-	assert isinstance(items[0], Attrs)
-	assert items[0].attrs["unread_file"] == str(odd)
+	assert isinstance(items[0], ExternalFile)
+	assert items[0].uri == odd
 
 
 def test_meta_column_accepts_json_string(tsv_file):
 	df = pd.DataFrame([{"sub": "sub-004", "path": str(tsv_file), "meta": '{"device": "X"}'}])
-	assert list(ManifestReader(df).read())[0].meta == {"device": "X"}
+	assert list(ManifestReader(df).read())[0].meta["device"] == "X"
+
+
+def test_meta_column_requires_a_json_object(tsv_file):
+	reader = ManifestReader(pd.DataFrame([
+		{"sub": "sub-004", "path": str(tsv_file), "meta": '["not", "an", "object"]'},
+	]))
+	report = inspect_source(reader)
+	assert report.errors[0].code == "manifest.invalid_metadata"
+	with pytest.raises(ValueError, match="JSON must decode to an object"):
+		list(reader.read())
 
 
 def test_row_reader_bypasses_all_interpretation():

@@ -11,6 +11,10 @@ pytest -m "not slow"        # skip the type-checker tests, ~2s
 Tests build their stores on `memory://`, so they run in a couple of seconds and
 leave nothing on disk.
 
+Storage tests have a 30-second per-test timeout. A timeout in a tiny test usually
+means an Icechunk/Zarr compatibility problem; reduce it to a minimal upstream
+example before changing neurozarr logic.
+
 ## Type checking
 
 ```bash
@@ -51,6 +55,8 @@ docstrings: comments serve maintainers, docstrings serve users of the package.
   into `Recording`, `Table` and `Attrs` items and nothing else.
 - `neurozarr/writer.py` — the only code that writes Zarr. Keeping it that way is
   what guarantees the output structure stays consistent across readers.
+- `neurozarr/schema.py` — the versioned dataset manifest. Store changes require
+  a schema-version decision and a migration fixture.
 - `scripts/` — entry points and benchmarks, not part of the package.
 - `reference/` — reference-only material, not imported by the package.
 
@@ -67,6 +73,9 @@ class MyReader:
 
 There is no base class to inherit from — `Reader` is a `Protocol`, so anything
 with a matching `read()` works. Add tests against a `memory://` store.
+
+Distributed reader plugins use the `neurozarr.readers` entry-point group and
+must yield core item types. They never receive a Writer or raw Zarr group.
 
 ## Conventions
 

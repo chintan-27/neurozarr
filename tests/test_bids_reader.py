@@ -36,6 +36,7 @@ def test_reads_dataset_and_subject_levels(tiny_bids, store):
 
 
 def test_sidecar_is_inherited_from_a_parent_directory(tiny_bids, store):
+	(tiny_bids / "events.json").write_text(json.dumps({"duration": {"Units": "s"}}))
 	repo = Repo(store)
 	repo.ingest(BidsReader(tiny_bids))
 	repo.save("tiny")
@@ -44,6 +45,7 @@ def test_sidecar_is_inherited_from_a_parent_directory(tiny_bids, store):
 	events = [t for t in tables if t.name == "events"]
 	assert events, "events table was not stored"
 	assert events[0].meta["onset"] == {"Units": "s"}, "parent-directory sidecar was not inherited"
+	assert events[0].meta["duration"] == {"Units": "s"}, "root and nearer sidecars were not merged"
 
 
 def test_session_less_dataset_is_handled(tmp_path, store):

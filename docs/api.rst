@@ -3,6 +3,84 @@ API reference
 
 Everything below is importable directly from ``neurozarr``.
 
+At a glance
+-----------
+
+Building a store:
+
+.. autosummary::
+
+   neurozarr.Repo
+   neurozarr.Repo.create_subject
+   neurozarr.Repo.ingest
+   neurozarr.Repo.save
+   neurozarr.Repo.subjects
+   neurozarr.Repo.subject
+   neurozarr.Repo.find
+   neurozarr.Repo.history
+   neurozarr.Repo.tag
+   neurozarr.Repo.tags
+   neurozarr.Subject.add_visit
+   neurozarr.Subject.visits
+   neurozarr.Subject.visit
+   neurozarr.Subject.recordings
+   neurozarr.Subject.tables
+   neurozarr.Subject.arrays
+   neurozarr.Subject.external_files
+   neurozarr.Visit.add_recording
+   neurozarr.Visit.add_behavioral_table
+   neurozarr.Visit.add_derivative
+   neurozarr.Visit.add
+   neurozarr.Visit.add_array
+   neurozarr.Visit.recording
+
+Reading data back:
+
+.. autosummary::
+
+   neurozarr.RecordingView.data
+   neurozarr.RecordingView.raw
+   neurozarr.RecordingView.channels
+   neurozarr.RecordingView.events
+   neurozarr.RecordingView.ch_names
+   neurozarr.RecordingView.sfreq
+   neurozarr.RecordingView.duration
+   neurozarr.RecordingView.shape
+   neurozarr.RecordingView.array
+   neurozarr.TableView.df
+   neurozarr.TableView.columns
+   neurozarr.ArrayView.data
+
+The item stream a reader yields and the writer consumes:
+
+.. autosummary::
+
+   neurozarr.Entities
+   neurozarr.Recording
+   neurozarr.Table
+   neurozarr.Attrs
+   neurozarr.ExternalFile
+   neurozarr.Array
+   neurozarr.Reader
+   neurozarr.BidsReader
+   neurozarr.ManifestReader
+   neurozarr.Writer
+   neurozarr.CodecConfig
+   neurozarr.ExistingPolicy
+
+Everything else:
+
+.. autosummary::
+
+   neurozarr.parallel.convert_parallel
+   neurozarr.storage_from
+   neurozarr.validate_source
+   neurozarr.inspect_source
+   neurozarr.inspect_store
+   neurozarr.verify
+   neurozarr.export_bids
+   neurozarr.set_verbosity
+
 Repo, Subject, Visit
 --------------------
 
@@ -30,6 +108,12 @@ Data model
 .. autoclass:: neurozarr.Attrs
    :members:
 
+.. autoclass:: neurozarr.ExternalFile
+   :members:
+
+.. autoclass:: neurozarr.Array
+   :members:
+
 .. autoclass:: neurozarr.Reader
    :members:
 
@@ -42,6 +126,10 @@ Readers
 .. autoclass:: neurozarr.ManifestReader
    :members:
 
+.. autofunction:: neurozarr.open_reader
+
+.. autofunction:: neurozarr.register_reader
+
 Reading data back
 ------------------
 
@@ -51,6 +139,12 @@ Reading data back
 .. autoclass:: neurozarr.TableView
    :members:
 
+.. autoclass:: neurozarr.ArrayView
+   :members:
+
+.. autoclass:: neurozarr.ExternalFileView
+   :members:
+
 Writing
 -------
 
@@ -58,6 +152,9 @@ Writing
    :members:
 
 .. autoclass:: neurozarr.CodecConfig
+   :members:
+
+.. autoclass:: neurozarr.ExistingPolicy
    :members:
 
 Parallel conversion
@@ -73,6 +170,10 @@ Storage, validation, and verification
 .. autofunction:: neurozarr.set_verbosity
 
 .. autofunction:: neurozarr.validate_source
+
+.. autofunction:: neurozarr.inspect_source
+
+.. autofunction:: neurozarr.inspect_store
 
 .. autofunction:: neurozarr.verify
 

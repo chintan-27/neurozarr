@@ -52,7 +52,8 @@ def test_without_skip_existing_the_data_is_replaced(store, raw):
 
 	louder = mne.io.RawArray(raw.get_data() * 2, raw.info.copy(), verbose=False)
 	repo = Repo(store)
-	repo.create_subject("sub-001").add_visit("ses-1").add_recording(louder, task="X")
+	repo.create_subject("sub-001").add_visit("ses-1").add_recording(
+		louder, task="X", existing="replace")
 	repo.save("second")
 
 	after, _ = Repo(store).subject("sub-001").visit("ses-1").recording(task="X").data()
@@ -83,8 +84,9 @@ def test_verify_passes_for_a_faithful_conversion(bids_source, store):
 
 
 def test_verify_reports_missing_data(bids_source, store):
-	Repo(store).create_subject("sub-001").add_visit("ses-1")  # nothing actually ingested
-	Repo(store).save("empty")
+	repo = Repo.create(store)
+	repo.create_subject("sub-001").add_visit("ses-1")  # nothing actually ingested
+	repo.save("empty")
 	problems = verify(bids_source, store)
 	assert any("missing from store" in p for p in problems)
 

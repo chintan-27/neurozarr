@@ -1,9 +1,12 @@
+import os
+
 project = "neurozarr"
 copyright = "2026, neurozarr contributors"
 
 extensions = [
     "myst_parser",
     "sphinx.ext.autodoc",
+    "sphinx.ext.autosummary",
     "sphinx.ext.napoleon",
     "sphinx.ext.intersphinx",
     "sphinx.ext.viewcode",
@@ -18,6 +21,8 @@ intersphinx_mapping = {
     "mne": ("https://mne.tools/stable", None),
     "zarr": ("https://zarr.readthedocs.io/en/stable", None),
 }
+if os.environ.get("NEUROZARR_DOCS_OFFLINE"):
+    intersphinx_mapping = {}
 
 # autodoc pulls docstrings straight from the installed package -- no sys.path
 # hack needed since `pip install -e .` already put it on the venv's path.

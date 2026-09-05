@@ -17,7 +17,7 @@ layout or naming.
 ```python
 from neurozarr import Repo, ManifestReader
 
-repo = Repo("./study.zarr")
+repo = Repo.create("./study.zarr")
 repo.ingest(ManifestReader("manifest.csv"))
 repo.save("initial conversion")
 ```
@@ -39,8 +39,9 @@ ManifestReader(df, row_reader=lambda row: my_custom_item(row))
 
 Files are opened by extension: `.tsv`/`.csv` with pandas, and signal formats
 through `mne.io.read_raw` (EDF, BDF, GDF, BrainVision, EEGLAB, FIF, CNT).
-Anything else is recorded as a reference to the file rather than failing the
-run.
+Anything else becomes an explicit {class}`~neurozarr.ExternalFile` reference
+and produces a structured warning. Malformed identifiers or supported data
+still stop the transaction.
 
 ## By hand
 
@@ -48,7 +49,7 @@ When you are building a dataset programmatically, or only have a few
 recordings, skip the readers entirely:
 
 ```python
-repo = Repo("./study.zarr")
+repo = Repo.create("./study.zarr")
 
 subject = repo.create_subject("sub-001", attrs={"age": 63, "diagnosis": "PD"})
 visit = subject.add_visit("ses-20220908", attrs={"device": "Percept PC"})
@@ -97,8 +98,18 @@ repo.ingest(BidsReader("./my_bids_dataset"))
 It handles any valid dataset generically: subjects and sessions are discovered
 by directory rather than requiring a `sessions.tsv`, datatype directories
 (`ieeg`, `eeg`, `meg`, `beh`, `anat`, …) are walked without a fixed list, and
-JSON sidecars are resolved through the BIDS **inheritance principle**, where the
-nearest matching sidecar wins.
+JSON sidecars are resolved through the BIDS **inheritance principle**, merging
+applicable metadata from the dataset root toward the data file.
 
 This is a convenience for data that happens to be in that form. The store's own
 layout borrows BIDS conventions either way — see {doc}`layout`.
+
+## Existing paths
+
+Writes fail when the same entity path already exists. Make replacement intent
+explicit:
+
+```python
+repo.ingest(reader, existing="skip")       # incremental import
+repo.ingest(reader, existing="replace")    # deliberate rewrite
+```

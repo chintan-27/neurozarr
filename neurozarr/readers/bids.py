@@ -5,8 +5,9 @@ import mne  # type: ignore[import-untyped]  # mne ships no type information
 import pandas as pd
 
 from ..entities import Entities, split_stem
-from ..items import Attrs, Recording, Table
-from ..util import clean_nan, load_json
+from ..errors import ValidationError
+from ..items import Attrs, ExternalFile, Item, Recording, Table
+from ..util import clean_nan, load_json, source_provenance
 
 # Formats mne.io.read_raw() auto-dispatches on, covering eeg/ieeg/meg/nirs data
 # generically. Imaging datatypes (anat/func/dwi -- NIfTI) need nibabel, which
@@ -51,16 +52,18 @@ class BidsReader:
 	>>> repo.ingest(BidsReader("./my_bids_dataset"))
 	"""
 
-	def __init__(self, root_dir: str | Path, subjects: list[str] | None = None):
+	def __init__(self, root_dir: str | Path, subjects: list[str] | None = None,
+				 checksum: bool = False):
 		# Dataset-level metadata is yielded whatever `subjects` says, so parallel
 		# workers each converting one subject still agree on it.
 		self.root_dir = Path(root_dir)
 		self.subjects = None if subjects is None else set(subjects)
+		self.checksum = checksum
 
 	def _wanted(self, sub: str) -> bool:
 		return self.subjects is None or sub in self.subjects
 
-	def read(self) -> Iterator[Recording | Table | Attrs]:
+	def read(self) -> Iterator[Item]:
 		yield Attrs((), clean_nan(load_json(self.root_dir / "dataset_description.json")))
 
 		participantAttrs, participantsFieldInfo = self._load_participants()
@@ -121,7 +124,7 @@ class BidsReader:
 		return attrs, fieldInfo
 
 	def _read_datatype_dir(self, sub: str, ses: str | None, datatype: str, dir_path: Path,
-						   prefix: tuple[str, ...] = ()) -> Iterator[Recording | Table | Attrs]:
+						   prefix: tuple[str, ...] = ()) -> Iterator[Item]:
 		groups: dict[tuple[tuple[tuple[str, str], ...], str], dict[str, Path]] = {}
 		for f in sorted(dir_path.iterdir()):
 			if not f.is_file():
@@ -130,7 +133,10 @@ class BidsReader:
 			entities.pop("sub", None)
 			entities.pop("ses", None)
 			key = (tuple(sorted(entities.items())), suffix)
-			groups.setdefault(key, {})[f.suffix] = f
+			ext = f.suffix.lower()
+			if ext in groups.setdefault(key, {}):
+				raise ValidationError(f"multiple {ext} files represent {f.stem!r} in {dir_path}")
+			groups[key][ext] = f
 
 		for (entityItems, suffix), exts in groups.items():
 			item_entities = Entities(sub, ses, datatype, dict(entityItems))
@@ -143,38 +149,64 @@ class BidsReader:
 					yield Attrs((*prefix, *item_entities.path(), suffix), clean_nan(load_json(exts[".json"])))
 				continue
 
-			meta = clean_nan(load_json(exts[".json"])) if ".json" in exts \
-				else self._find_sidecar(dir_path, dict(entityItems), suffix)
+			meta = self._find_sidecar(dir_path, dict(entityItems), suffix)
 
-			ext = dataExts[0]
+			# BrainVision is a three-file bundle; only .vhdr is the entry point.
+			# Otherwise prefer a supported data file and reject ambiguous bundles.
+			preferred = [ext for ext in (".vhdr", ".edf", ".bdf", ".gdf", ".set", ".fif", ".cnt", ".tsv")
+						 if ext in dataExts]
+			if len(preferred) > 1:
+				raise ValidationError(
+					f"ambiguous data bundle for {suffix!r} in {dir_path}: {', '.join(preferred)}"
+				)
+			ext = preferred[0] if preferred else sorted(dataExts)[0]
 			path = exts[ext]
+			meta = {**meta, "_neurozarr_provenance": source_provenance(path, "BidsReader", self.checksum)}
 			if ext == ".tsv":
 				yield Table(item_entities, suffix, pd.read_csv(path, sep="\t"), meta, prefix)
 			elif ext in MNE_READABLE_EXTS:
-				raw = mne.io.read_raw(path, preload=True, verbose=False)
+				raw = mne.io.read_raw(path, preload=False, verbose=False)
 				yield Recording(item_entities, raw, meta, prefix)
 			else:
-				yield Attrs((*prefix, *item_entities.path(), suffix), {
-					**meta, "unread_file": str(path),
-					"note": f"no in-memory reader registered for {ext!r}",
-				})
+				yield ExternalFile(item_entities, suffix or path.stem, path,
+					reader_hint=f"install or register a reader for {ext!r}", meta=meta, prefix=prefix)
 
 	def _find_sidecar(self, start_dir: Path, entities: dict[str, str], suffix: str) -> dict[str, Any]:
-		"""BIDS inheritance principle: nearest matching JSON sidecar wins,
-		walking from the file's own directory up to the dataset root."""
+		"""Merge applicable JSON sidecars from the dataset root to the data file."""
+		directories: list[Path] = []
 		d = start_dir
 		while True:
-			for jf in sorted(d.glob(f"*{suffix}.json")):
+			directories.append(d)
+			if d == self.root_dir:
+				break
+			if self.root_dir not in d.parents:
+				return {}
+			d = d.parent
+
+		merged: dict[str, Any] = {}
+		for directory in reversed(directories):
+			applicable: list[tuple[int, Path]] = []
+			for jf in sorted(directory.glob(f"*{suffix}.json")):
 				candidate, candidateSuffix = split_stem(jf.stem)
 				candidate.pop("sub", None)
 				candidate.pop("ses", None)
 				if candidateSuffix == suffix and all(entities.get(k) == v for k, v in candidate.items()):
-					return clean_nan(load_json(jf))
-			if d == self.root_dir:
-				return {}
-			d = d.parent
+					applicable.append((len(candidate), jf))
+			for specificity in sorted({level for level, _ in applicable}):
+				layer: dict[str, Any] = {}
+				sources: dict[str, Path] = {}
+				for _, path in (entry for entry in applicable if entry[0] == specificity):
+					for key, value in clean_nan(load_json(path)).items():
+						if key in layer and layer[key] != value:
+							raise ValidationError(
+								f"ambiguous inherited value for {key!r} in {sources[key].name} and {path.name}"
+							)
+						layer[key] = value
+						sources[key] = path
+				merged.update(layer)
+		return merged
 
-	def _read_derivatives(self) -> Iterator[Recording | Table | Attrs]:
+	def _read_derivatives(self) -> Iterator[Item]:
 		derivativesDir = self.root_dir / "derivatives"
 		if not derivativesDir.exists():
 			return

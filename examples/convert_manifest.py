@@ -42,7 +42,7 @@ def main():
 	manifest = make_example_files()
 	print(manifest.to_string(index=False), "\n")
 
-	repo = Repo("./manifest_study.zarr")
+	repo = Repo.create("./manifest_study.zarr")
 	repo.ingest(ManifestReader(manifest))
 	repo.save("convert from manifest")
 

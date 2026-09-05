@@ -31,7 +31,60 @@ def _table_df(node: zarr.Group | zarr.Array, columns: list[str] | None = None) -
 	attrs = node.attrs.asdict()
 	names = cast("list[str] | None", attrs.get("columns"))
 
-	if isinstance(node, zarr.Group):  # one array per column
+	if isinstance(node, zarr.Group) and attrs.get("table_schema_version") == 2:
+		series_list: list[pd.Series] = []
+		for spec in cast("list[dict[str, Any]]", attrs.get("schema", [])):
+			internal = str(spec["id"])
+			values = np.asarray(_array(node, internal)[:])
+			mask_name = f"{internal}__mask"
+			mask = np.asarray(_array(node, mask_name)[:]).astype(bool) if mask_name in node \
+				else np.zeros(len(values), dtype=bool)
+			encoding = spec.get("encoding", "native")
+			logical = str(spec.get("dtype", values.dtype))
+
+			if encoding == "categorical":
+				data: Any = pd.Categorical.from_codes(
+					values.astype(int), spec.get("categories", []), ordered=bool(spec.get("ordered", False))
+				)
+			elif encoding == "datetime64[ns]":
+				if "," in logical:
+					timezone = logical.rsplit(",", 1)[1].rstrip("]").strip()
+					data = pd.Series(pd.to_datetime(values.astype("int64"), utc=True).tz_convert(timezone))
+				else:
+					data = pd.Series(pd.to_datetime(values.astype("int64")))
+				data[mask] = pd.NaT
+			elif encoding == "timedelta64[ns]":
+				data = pd.Series(pd.to_timedelta(values.astype("int64"), unit="ns"))
+				data[mask] = pd.NaT
+			elif encoding in ("integer", "boolean"):
+				uses_extension = logical[:1].isupper() or logical == "boolean"
+				if mask.any() or uses_extension:
+					try:
+						data = pd.Series(pd.array(values, dtype=logical))  # type: ignore[call-overload]
+					except (TypeError, ValueError):
+						fallback = "Int64" if encoding == "integer" else "boolean"
+						data = pd.Series(pd.array(values, dtype=fallback))  # type: ignore[call-overload]
+					data[mask] = pd.NA
+				else:
+					data = pd.Series(values.astype(logical))
+			elif encoding == "float":
+				if logical[:1].isupper():
+					data = pd.Series(pd.array(values, dtype=logical))  # type: ignore[call-overload]
+					data[mask] = pd.NA
+				else:
+					data = pd.Series(values.astype(logical))
+			elif encoding == "string":
+				data = pd.Series(values.astype(str), dtype="object" if logical == "object" else "string")
+				data[mask] = None if logical == "object" else pd.NA
+			else:
+				data = pd.Series(values)
+				if mask.any():
+					data[mask] = np.nan
+			series_list.append(pd.Series(data, name=str(spec.get("name", internal))))
+		df = pd.concat(series_list, axis=1) if series_list else pd.DataFrame(columns=names or [])
+		return df[columns] if columns else df
+
+	if isinstance(node, zarr.Group):  # legacy one-array-per-column layout
 		wanted = columns or names or sorted(node.array_keys())
 		return pd.DataFrame({name: _array(node, name)[:] for name in wanted})
 
@@ -68,7 +121,7 @@ class TableView:
 	def meta(self) -> dict[str, Any]:
 		"""The table's own metadata, without the bookkeeping the writer added."""
 		return {k: v for k, v in self._group[self.name].attrs.asdict().items()
-				if k not in ("columns", "dtypes")}
+				if k not in ("_neurozarr_item_type", "table_schema_version", "columns", "dtypes", "schema")}
 
 	@property
 	def columns(self) -> list[str]:
@@ -119,7 +172,8 @@ class RecordingView:
 	def meta(self) -> dict[str, Any]:
 		"""The recording's metadata (its BIDS sidecar, plus the data_* keys the
 		writer added to describe how the samples are packed)."""
-		return self._group.attrs.asdict()
+		return {key: value for key, value in self._group.attrs.asdict().items()
+				if key != "_neurozarr_item_type"}
 
 	@property
 	def array(self) -> zarr.Array:
@@ -195,6 +249,14 @@ class RecordingView:
 		>>> values, meta = rec.data(tmin=10, tmax=20, picks=["LFP_L"])
 		"""
 		meta = self.meta
+		if start is not None and tmin is not None:
+			raise ValueError("pass either start or tmin, not both")
+		if stop is not None and tmax is not None:
+			raise ValueError("pass either stop or tmax, not both")
+		if tmin is not None and tmin < 0 or tmax is not None and tmax < 0:
+			raise ValueError("time bounds cannot be negative")
+		if tmin is not None and tmax is not None and tmax < tmin:
+			raise ValueError("tmax cannot be earlier than tmin")
 		if tmin is not None or tmax is not None:
 			if not self.sfreq:
 				raise ValueError(f"{self.path}: tmin/tmax need a stored SamplingFrequency; use start/stop instead")
@@ -302,16 +364,74 @@ class RecordingView:
 
 		# put the events table back on as annotations, so a Raw survives the round trip
 		events = self.events()
-		if not events.empty and "onset" in events and not window:
+		time_windowed = any(key in window for key in ("start", "stop", "tmin", "tmax"))
+		if not events.empty and "onset" in events and not time_windowed:
+			description = events["trial_type"] if "trial_type" in events \
+				else events["description"] if "description" in events else [""] * len(events)
 			raw.set_annotations(mne.Annotations(
 				onset=events["onset"].astype(float),
 				duration=events["duration"].astype(float) if "duration" in events else 0.0,
-				description=events.get("trial_type", events.get("description", "")),
+				description=description,
 			), verbose=False)
 		return raw
 
 	def __repr__(self) -> str:
 		return f"<RecordingView {self.path} shape={self.shape}>"
+
+
+class ArrayView:
+	"""A lazily accessed named N-dimensional array."""
+
+	def __init__(self, array: zarr.Array, name: str, entities: dict[str, str], path: str):
+		self.array, self.name, self.entities, self.path = array, name, entities, path
+
+	@property
+	def dims(self) -> tuple[str, ...]:
+		return tuple(cast("list[str]", self.array.attrs.asdict().get("dims", [])))
+
+	@property
+	def coords(self) -> dict[str, Any]:
+		return cast("dict[str, Any]", self.array.attrs.asdict().get("coords", {}))
+
+	@property
+	def meta(self) -> dict[str, Any]:
+		return {key: value for key, value in self.array.attrs.asdict().items()
+				if key not in ("_neurozarr_item_type", "dims", "coords")}
+
+	@property
+	def shape(self) -> tuple[int, ...]:
+		return self.array.shape
+
+	def data(self, selection: Any = None) -> np.ndarray:
+		"""Read the whole array or a NumPy-style selection."""
+		return np.asarray(self.array[:] if selection is None else self.array[selection])
+
+	def __repr__(self) -> str:
+		return f"<ArrayView {self.path}/{self.name} shape={self.shape}>"
+
+
+class ExternalFileView:
+	"""A source file preserved by reference because no decoder was available."""
+
+	def __init__(self, group: zarr.Group, name: str, entities: dict[str, str], path: str):
+		self._group, self.name, self.entities, self.path = group, name, entities, path
+
+	@property
+	def uri(self) -> str:
+		return str(self._group.attrs.asdict()["uri"])
+
+	@property
+	def meta(self) -> dict[str, Any]:
+		return {key: value for key, value in self._group.attrs.asdict().items()
+				if key not in ("_neurozarr_item_type", "uri", "media_type", "reader_hint")}
+
+	@property
+	def media_type(self) -> str | None:
+		return cast("str | None", self._group.attrs.asdict().get("media_type"))
+
+	@property
+	def reader_hint(self) -> str | None:
+		return cast("str | None", self._group.attrs.asdict().get("reader_hint"))
 
 
 def _is_table(node: zarr.Group | zarr.Array) -> bool:
@@ -320,18 +440,32 @@ def _is_table(node: zarr.Group | zarr.Array) -> bool:
 	return "columns" in node.attrs.asdict()
 
 
-def views_in(root: zarr.Group, base_path: str = "") -> Iterator["RecordingView | TableView"]:
+def _is_recording(node: zarr.Group) -> bool:
+	if node.attrs.asdict().get("_neurozarr_item_type") == "recording":
+		return True
+	if "data" not in node:
+		return False
+	child = node["data"]
+	return isinstance(child, zarr.Array) and child.attrs.asdict().get("_neurozarr_item_type") != "array"
+
+
+def views_in(root: zarr.Group, base_path: str = "") -> Iterator["RecordingView | TableView | ArrayView | ExternalFileView"]:
 	"""Walk a subject's tree and yield every RecordingView/TableView in it. A group
 	holding a "data" array is a recording; anything carrying a "columns" attr is a
 	table (channels, events, electrodes, a beh table, ...)."""
 	prefix = f"{base_path}/" if base_path else ""
 	for path, node in root.members(max_depth=None):
-		if not isinstance(node, zarr.Group) or _is_table(node):
+		if (not isinstance(node, zarr.Group) or _is_table(node)
+				or node.attrs.asdict().get("_neurozarr_item_type") == "external_file"):
 			continue  # a table's own group is yielded by its parent, not walked into
 		entities = parse_entities(path.rsplit("/", 1)[-1])
-		if "data" in node:
+		if _is_recording(node):
 			yield RecordingView(node, entities, prefix + path)
 		else:
 			for name, child in node.members():
 				if _is_table(child):
 					yield TableView(node, name, entities, prefix + path)
+				elif isinstance(child, zarr.Array) and child.attrs.asdict().get("_neurozarr_item_type") == "array":
+					yield ArrayView(child, name, entities, prefix + path)
+				elif isinstance(child, zarr.Group) and child.attrs.asdict().get("_neurozarr_item_type") == "external_file":
+					yield ExternalFileView(child, name, entities, prefix + path)

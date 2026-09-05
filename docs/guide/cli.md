@@ -25,10 +25,11 @@ up. Options:
 |---|---|
 | `-m`, `--message` | Commit message. Defaults to `convert`. |
 | `-j N`, `--workers N` | Convert N subjects in parallel. BIDS sources only. |
-| `--skip-existing` | Write only what isn't in the store yet. |
+| `--existing {error,skip,replace}` | Duplicate policy. Defaults to safe failure. |
+| `--reader NAME` | Select an installed reader explicitly. |
 | `--dtype {int16,float16}` | How sample data is packed. |
 | `-q`, `--quiet` | No progress bar or summary. |
-| `--force` | Convert despite validation problems. |
+| `--force` | Deprecated; malformed inputs cannot be forced through. |
 
 A progress bar appears if `tqdm` is installed.
 
@@ -39,10 +40,11 @@ Check a source before converting it. Writes nothing.
 ```bash
 neurozarr validate ./manifest.csv
 neurozarr validate ./my_bids_dataset
+neurozarr validate ./manifest.csv --json
 ```
 
-Reports missing files, formats with no reader, missing manifest columns, and
-sources that aren't shaped like BIDS. Exits non-zero if there are problems.
+Reports stable diagnostic codes, severity, source locations, and context.
+Warnings such as preserved unsupported formats exit successfully; errors do not.
 
 ## info
 
@@ -62,8 +64,20 @@ neurozarr history ./study.zarr
 neurozarr history ./study.zarr --subject sub-002
 ```
 
-History belongs to a subject, since each subject is a separate repository.
-Defaults to the first subject in the store.
+History defaults to global dataset versions. `--subject` inspects the internal
+history of one subject repository.
+
+## doctor and migrate
+
+Check manifest/snapshot integrity, or upgrade a readable 0.1 store explicitly:
+
+```bash
+neurozarr doctor ./study.zarr
+neurozarr migrate ./old-study.zarr --dry-run
+neurozarr migrate ./old-study.zarr
+```
+
+Migration writes metadata only; sample chunks are not rewritten.
 
 ## verify
 

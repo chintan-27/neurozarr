@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neurozarr"
-version = "0.1.0"
+version = "0.2.0"
 description = "Put neural/behavioral recordings into a versioned, cloud-ready Zarr/Icechunk store"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Chintan Acharya" }]
@@ -23,18 +23,24 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "icechunk",
-    "pandas",
-    "mne",
-    "zarr",
-    "numpy",
+    "icechunk>=2.1,<2.2",
+    "pandas>=2.2,<4",
+    "mne>=1.10,<2",
+    "zarr>=3.2,<3.3",
+    "numpy>=2,<3",
 ]
+
+[project.urls]
+Documentation = "https://github.com/chintan/neurozarr#readme"
+Repository = "https://github.com/chintan/neurozarr"
+Issues = "https://github.com/chintan/neurozarr/issues"
+Changelog = "https://github.com/chintan/neurozarr/blob/main/CHANGELOG.md"
 
 [project.scripts]
 neurozarr = "neurozarr.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest", "tqdm", "mypy", "pandas-stubs"]
+dev = ["pytest", "pytest-timeout", "tqdm", "mypy", "pandas-stubs", "build"]
 docs = ["sphinx", "myst-parser", "furo"]
 
 [tool.setuptools.packages.find]
@@ -46,6 +52,7 @@ neurozarr = ["py.typed"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["slow: shells out to a type checker; skip with -m 'not slow'"]
+timeout = 30
 
 [tool.mypy]
 # No python_version pin: numpy's bundled stubs use 3.12+ syntax, so checking

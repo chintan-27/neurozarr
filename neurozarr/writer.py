@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 import icechunk
@@ -10,8 +11,17 @@ from zarr.codecs import ZstdCodec
 
 from . import util
 from .entities import Entities
-from .items import Attrs, Recording, Table
+from .errors import ValidationError, WriteConflictError
+from .items import Array, Attrs, ExternalFile, Item, Recording, Table
 from .log import log_mem
+
+
+class ExistingPolicy(StrEnum):
+	"""How a writer handles an item already present at the same path."""
+
+	ERROR = "error"
+	SKIP = "skip"
+	REPLACE = "replace"
 
 
 @dataclass
@@ -42,7 +52,7 @@ class CodecConfig:
 
 	Examples
 	--------
-	>>> repo = Repo("./study.zarr", codec=CodecConfig(dtype="float16"))
+	>>> repo = Repo.create("./study.zarr", codec=CodecConfig(dtype="float16"))
 	"""
 
 	filters: list[Any] = field(default_factory=list)
@@ -51,6 +61,21 @@ class CodecConfig:
 	dtype: str = "int16"
 	chunk_target_bytes: int = 8 * 1024 * 1024
 	max_chunk_samples: int = 65536
+
+	def __post_init__(self) -> None:
+		if self.dtype not in ("int16", "float16"):
+			raise ValidationError("codec dtype must be 'int16' or 'float16'")
+		if isinstance(self.bitround_k, bool) or not isinstance(self.bitround_k, int) \
+				or not 0 <= self.bitround_k <= 15:
+			raise ValidationError("bitround_k must be an integer from 0 through 15")
+		if self.dtype != "int16" and self.bitround_k:
+			raise ValidationError("bitround_k is only valid with dtype='int16'")
+		if isinstance(self.chunk_target_bytes, bool) or not isinstance(self.chunk_target_bytes, int) \
+				or self.chunk_target_bytes <= 0:
+			raise ValidationError("chunk_target_bytes must be positive")
+		if isinstance(self.max_chunk_samples, bool) or not isinstance(self.max_chunk_samples, int) \
+				or self.max_chunk_samples <= 0:
+			raise ValidationError("max_chunk_samples must be positive")
 
 
 class Writer:
@@ -74,10 +99,22 @@ class Writer:
 			group = group.require_group(part)
 		return group
 
-	def add_recording(self, item: Recording) -> None:
+	@staticmethod
+	def _should_write(container: zarr.Group, name: str, policy: ExistingPolicy) -> bool:
+		if name not in container:
+			return True
+		if policy is ExistingPolicy.SKIP:
+			return False
+		if policy is ExistingPolicy.ERROR:
+			raise WriteConflictError(f"an item already exists at {container.path}/{name}; use existing='skip' or 'replace'")
+		return True
+
+	def add_recording(self, item: Recording, existing: ExistingPolicy = ExistingPolicy.ERROR) -> bool:
 		group = self._group_for(item.prefix, item.entities)
-		physical = item.raw.get_data()
+		if not self._should_write(group, "data", existing):
+			return False
 		attrs = dict(item.meta)
+		attrs["_neurozarr_item_type"] = "recording"
 
 		# Keep what the Raw already knows, so a recording ingested without BIDS
 		# sidecars (manual API, ManifestReader) still reads back as a real Raw.
@@ -85,8 +122,11 @@ class Writer:
 		attrs.setdefault("ch_names", list(item.raw.ch_names))
 		self._add_annotations(group, item.raw)
 
+		storage_dtype: Any
+		scale: np.ndarray | None = None
+		offset: np.ndarray | None = None
 		if self._codec.dtype == "float16":
-			data = physical.astype(np.float16)
+			storage_dtype = np.dtype("float16")
 			attrs["data_note"] = "data is physical value in the channel's native unit, rounded to float16"
 		else:
 			extras = getattr(item.raw, "_raw_extras", None)
@@ -96,30 +136,50 @@ class Writer:
 				offsets = np.array(extras[0]["offsets"])
 				scale = cal * units
 				offset = offsets * units
-				data = np.round((physical - offset[:, None]) / scale[:, None]).astype(np.int16)
-				if self._codec.bitround_k:
-					step = 1 << self._codec.bitround_k
-					data = np.clip(np.round(data.astype(np.int32) / step) * step, -32768, 32767).astype(np.int16)
+				if scale.shape != (len(item.raw.ch_names),) or offset.shape != scale.shape or np.any(scale == 0):
+					raise ValidationError("recording calibration must contain one non-zero scale and offset per channel")
+				storage_dtype = np.dtype("int16")
 				attrs["data_scale"] = scale.tolist()
 				attrs["data_offset"] = offset.tolist()
 				attrs["data_note"] = "physical value = data * data_scale + data_offset (per channel)"
 			else:
 				# ponytail: no EDF-style per-channel calibration available (non-EDF reader) -- store
 				# losslessly as float32 rather than guessing a scale/offset.
-				data = physical.astype(np.float32)
+				storage_dtype = np.dtype("float32")
 				attrs["data_note"] = "data is physical value in the channel's native unit (float32, no calibration metadata available)"
 
+		shape = (len(item.raw.ch_names), int(item.raw.n_times))
+		chunks = util.chunk_shape(shape, storage_dtype.itemsize,
+								  self._codec.chunk_target_bytes, self._codec.max_chunk_samples)
 		util.set_attrs(group, attrs)
-		group.create_array(
+		array = group.create_array(
 			"data",
-			data=data,
-			chunks=util.chunk_shape(data.shape, data.itemsize,
-									self._codec.chunk_target_bytes, self._codec.max_chunk_samples),
+			shape=shape,
+			dtype=storage_dtype,
+			chunks=chunks,
 			filters=self._codec.filters,
 			compressors=self._codec.compressors,
 			overwrite=True,  # re-converting a source into an existing store replaces it
 		)
+		for start in range(0, shape[-1], chunks[-1]):
+			stop = min(shape[-1], start + chunks[-1])
+			physical = item.raw.get_data(start=start, stop=stop)
+			if storage_dtype == np.dtype("int16"):
+				assert scale is not None and offset is not None
+				encoded = np.round((physical - offset[:, None]) / scale[:, None])
+				if not np.isfinite(encoded).all() or encoded.min() < -32768 or encoded.max() > 32767:
+					raise ValidationError(
+					"recording samples cannot be represented by their int16 calibration; use dtype='float16'"
+				)
+				data = encoded.astype(np.int16)
+				if self._codec.bitround_k:
+					step = 1 << self._codec.bitround_k
+					data = np.clip(np.round(data.astype(np.int32) / step) * step, -32768, 32767).astype(np.int16)
+			else:
+				data = physical.astype(storage_dtype)
+			array[:, start:stop] = data
 		log_mem()
+		return True
 
 	def _add_annotations(self, group: zarr.Group, raw: "mne.io.BaseRaw") -> None:
 		"""An mne.Raw's annotations are events -- store them the way BIDS does, as an
@@ -134,10 +194,13 @@ class Writer:
 			"trial_type": [str(d) for d in annotations.description],
 		}), {"source": "mne.Raw.annotations"})
 
-	def add_table(self, item: Table) -> None:
+	def add_table(self, item: Table, existing: ExistingPolicy = ExistingPolicy.ERROR) -> bool:
 		group = self._group_for(item.prefix, item.entities)
+		if not self._should_write(group, item.name, existing):
+			return False
 		util.create_table(group, item.name, item.df, item.meta)
 		log_mem()
+		return True
 
 	def add_attrs(self, item: Attrs) -> None:
 		group = self.root
@@ -146,13 +209,55 @@ class Writer:
 		util.set_attrs(group, item.attrs)
 		log_mem()
 
-	def dispatch(self, item: Recording | Table | Attrs) -> None:
+	def add_external_file(self, item: ExternalFile, existing: ExistingPolicy = ExistingPolicy.ERROR) -> bool:
+		group = self._group_for(item.prefix, item.entities)
+		if not self._should_write(group, item.name, existing):
+			return False
+		reference = group.create_group(item.name, overwrite=True)
+		util.set_attrs(reference, {
+			"_neurozarr_item_type": "external_file",
+			"uri": util.safe_uri(str(item.uri)),
+			"media_type": item.media_type,
+			"reader_hint": item.reader_hint,
+			**item.meta,
+		})
+		log_mem()
+		return True
+
+	def add_array(self, item: Array, existing: ExistingPolicy = ExistingPolicy.ERROR) -> bool:
+		group = self._group_for(item.prefix, item.entities)
+		if not self._should_write(group, item.name, existing):
+			return False
+		shape = tuple(int(size) for size in item.data.shape)
+		dtype = np.dtype(item.data.dtype)
+		chunks = util.chunk_shape(shape, dtype.itemsize,
+								  self._codec.chunk_target_bytes, self._codec.max_chunk_samples)
+		array = group.create_array(item.name, shape=shape, dtype=dtype, chunks=chunks, overwrite=True)
+		for start in range(0, shape[-1], chunks[-1]):
+			stop = min(shape[-1], start + chunks[-1])
+			selection = (slice(None),) * (len(shape) - 1) + (slice(start, stop),)
+			array[selection] = np.asarray(item.data[selection])
+		util.set_attrs(array, {
+			"_neurozarr_item_type": "array",
+			"dims": list(item.dims),
+			"coords": item.coords,
+			**item.meta,
+		})
+		log_mem()
+		return True
+
+	def dispatch(self, item: Item, existing: ExistingPolicy = ExistingPolicy.ERROR) -> bool:
 		if isinstance(item, Recording):
-			self.add_recording(item)
+			return self.add_recording(item, existing)
 		elif isinstance(item, Table):
-			self.add_table(item)
+			return self.add_table(item, existing)
 		elif isinstance(item, Attrs):
 			self.add_attrs(item)
+			return True
+		elif isinstance(item, ExternalFile):
+			return self.add_external_file(item, existing)
+		elif isinstance(item, Array):
+			return self.add_array(item, existing)
 		else:
 			raise TypeError(f"unknown item type {type(item)!r}")
 

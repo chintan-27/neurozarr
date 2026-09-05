@@ -53,7 +53,7 @@ belonging to no single subject:
 
 ```text
 study.zarr/
-  _dataset/            # dataset_description, participants field definitions
+  _dataset/            # metadata + schema and subject-snapshot manifest
   sub-001/             # an independent Icechunk repository
     ses-20220908/
       ieeg/
@@ -99,5 +99,10 @@ compress a little better and make full reads faster, smaller ones make short
 windowed reads cheaper. {class}`~neurozarr.CodecConfig` exposes both the byte
 target and the sample cap that bound it.
 
-Tables are stored as string arrays with each column's dtype recorded alongside,
-so values cast back faithfully on read.
+Tables are stored as typed column arrays with a versioned logical schema.
+Nullable columns carry explicit masks, so integers, Booleans, categories,
+datetimes, strings, and their missing values round-trip without string casting.
+
+The standardized stream also supports explicit external-file references and
+named N-dimensional arrays. These add modalities without allowing individual
+readers to invent incompatible store layouts.

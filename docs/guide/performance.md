@@ -15,6 +15,10 @@ convert_parallel("./BIDS", "./study.zarr", workers=6)
 Reading signal files and compressing them are both CPU-bound, which is why this
 uses processes rather than threads.
 
+Recordings are opened without preloading. The writer requests one destination
+chunk at a time from MNE, so peak memory is governed by `CodecConfig` rather
+than by the largest recording.
+
 A subject is the unit of work, so the total time is bounded by the largest
 single subject no matter how many workers you give it. If one participant holds
 most of a dataset, expect the speedup to flatten out well before `workers`
@@ -25,12 +29,11 @@ workers, so they never race to write the same shared metadata.
 
 ## Re-running a conversion
 
-Converting is repeatable — running it again over the same destination rewrites
-what's there rather than failing or duplicating. When new data has arrived and
-you only want to add it, pass `skip_existing`:
+Existing paths fail by default. When new data has arrived and you only want to
+add it, choose the skip policy:
 
 ```python
-repo.ingest(reader, skip_existing=True)
+repo.ingest(reader, existing="skip")
 ```
 
 This checks each incoming item against what the store already holds and writes
@@ -41,5 +44,5 @@ small amount of new data.
 On the command line both are flags:
 
 ```bash
-neurozarr convert ./BIDS ./out -j 6 --skip-existing
+neurozarr convert ./BIDS ./out -j 6 --existing skip
 ```
