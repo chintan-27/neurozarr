@@ -24,6 +24,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of being read as an authoritative list of matches.
 - `doctor` reports a catalog entry that describes an unpublished snapshot as
   `store.stale_catalog_entry`.
+- Declared support no longer excludes environments the package is tested on:
+  `requires-python` is `>=3.11` again, and the `zarr` upper bound is the next major
+  rather than the next minor. Both previously refused to install against the
+  interpreter and Zarr version the suite passes on.
 
 ### Changed
 

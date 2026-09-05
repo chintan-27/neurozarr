@@ -5,7 +5,31 @@ on:
   pull_request:
 
 jobs:
+  test:
+    # The suite runs on every supported interpreter because the one failure that has
+    # actually cost us time -- a deadlock in the icechunk/zarr threading bridge -- was
+    # intermittent. A single local run cannot rule that out; repeated CI runs can.
+    # pytest-timeout (timeout = 30 in pyproject) turns any recurrence into a failure
+    # with a traceback instead of a hung job.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: pytest -m "not slow"
+
   quality:
+    # Type checking, packaging and docs are interpreter-independent, so they run once
+    # on the floor of requires-python rather than four times.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -16,7 +40,7 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev,docs]"
-      - run: pytest -m "not slow"
+      - run: pytest
       - run: mypy
       - run: python -m build
       - run: sphinx-build -W -b html docs docs/_build
