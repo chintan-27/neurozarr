@@ -24,7 +24,46 @@ you can return to, and reading ten seconds out of an hour-long recording moves
 roughly ten seconds' worth of data — not the hour. That last part is the reason
 to bother, and it is just as true when the store lives in a cloud bucket.
 
-## 1. Describe your files
+## 1. One recording, by hand
+
+Before automating anything, do the smallest possible version once: load one of
+your files and add it to a store yourself. This is the whole shape of the
+package — everything later on is this same operation, done for many files at
+once instead of one.
+
+```python
+import mne
+from neurozarr import Repo
+
+raw = mne.io.read_raw_fif("messy/patient1/patient1_20220908_stream_raw.fif", verbose=False)
+
+repo = Repo.create("./demo.zarr")
+subject = repo.create_subject("sub-001", attrs={"diagnosis": "PD"})
+visit = subject.add_visit("ses-20220908")
+visit.add_recording(raw, task="Stream")
+repo.save("first recording")
+```
+
+`mne.io.read_raw_fif` loads a `.fif` file the way you would for any other
+purpose — use whichever `mne.io.read_raw_*` function matches your format (EDF,
+BrainVision, GDF and others all have one). Everything from `repo =` down is
+neurozarr: a **subject** holds one participant, a **visit** holds one session
+of theirs, and `add_recording` files the loaded signal under whatever `task`
+name you give it. `attrs` on `create_subject` and `add_visit` are free-form
+metadata — age, device, diagnosis, whatever you have.
+
+Read it straight back to confirm it landed where you expect:
+
+```python
+rec = Repo.open("./demo.zarr").subject("sub-001").visit("ses-20220908").recording(task="Stream")
+values, meta = rec.data(tmin=2, tmax=4)      # a numpy array, shape (2, 500)
+```
+
+That's it — one subject, one visit, one recording, read back. Doing this by
+hand for every file across every participant and every visit does not scale,
+which is what the rest of this page is for.
+
+## 2. More than one? Describe your files in a table
 
 The package does not guess what your filenames mean. You hand it a table with
 one row per file, and it does the rest.
@@ -74,7 +113,7 @@ Adjust the two guesses — how a participant id and a visit date are recovered
 from your filenames — and you are done. This script is the only real work on
 this page; everything after it is the same for everybody.
 
-## 2. Check before converting
+## 3. Check before converting
 
 {func}`~neurozarr.inspect_source` reads the manifest and reports what it finds
 wrong, without writing anything. Run it first: it is far cheaper to fix a
@@ -93,7 +132,7 @@ Missing files, unreadable formats and malformed identifiers all surface here.
 Warnings — an unsupported format that will be stored as a reference, say — do
 not make `ok` false.
 
-## 3. Convert
+## 4. Convert
 
 ```python
 from neurozarr import Repo, ManifestReader
@@ -110,7 +149,7 @@ second store. Use {meth}`~neurozarr.Repo.open` for a store that already exists.
 Nothing is written until `save()`, which returns the id of the version you just
 made.
 
-## 4. Read it back
+## 5. Read it back
 
 ```python
 from neurozarr import Repo
@@ -152,7 +191,7 @@ log = repo.subject("sub-001").visit("ses-unknown").tables()[0]
 log.df()
 ```
 
-## 5. Move it to the cloud
+## 6. Move it to the cloud
 
 Change the path to a bucket URI. Nothing else about your code changes:
 
@@ -196,7 +235,7 @@ Every step above has a command-line equivalent, useful for a quick look at a
 store or for a conversion in a shell script:
 
 ```bash
-neurozarr validate manifest.csv        # step 2
+neurozarr validate manifest.csv        # step 3
 neurozarr convert manifest.csv study.zarr
 neurozarr info study.zarr
 ```
