@@ -449,23 +449,34 @@ def _is_recording(node: zarr.Group) -> bool:
 	return isinstance(child, zarr.Array) and child.attrs.asdict().get("_neurozarr_item_type") != "array"
 
 
+# A recording's own facade children -- reachable via RecordingView.channels()/
+# .events(), never as independent top-level items, so the sibling scan below
+# must not re-yield them.
+_RECORDING_OWN_CHILDREN = frozenset({"data", "events", "channels"})
+
+
 def views_in(root: zarr.Group, base_path: str = "") -> Iterator["RecordingView | TableView | ArrayView | ExternalFileView"]:
-	"""Walk a subject's tree and yield every RecordingView/TableView in it. A group
-	holding a "data" array is a recording; anything carrying a "columns" attr is a
-	table (channels, events, electrodes, a beh table, ...)."""
+	"""Walk a subject's tree and yield every item view in it. A group holding a
+	"data" array is a recording; anything carrying a "columns" attr is a table
+	(channels, events, electrodes, a beh table, ...). A group can be a recording
+	and still hold a sibling table, array, or external-file reference under the
+	same entities (a BIDS recording next to an unsupported-format sidecar file,
+	say); both are yielded, not one at the expense of the other."""
 	prefix = f"{base_path}/" if base_path else ""
 	for path, node in root.members(max_depth=None):
 		if (not isinstance(node, zarr.Group) or _is_table(node)
 				or node.attrs.asdict().get("_neurozarr_item_type") == "external_file"):
-			continue  # a table's own group is yielded by its parent, not walked into
+			continue  # a table's own group, or an external-file reference, is yielded by its parent
 		entities = parse_entities(path.rsplit("/", 1)[-1])
-		if _is_recording(node):
+		is_recording = _is_recording(node)
+		if is_recording:
 			yield RecordingView(node, entities, prefix + path)
-		else:
-			for name, child in node.members():
-				if _is_table(child):
-					yield TableView(node, name, entities, prefix + path)
-				elif isinstance(child, zarr.Array) and child.attrs.asdict().get("_neurozarr_item_type") == "array":
-					yield ArrayView(child, name, entities, prefix + path)
-				elif isinstance(child, zarr.Group) and child.attrs.asdict().get("_neurozarr_item_type") == "external_file":
-					yield ExternalFileView(child, name, entities, prefix + path)
+		for name, child in node.members():
+			if is_recording and name in _RECORDING_OWN_CHILDREN:
+				continue
+			if _is_table(child):
+				yield TableView(node, name, entities, prefix + path)
+			elif isinstance(child, zarr.Array) and child.attrs.asdict().get("_neurozarr_item_type") == "array":
+				yield ArrayView(child, name, entities, prefix + path)
+			elif isinstance(child, zarr.Group) and child.attrs.asdict().get("_neurozarr_item_type") == "external_file":
+				yield ExternalFileView(child, name, entities, prefix + path)
