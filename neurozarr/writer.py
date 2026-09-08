@@ -10,10 +10,27 @@ import zarr
 from zarr.codecs import ZstdCodec
 
 from . import util
+from .constraints import validate_segment
 from .entities import Entities
 from .errors import ValidationError, WriteConflictError
 from .items import Array, Attrs, ExternalFile, Item, Recording, Table
 from .log import log_mem
+
+
+def _copy_node(source: zarr.Group | zarr.Array, dest_parent: zarr.Group, dest_name: str) -> None:
+	"""Recursively copy a zarr node under a new key. Neither zarr nor icechunk
+	has a move/rename primitive (zarr.Group.move raises NotImplementedError),
+	so a rename is a copy to the new key followed by deleting the old one."""
+	if isinstance(source, zarr.Array):
+		dest_array = dest_parent.create_array(dest_name, shape=source.shape, dtype=source.dtype,
+											   chunks=source.chunks, overwrite=True)
+		dest_array[:] = source[:]
+		util.set_attrs(dest_array, source.attrs.asdict())
+		return
+	dest_group = dest_parent.create_group(dest_name, overwrite=True)
+	util.set_attrs(dest_group, source.attrs.asdict())
+	for name, child in source.members():
+		_copy_node(child, dest_group, name)
 
 
 class ExistingPolicy(StrEnum):
@@ -213,6 +230,30 @@ class Writer:
 		else:
 			target = group.require_group(item.path[-1])
 		util.set_attrs(target, item.attrs)
+		log_mem()
+
+	def _resolve(self, path: tuple[str, ...]) -> tuple[zarr.Group, str]:
+		if not path:
+			raise ValueError("path must name an item, not the repo root")
+		group = self.root
+		for part in path[:-1]:
+			group = group.require_group(part)
+		if path[-1] not in group:
+			raise KeyError(f"no such item: {'/'.join(path)}")
+		return group, path[-1]
+
+	def delete(self, path: tuple[str, ...]) -> None:
+		group, name = self._resolve(path)
+		del group[name]
+		log_mem()
+
+	def rename(self, path: tuple[str, ...], new_name: str) -> None:
+		validate_segment(new_name, "item name")
+		group, old_name = self._resolve(path)
+		if new_name in group:
+			raise FileExistsError(f"{new_name!r} already exists at this location")
+		_copy_node(group[old_name], group, new_name)
+		del group[old_name]
 		log_mem()
 
 	def add_external_file(self, item: ExternalFile, existing: ExistingPolicy = ExistingPolicy.ERROR) -> bool:

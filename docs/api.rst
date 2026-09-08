@@ -15,6 +15,7 @@ Building a store:
    neurozarr.Repo.open
    neurozarr.Repo.create_subject
    neurozarr.Repo.set_attrs
+   neurozarr.Repo.delete_subject
    neurozarr.Repo.ingest
    neurozarr.Repo.save
    neurozarr.Repo.transaction
@@ -41,6 +42,8 @@ Building a store:
    neurozarr.Visit.add_array
    neurozarr.Visit.set_attrs
    neurozarr.Visit.recording
+   neurozarr.Subject.rename_visit
+   neurozarr.Subject.delete_visit
 
 Reading data back:
 
@@ -56,12 +59,20 @@ Reading data back:
    neurozarr.RecordingView.shape
    neurozarr.RecordingView.array
    neurozarr.RecordingView.set_attrs
+   neurozarr.RecordingView.rename
+   neurozarr.RecordingView.delete
    neurozarr.TableView.df
    neurozarr.TableView.columns
    neurozarr.TableView.set_attrs
+   neurozarr.TableView.rename
+   neurozarr.TableView.delete
    neurozarr.ArrayView.data
    neurozarr.ArrayView.set_attrs
+   neurozarr.ArrayView.rename
+   neurozarr.ArrayView.delete
    neurozarr.ExternalFileView.set_attrs
+   neurozarr.ExternalFileView.rename
+   neurozarr.ExternalFileView.delete
 
 The item stream a reader yields and the writer consumes:
 

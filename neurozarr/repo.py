@@ -13,7 +13,7 @@ import zarr
 from .entities import Entities
 from .errors import SchemaVersionError, StoreIntegrityError, WriteConflictError
 from .items import Array, Attrs, ExternalFile, Recording, Reader, Table
-from .read import ArrayView, ExternalFileView, RecordingView, TableView, views_in
+from .read import ArrayView, ExternalFileView, RecordingView, TableView, WriteBack, views_in
 from .schema import MANIFEST_ATTR, SCHEMA_VERSION, StoreManifest, utc_now
 from .storage import StorageTarget, storage_from
 from .writer import CodecConfig, ExistingPolicy, Writer
@@ -86,6 +86,7 @@ class Repo:
 		self._repos: dict[str, icechunk.Repository] = {}  # opened lazily
 		self._writers: dict[str, Writer] = {}  # opened lazily on first write
 		self._base_manifest: StoreManifest | None = None
+		self._removed_subjects: set[str] = set()
 		self._failed = False
 
 	@classmethod
@@ -162,6 +163,20 @@ class Repo:
 		"""Add metadata while preserving the transaction failure invariant."""
 		try:
 			self._writer_for(sub_id).add_attrs(item)
+		except Exception:
+			self._failed = True
+			raise
+
+	def _delete(self, path: tuple[str, ...], sub_id: str) -> None:
+		try:
+			self._writer_for(sub_id).delete(path)
+		except Exception:
+			self._failed = True
+			raise
+
+	def _rename(self, path: tuple[str, ...], new_name: str, sub_id: str) -> None:
+		try:
+			self._writer_for(sub_id).rename(path, new_name)
 		except Exception:
 			self._failed = True
 			raise
@@ -259,6 +274,34 @@ class Repo:
 		"""
 		self._add_attrs(Attrs((), attrs), "_dataset")
 
+	def delete_subject(self, sub_id: str) -> None:
+		"""Remove a subject from the dataset's published index.
+
+		This does not erase the subject's own repository or its version
+		history -- only schema v2's dataset-wide record of which subjects are
+		published. A subject id is baked into its repository's storage
+		location, so there is no cheap rename for a whole subject; to move one
+		under a new id, read its data back out and re-ingest it, then delete
+		the old id here.
+
+		Not committed until :meth:`save`.
+
+		Parameters
+		----------
+		sub_id : str
+			Subject to remove, e.g. ``"sub-001"``.
+
+		Raises
+		------
+		KeyError
+			If no such subject is currently published.
+		"""
+		if sub_id not in self._subject_index():
+			raise KeyError(f"no such subject: {sub_id}")
+		self._writers.pop(sub_id, None)
+		self._repos.pop(sub_id, None)
+		self._removed_subjects.add(sub_id)
+
 	def ingest(self, reader: Reader, progress: Any = None,
 			   existing: ExistingPolicy | str = ExistingPolicy.ERROR,
 			   skip_existing: bool | None = None) -> None:
@@ -302,19 +345,37 @@ class Repo:
 			self._failed = True
 			raise
 
-	def _route_attrs(self, item: Attrs) -> None:
-		"""An Attrs' path may embed a sub-XXX segment anywhere in it (e.g. a
-		derivatives path is ("derivatives", name, sub-XXX, ...)). Whichever segment
-		looks like a subject id decides which repo it belongs to; that segment is
-		dropped since the target repo already is that subject. No sub-XXX segment
-		at all means it's dataset-wide, and goes to the _dataset repo unchanged."""
-		path = item.path
+	@staticmethod
+	def _route(path: tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
+		"""A path (an Attrs' path, or a view's path split on "/") may embed a
+		sub-XXX segment anywhere in it (e.g. a derivatives path is
+		("derivatives", name, sub-XXX, ...)). Whichever segment looks like a
+		subject id decides which repo it belongs to; that segment is dropped
+		since the target repo already is that subject. No sub-XXX segment at
+		all means it's dataset-wide, routed to the _dataset repo unchanged."""
 		for i, part in enumerate(path):
 			if part.startswith("sub-"):
 				Entities(part)
-				self._add_attrs(Attrs(path[:i] + path[i + 1:], item.attrs), part)
-				return
-		self._add_attrs(item, "_dataset")
+				return part, path[:i] + path[i + 1:]
+		return "_dataset", path
+
+	def _route_attrs(self, item: Attrs) -> None:
+		sub_id, stripped = self._route(item.path)
+		self._add_attrs(Attrs(stripped, item.attrs), sub_id)
+
+	def _route_rename(self, path: tuple[str, ...], new_name: str) -> None:
+		sub_id, stripped = self._route(path)
+		self._rename(stripped, new_name, sub_id)
+
+	def _route_delete(self, path: tuple[str, ...]) -> None:
+		sub_id, stripped = self._route(path)
+		self._delete(stripped, sub_id)
+
+	def _write_back(self) -> WriteBack:
+		"""Bound to every view built from this Repo, so a view's set_attrs()/
+		rename()/delete() can reach back through it without read.py knowing
+		what a Repo is."""
+		return WriteBack(self._route_attrs, self._route_rename, self._route_delete)
 
 	def save(self, message: str) -> str | None:
 		"""Commit every subject repository touched since the last save.
@@ -329,7 +390,7 @@ class Repo:
 		"""
 		if self._failed:
 			raise RuntimeError("cannot save a failed transaction; call abort() and retry")
-		if not self._writers:
+		if not self._writers and not self._removed_subjects:
 			return None
 
 		touched: dict[str, str] = {}
@@ -365,6 +426,13 @@ class Repo:
 					self._failed = True
 					raise WriteConflictError(f"another writer published a different snapshot for {sub_id}")
 			base = current
+		if self._removed_subjects:
+			base = replace(
+				base,
+				subject_snapshots={k: v for k, v in base.subject_snapshots.items()
+									if k not in self._removed_subjects},
+				catalog={k: v for k, v in base.catalog.items() if k not in self._removed_subjects},
+			)
 		subject_snapshots = {**base.subject_snapshots, **touched}
 		catalog = dict(base.catalog)
 		for sub_id, snapshot in touched.items():
@@ -409,6 +477,13 @@ class Repo:
 				if current_snapshot not in (None, base_snapshot, snapshot):
 					self._failed = True
 					raise WriteConflictError(f"another writer published a different snapshot for {sub_id}") from exc
+			if self._removed_subjects:
+				current = replace(
+					current,
+					subject_snapshots={k: v for k, v in current.subject_snapshots.items()
+										if k not in self._removed_subjects},
+					catalog={k: v for k, v in current.catalog.items() if k not in self._removed_subjects},
+				)
 			merged_snapshots = {**current.subject_snapshots, **touched}
 			merged_catalog = dict(current.catalog)
 			for sub_id, subject_snapshot in touched.items():
@@ -426,6 +501,7 @@ class Repo:
 				raise WriteConflictError("dataset publication conflicted twice; abort and retry") from retry_exc
 
 		self._writers.clear()
+		self._removed_subjects.clear()
 		self._base_manifest = manifest
 		return dataset_snapshot
 
@@ -467,6 +543,7 @@ class Repo:
 		"""Discard all uncommitted sessions held by this Repo instance."""
 		self._writers.clear()
 		self._base_manifest = None
+		self._removed_subjects.clear()
 		self._failed = False
 
 	@contextmanager
@@ -757,6 +834,43 @@ class Subject:
 		"""
 		self._repo._add_attrs(Attrs((), attrs), self.sub_id)
 
+	def rename_visit(self, ses_id: str, new_ses_id: str) -> "Visit":
+		"""Rename a session, keeping everything under it.
+
+		A session is just a group inside this subject's own repository, so
+		this stays cheap: it copies that one group to the new key and deletes
+		the old one, both within the same repository. Not committed until
+		:meth:`Repo.save`. This view and any views obtained before the rename
+		still show the pre-rename tree until the store is reopened.
+
+		Parameters
+		----------
+		ses_id : str
+			The session's current label.
+		new_ses_id : str
+			Its new label.
+
+		Returns
+		-------
+		Visit
+			A handle for the session under its new label.
+		"""
+		Entities(self.sub_id, new_ses_id)
+		self._repo._rename((ses_id,), new_ses_id, self.sub_id)
+		return Visit(self._repo, self.sub_id, new_ses_id)
+
+	def delete_visit(self, ses_id: str) -> None:
+		"""Delete a session and everything under it.
+
+		Not committed until :meth:`Repo.save`.
+
+		Parameters
+		----------
+		ses_id : str
+			The session to delete.
+		"""
+		self._repo._delete((ses_id,), self.sub_id)
+
 	# ---- reading ----------------------------------------------------------
 
 	def root(self, version: str | None = None) -> zarr.Group:
@@ -822,7 +936,7 @@ class Subject:
 			Includes derivatives, which carry ``derivatives/<pipeline>/`` in
 			their path.
 		"""
-		return [v for v in views_in(self.root(version), self.sub_id, self._repo._route_attrs) if isinstance(v, RecordingView)]
+		return [v for v in views_in(self.root(version), self.sub_id, self._repo._write_back()) if isinstance(v, RecordingView)]
 
 	def tables(self, version: str | None = None) -> list[TableView]:
 		"""Every table belonging to this subject, across all their sessions.
@@ -840,15 +954,15 @@ class Subject:
 		-------
 		list of TableView
 		"""
-		return [v for v in views_in(self.root(version), self.sub_id, self._repo._route_attrs) if isinstance(v, TableView)]
+		return [v for v in views_in(self.root(version), self.sub_id, self._repo._write_back()) if isinstance(v, TableView)]
 
 	def arrays(self, version: str | None = None) -> list[ArrayView]:
 		"""Every generic N-dimensional array belonging to this subject."""
-		return [v for v in views_in(self.root(version), self.sub_id, self._repo._route_attrs) if isinstance(v, ArrayView)]
+		return [v for v in views_in(self.root(version), self.sub_id, self._repo._write_back()) if isinstance(v, ArrayView)]
 
 	def external_files(self, version: str | None = None) -> list[ExternalFileView]:
 		"""Every unsupported source file preserved by reference for this subject."""
-		return [v for v in views_in(self.root(version), self.sub_id, self._repo._route_attrs) if isinstance(v, ExternalFileView)]
+		return [v for v in views_in(self.root(version), self.sub_id, self._repo._write_back()) if isinstance(v, ExternalFileView)]
 
 
 class Visit:
@@ -1037,7 +1151,7 @@ class Visit:
 		list of RecordingView
 		"""
 		base = f"{self.sub_id}/{self.ses_id}"
-		return [v for v in views_in(self._group(version), base, self._repo._route_attrs) if isinstance(v, RecordingView)]
+		return [v for v in views_in(self._group(version), base, self._repo._write_back()) if isinstance(v, RecordingView)]
 
 	def tables(self, version: str | None = None) -> list[TableView]:
 		"""Every table in this session.
@@ -1052,17 +1166,17 @@ class Visit:
 		list of TableView
 		"""
 		base = f"{self.sub_id}/{self.ses_id}"
-		return [v for v in views_in(self._group(version), base, self._repo._route_attrs) if isinstance(v, TableView)]
+		return [v for v in views_in(self._group(version), base, self._repo._write_back()) if isinstance(v, TableView)]
 
 	def arrays(self, version: str | None = None) -> list[ArrayView]:
 		"""Every generic N-dimensional array in this session."""
 		base = f"{self.sub_id}/{self.ses_id}"
-		return [v for v in views_in(self._group(version), base, self._repo._route_attrs) if isinstance(v, ArrayView)]
+		return [v for v in views_in(self._group(version), base, self._repo._write_back()) if isinstance(v, ArrayView)]
 
 	def external_files(self, version: str | None = None) -> list[ExternalFileView]:
 		"""Every unsupported source file preserved by reference in this session."""
 		base = f"{self.sub_id}/{self.ses_id}"
-		return [v for v in views_in(self._group(version), base, self._repo._route_attrs) if isinstance(v, ExternalFileView)]
+		return [v for v in views_in(self._group(version), base, self._repo._write_back()) if isinstance(v, ExternalFileView)]
 
 	def recording(self, **entities: Any) -> "RecordingView":
 		"""Get the single recording in this session matching the given entities.

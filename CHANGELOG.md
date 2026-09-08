@@ -33,6 +33,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rewriting its data. Views obtained through `Repo`/`Subject`/`Visit` carry a
   route back to their subject's writer; a view built directly from a bare
   zarr group has none and raises `TypeError` on `set_attrs`.
+- `rename()` and `delete()` on `RecordingView`, `TableView`, `ArrayView`, and
+  `ExternalFileView`, and `Subject.rename_visit`/`delete_visit`. Neither zarr
+  nor icechunk has a move primitive, so a rename copies the item to its new
+  key and deletes the old one, all within the same subject repository.
+- `Repo.delete_subject`: removes a subject from schema v2's published index
+  (`subjects`, `subject_snapshots`, `catalog`) without touching its own
+  repository or version history -- a soft removal, consistent with
+  everything else in the store being versioned rather than erased. There is
+  no equivalent `rename_subject`: a subject id is baked into its
+  repository's storage location, and neither zarr nor icechunk can move that
+  cheaply, so renaming a whole subject means reading its data out,
+  re-ingesting it under the new id, and calling `delete_subject` on the old
+  one.
 
 ### Fixed
 

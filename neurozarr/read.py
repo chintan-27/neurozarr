@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Callable, Iterator, cast
+from typing import TYPE_CHECKING, Any, Callable, Iterator, NamedTuple, cast
 
 import numpy as np
 import pandas as pd
@@ -11,10 +11,15 @@ from .log import logger
 if TYPE_CHECKING:
 	import mne  # type: ignore[import-untyped]  # mne ships no type information
 
-# Set by Subject/Visit when a view is obtained from a writable Repo, so
-# view.set_attrs() can route a change back through Repo._route_attrs without
-# read.py depending on Repo itself.
-AttrsSink = Callable[[Attrs], None]
+
+class WriteBack(NamedTuple):
+	"""Bound to a view obtained from a writable Repo (by Subject/Visit, via
+	views_in's write= param), so set_attrs()/rename()/delete() can route a
+	change back through Repo._route_attrs/_route_rename/_route_delete without
+	read.py depending on Repo itself."""
+	set_attrs: Callable[[Attrs], None]
+	rename: Callable[[tuple[str, ...], str], None]
+	delete: Callable[[tuple[str, ...]], None]
 
 
 def _array(node: zarr.Group, name: str) -> zarr.Array:
@@ -103,11 +108,15 @@ def _table_df(node: zarr.Group | zarr.Array, columns: list[str] | None = None) -
 	return df[columns] if columns else df
 
 
-def _sink(attrs_sink: "AttrsSink | None", path: str, name: str | None, attrs: dict[str, Any]) -> None:
-	if attrs_sink is None:
-		raise TypeError("this view has no writable Repo attached")
+def _target_path(path: str, name: str | None) -> tuple[str, ...]:
 	segments = tuple(path.split("/"))
-	attrs_sink(Attrs((*segments, name) if name is not None else segments, attrs))
+	return (*segments, name) if name is not None else segments
+
+
+def _require_write(write: "WriteBack | None") -> "WriteBack":
+	if write is None:
+		raise TypeError("this view has no writable Repo attached")
+	return write
 
 
 class TableView:
@@ -128,9 +137,9 @@ class TableView:
 	"""
 
 	def __init__(self, group: zarr.Group, name: str, entities: dict[str, str], path: str,
-				 _attrs_sink: "AttrsSink | None" = None):
+				 _write: "WriteBack | None" = None):
 		self._group, self.name, self.entities, self.path = group, name, entities, path
-		self._attrs_sink = _attrs_sink
+		self._write = _write
 
 	@property
 	def meta(self) -> dict[str, Any]:
@@ -143,9 +152,27 @@ class TableView:
 
 		Merges into whatever attrs already exist rather than replacing them.
 		Not committed until :meth:`Repo.save`. Only available on a view obtained
-		from a writable :class:`Repo`.
+		from a writable :class:`Repo`; this view keeps showing pre-change data
+		until the store is reopened.
 		"""
-		_sink(self._attrs_sink, self.path, self.name, attrs)
+		_require_write(self._write).set_attrs(Attrs(_target_path(self.path, self.name), attrs))
+
+	def rename(self, new_name: str) -> None:
+		"""Rename this table.
+
+		Not committed until :meth:`Repo.save`. Only available on a view
+		obtained from a writable :class:`Repo`. Do not reuse this view
+		afterwards -- it still points at the old name; open a fresh one.
+		"""
+		_require_write(self._write).rename(_target_path(self.path, self.name), new_name)
+
+	def delete(self) -> None:
+		"""Delete this table.
+
+		Not committed until :meth:`Repo.save`. Only available on a view
+		obtained from a writable :class:`Repo`.
+		"""
+		_require_write(self._write).delete(_target_path(self.path, self.name))
 
 	@property
 	def columns(self) -> list[str]:
@@ -189,18 +216,38 @@ class RecordingView:
 		``"sub-001/ses-1/ieeg/task-Rest_run-1"``.
 	"""
 
-	def __init__(self, group: zarr.Group, entities: dict, path: str, _attrs_sink: "AttrsSink | None" = None):
+	def __init__(self, group: zarr.Group, entities: dict, path: str, _write: "WriteBack | None" = None):
 		self._group, self.entities, self.path = group, entities, path
-		self._attrs_sink = _attrs_sink
+		self._write = _write
 
 	def set_attrs(self, attrs: dict[str, Any]) -> None:
 		"""Add or update this recording's metadata after creation.
 
 		Merges into whatever attrs already exist rather than replacing them.
 		Not committed until :meth:`Repo.save`. Only available on a view obtained
-		from a writable :class:`Repo`.
+		from a writable :class:`Repo`; this view keeps showing pre-change data
+		until the store is reopened.
 		"""
-		_sink(self._attrs_sink, self.path, None, attrs)
+		_require_write(self._write).set_attrs(Attrs(_target_path(self.path, None), attrs))
+
+	def rename(self, new_name: str) -> None:
+		"""Rename this recording -- changes its raw group key, not its BIDS
+		entities, so the new name need not follow BIDS ``key-value`` form.
+
+		Not committed until :meth:`Repo.save`. Only available on a view
+		obtained from a writable :class:`Repo`. Do not reuse this view
+		afterwards -- it still points at the old name; open a fresh one.
+		"""
+		_require_write(self._write).rename(_target_path(self.path, None), new_name)
+
+	def delete(self) -> None:
+		"""Delete this recording and everything under it (its data, channels,
+		and events).
+
+		Not committed until :meth:`Repo.save`. Only available on a view
+		obtained from a writable :class:`Repo`.
+		"""
+		_require_write(self._write).delete(_target_path(self.path, None))
 
 	@property
 	def meta(self) -> dict[str, Any]:
@@ -417,18 +464,36 @@ class ArrayView:
 	"""A lazily accessed named N-dimensional array."""
 
 	def __init__(self, array: zarr.Array, name: str, entities: dict[str, str], path: str,
-				 _attrs_sink: "AttrsSink | None" = None):
+				 _write: "WriteBack | None" = None):
 		self.array, self.name, self.entities, self.path = array, name, entities, path
-		self._attrs_sink = _attrs_sink
+		self._write = _write
 
 	def set_attrs(self, attrs: dict[str, Any]) -> None:
 		"""Add or update this array's metadata after creation.
 
 		Merges into whatever attrs already exist rather than replacing them.
 		Not committed until :meth:`Repo.save`. Only available on a view obtained
-		from a writable :class:`Repo`.
+		from a writable :class:`Repo`; this view keeps showing pre-change data
+		until the store is reopened.
 		"""
-		_sink(self._attrs_sink, self.path, self.name, attrs)
+		_require_write(self._write).set_attrs(Attrs(_target_path(self.path, self.name), attrs))
+
+	def rename(self, new_name: str) -> None:
+		"""Rename this array.
+
+		Not committed until :meth:`Repo.save`. Only available on a view
+		obtained from a writable :class:`Repo`. Do not reuse this view
+		afterwards -- it still points at the old name; open a fresh one.
+		"""
+		_require_write(self._write).rename(_target_path(self.path, self.name), new_name)
+
+	def delete(self) -> None:
+		"""Delete this array.
+
+		Not committed until :meth:`Repo.save`. Only available on a view
+		obtained from a writable :class:`Repo`.
+		"""
+		_require_write(self._write).delete(_target_path(self.path, self.name))
 
 	@property
 	def dims(self) -> tuple[str, ...]:
@@ -459,18 +524,37 @@ class ExternalFileView:
 	"""A source file preserved by reference because no decoder was available."""
 
 	def __init__(self, group: zarr.Group, name: str, entities: dict[str, str], path: str,
-				 _attrs_sink: "AttrsSink | None" = None):
+				 _write: "WriteBack | None" = None):
 		self._group, self.name, self.entities, self.path = group, name, entities, path
-		self._attrs_sink = _attrs_sink
+		self._write = _write
 
 	def set_attrs(self, attrs: dict[str, Any]) -> None:
 		"""Add or update this external file's metadata after creation.
 
 		Merges into whatever attrs already exist rather than replacing them.
 		Not committed until :meth:`Repo.save`. Only available on a view obtained
-		from a writable :class:`Repo`.
+		from a writable :class:`Repo`; this view keeps showing pre-change data
+		until the store is reopened.
 		"""
-		_sink(self._attrs_sink, self.path, self.name, attrs)
+		_require_write(self._write).set_attrs(Attrs(_target_path(self.path, self.name), attrs))
+
+	def rename(self, new_name: str) -> None:
+		"""Rename this external-file reference.
+
+		Not committed until :meth:`Repo.save`. Only available on a view
+		obtained from a writable :class:`Repo`. Do not reuse this view
+		afterwards -- it still points at the old name; open a fresh one.
+		"""
+		_require_write(self._write).rename(_target_path(self.path, self.name), new_name)
+
+	def delete(self) -> None:
+		"""Delete this external-file reference. The referenced source file
+		itself is untouched -- only the reference stored in the tree is removed.
+
+		Not committed until :meth:`Repo.save`. Only available on a view
+		obtained from a writable :class:`Repo`.
+		"""
+		_require_write(self._write).delete(_target_path(self.path, self.name))
 
 	@property
 	def uri(self) -> str:
@@ -512,7 +596,7 @@ _RECORDING_OWN_CHILDREN = frozenset({"data", "events", "channels"})
 
 
 def views_in(root: zarr.Group, base_path: str = "",
-			 attrs_sink: "AttrsSink | None" = None) -> Iterator["RecordingView | TableView | ArrayView | ExternalFileView"]:
+			 write: "WriteBack | None" = None) -> Iterator["RecordingView | TableView | ArrayView | ExternalFileView"]:
 	"""Walk a subject's tree and yield every item view in it. A group holding a
 	"data" array is a recording; anything carrying a "columns" attr is a table
 	(channels, events, electrodes, a beh table, ...). A group can be a recording
@@ -520,8 +604,8 @@ def views_in(root: zarr.Group, base_path: str = "",
 	same entities (a BIDS recording next to an unsupported-format sidecar file,
 	say); both are yielded, not one at the expense of the other.
 
-	attrs_sink, when given, is attached to each view so its set_attrs() can
-	route a change back through Repo._route_attrs -- read.py itself never
+	write, when given, is attached to each view so its set_attrs()/rename()/
+	delete() can route a change back through Repo -- read.py itself never
 	writes and doesn't know about Repo."""
 	prefix = f"{base_path}/" if base_path else ""
 	for path, node in root.members(max_depth=None):
@@ -531,13 +615,13 @@ def views_in(root: zarr.Group, base_path: str = "",
 		entities = parse_entities(path.rsplit("/", 1)[-1])
 		is_recording = _is_recording(node)
 		if is_recording:
-			yield RecordingView(node, entities, prefix + path, attrs_sink)
+			yield RecordingView(node, entities, prefix + path, write)
 		for name, child in node.members():
 			if is_recording and name in _RECORDING_OWN_CHILDREN:
 				continue
 			if _is_table(child):
-				yield TableView(node, name, entities, prefix + path, attrs_sink)
+				yield TableView(node, name, entities, prefix + path, write)
 			elif isinstance(child, zarr.Array) and child.attrs.asdict().get("_neurozarr_item_type") == "array":
-				yield ArrayView(child, name, entities, prefix + path, attrs_sink)
+				yield ArrayView(child, name, entities, prefix + path, write)
 			elif isinstance(child, zarr.Group) and child.attrs.asdict().get("_neurozarr_item_type") == "external_file":
-				yield ExternalFileView(child, name, entities, prefix + path, attrs_sink)
+				yield ExternalFileView(child, name, entities, prefix + path, write)
