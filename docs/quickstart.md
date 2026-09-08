@@ -1,34 +1,24 @@
 # Quickstart
 
-This guide converts a directory of recordings — files named however they came
-off the device — into a versioned store, typically in cloud storage, that
-supports reading a short window of a long recording without downloading the
-entire file.
+This converts a folder of recordings into a versioned, cloud-ready store,
+using the Python API — neurozarr's primary interface.
 
-It uses the Python API, the primary interface to neurozarr.
+## Zarr and Icechunk
 
-## Zarr and Icechunk in brief
+Two terms recur below; neither requires direct use.
 
-Two terms recur throughout the documentation. Neither requires direct
-interaction, but each explains part of what the package provides.
+**Zarr** stores a large array as many small chunks instead of one file, so
+reading a chunk does not require reading the rest.
 
-**Zarr** stores a large array as many small chunks rather than as a single
-file. This is what allows a program to fetch one chunk without reading the
-ones before it.
+**Icechunk** adds version history on top, the way git does for source code.
 
-**Icechunk** adds version history on top of Zarr, in the way git tracks
-versions of source code.
-
-Together: recordings are stored in one place with a full version history, and
-reading ten seconds from an hour-long recording transfers roughly ten seconds
-of data rather than the entire file — including when the store is in a cloud
-bucket.
+Recordings end up stored once, with full history, and reading ten seconds
+from an hour-long recording moves about ten seconds of data — on disk or in a
+cloud bucket.
 
 ## 1. Add one recording
 
-Before converting a full dataset, load a single file and add it to a store
-directly. This is the core operation the rest of the package builds on;
-everything that follows applies it to many files at once.
+Load a single file and add it to a store before converting a whole dataset:
 
 ```python
 import mne
@@ -43,29 +33,26 @@ visit.add_recording(raw, task="Stream")
 repo.save("first recording")
 ```
 
-Load the file with `mne.io.read_raw_fif`, or with the `mne.io.read_raw_*`
-function matching your source format (EDF, BrainVision, GDF, and others are
-supported). The remaining lines are the neurozarr API: a **subject**
-represents one participant, a **visit** represents one of their sessions, and
-`add_recording` stores the loaded signal under a `task` label you choose. The
-`attrs` argument to `create_subject` and `add_visit` accepts arbitrary
-metadata — age, device, diagnosis, or any other field relevant to your study.
+Load the file with `mne.io.read_raw_fif`, or the `mne.io.read_raw_*` function
+for your format (EDF, BrainVision, GDF, and others are supported). A
+**subject** is one participant, a **visit** is one of their sessions, and
+`add_recording` stores the signal under a `task` label you choose. `attrs`
+takes any metadata — age, device, diagnosis.
 
-Read it back to confirm it was stored correctly:
+Read it back:
 
 ```python
 rec = Repo.open("./demo.zarr").subject("sub-001").visit("ses-20220908").recording(task="Stream")
 values, meta = rec.data(tmin=2, tmax=4)      # a numpy array, shape (2, 500)
 ```
 
-This covers one subject, one visit, and one recording. Repeating it by hand
-for every file across every participant and visit does not scale — the
-remainder of this guide covers converting many files at once.
+Doing this by hand for every file does not scale. The rest of this guide
+converts many files at once.
 
 ## 2. Describe multiple files in a table
 
-neurozarr does not infer meaning from filenames. Instead, you provide a table
-with one row per file, and the package handles the rest.
+neurozarr does not infer meaning from filenames — describe your files in a
+table, one row per file.
 
 | sub | ses | datatype | task | path |
 |---|---|---|---|---|
@@ -74,16 +61,15 @@ with one row per file, and the package handles the rest.
 | sub-001 | ses-unknown | beh | TherapyLog | messy/patient1/patient1_therapy_log.csv |
 | sub-002 | ses-20230114 | ieeg | Stream | messy/patient2/patient2_20230114_stream_raw.fif |
 
-Five columns are sufficient to begin:
+Five columns are enough:
 
 - **sub** — the participant. Must begin with `sub-`.
-- **ses** — the visit. Must begin with `ses-`. A date makes a good label.
+- **ses** — the visit. Must begin with `ses-`. A date works well.
 - **datatype** — `ieeg` for signal recordings, `beh` for logs and tables.
 - **task** — a label for the recording. Your own vocabulary; `Stream` here.
-- **path** — the file's current location.
+- **path** — where the file is now.
 
-Rather than typing this table by hand, write a short script that walks your
-directory and derives each column from your own naming convention:
+Generate the table with a script rather than typing it by hand:
 
 ```python
 import csv, pathlib, re
@@ -108,16 +94,14 @@ with open("manifest.csv", "w", newline="") as f:
     writer.writerows(rows)
 ```
 
-Adjust the two derivations — how a participant id and a visit date are
-recovered from your filenames — to match your data. This script is the only
-dataset-specific step in this guide; everything that follows is the same
-regardless of the source data.
+Adjust the two derivations — participant id and visit date from your
+filenames — for your own data. Everything after this is the same regardless
+of source data.
 
 ## 3. Check before converting
 
-{func}`~neurozarr.inspect_source` reads the manifest and reports any problems
-without writing anything. Run it first: correcting a manifest is far less
-costly than discovering a missing file partway through a long conversion.
+{func}`~neurozarr.inspect_source` reads the manifest and reports problems
+without writing anything:
 
 ```python
 from neurozarr import inspect_source
@@ -128,9 +112,9 @@ for issue in report:
 print(report.ok)        # True when nothing is fatal
 ```
 
-Missing files, unreadable formats, and malformed identifiers all surface here.
-Warnings — an unsupported format that will be stored as a reference, for
-example — do not make `ok` false.
+Missing files, unreadable formats, and malformed identifiers all show up
+here. A warning — an unsupported format stored as a reference, for example —
+does not make `ok` false.
 
 ## 4. Convert
 
@@ -142,13 +126,11 @@ repo.ingest(ManifestReader("manifest.csv"))
 version = repo.save("first conversion")
 ```
 
-{meth}`~neurozarr.Repo.create` makes a new store and refuses to open an
-existing one, so a typo in the destination path cannot silently create a
-second store. Use {meth}`~neurozarr.Repo.open` for a store that already
-exists.
+{meth}`~neurozarr.Repo.create` makes a new store and fails if one already
+exists, so a typo in the path cannot silently create a second store. Use
+{meth}`~neurozarr.Repo.open` for a store that already exists.
 
-Nothing is written until `save()`, which returns the id of the version just
-created.
+`save()` writes nothing until it is called, and returns the new version's id.
 
 ## 5. Read it back
 
@@ -172,8 +154,7 @@ values, meta = rec.data(tmin=2, tmax=4)          # a numpy array, shape (2, 500)
 raw = rec.raw(tmin=2, tmax=4)                    # the same window as an mne.Raw
 ```
 
-This is windowed reading, the package's main advantage: only the chunks
-covering seconds 2 to 4 are read.
+Only the chunks covering seconds 2 to 4 are read from storage.
 
 Search across every participant at once:
 
@@ -185,7 +166,7 @@ for found in repo.find(task="Stream"):
 # sub-002/ses-20230114/ieeg/task-Stream
 ```
 
-Tables are returned as pandas DataFrames, with column types preserved:
+Tables come back as pandas DataFrames, with column types preserved:
 
 ```python
 log = repo.subject("sub-001").visit("ses-unknown").tables()[0]
@@ -194,7 +175,7 @@ log.df()
 
 ## 6. Move it to the cloud
 
-Replace the local path with a bucket URI. No other code changes:
+Replace the local path with a bucket URI:
 
 ```python
 repo = Repo.create("s3://my-bucket/study", region="us-east-1")
@@ -206,18 +187,17 @@ rec = repo.subject("sub-001").visit("ses-20220908").recording(task="Stream")
 values, meta = rec.data(tmin=2, tmax=4)
 ```
 
-Credentials are resolved the same way as other AWS tooling resolves them, and
-extra keyword arguments such as `region=` are passed through to the storage
-layer. `gs://`, `az://`, and `r2://` work the same way — see {doc}`guide/cloud`.
+Credentials resolve the same way other AWS tooling resolves them. Extra
+keyword arguments such as `region=` pass through to the storage layer.
+`gs://`, `az://`, and `r2://` work the same way — see {doc}`guide/cloud`.
 
-Windowed reads still fetch only the chunks they need, so the two-second read
-above remains a small request even when the recording is stored in a bucket.
+Windowed reads still fetch only the chunks they need, so the read above stays
+a small request even from a bucket.
 
 ## Start small
 
-Convert a single participant, read the result back, and confirm it matches
-expectations before converting the full study. Adding more data later is a
-routine operation:
+Convert one participant first, read it back, and confirm it looks right
+before converting the rest. Adding more later is routine:
 
 ```python
 from neurozarr import Repo, ManifestReader
@@ -228,14 +208,12 @@ repo.save("added the rest")
 ```
 
 `existing="skip"` writes only what the store does not already hold. Without
-it, writing over something that already exists raises an error rather than
-silently replacing it — pass `existing="replace"` when overwriting is
-intended.
+it, writing over an existing path raises rather than replacing it silently —
+pass `existing="replace"` to overwrite deliberately.
 
 ## The command line
 
-Each step above has a command-line equivalent, useful for inspecting a store
-or scripting a conversion:
+Each step above has a command-line equivalent:
 
 ```bash
 neurozarr validate manifest.csv        # step 3
@@ -243,14 +221,14 @@ neurozarr convert manifest.csv study.zarr
 neurozarr info study.zarr
 ```
 
-The Python API is the primary interface and provides more capability; the CLI
-covers common conversions and inspections. See {doc}`guide/cli`.
+The Python API is primary and does more; the CLI covers common conversions
+and inspections. See {doc}`guide/cli`.
 
 ## Where to go next
 
 - Already have BIDS-formatted data? The manifest step is unnecessary —
-  {doc}`guide/ingest` covers {class}`~neurozarr.BidsReader` and the other ways
-  to fill a store.
+  {doc}`guide/ingest` covers {class}`~neurozarr.BidsReader` and the other
+  ways to fill a store.
 - {doc}`guide/read` — windowed reads, channel selection, and searching in
   detail.
 - {doc}`guide/versioning` — tags, history, and reading a store as it was.
