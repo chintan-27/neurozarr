@@ -1,11 +1,12 @@
 # Quickstart
 
-This converts a folder of recordings into a versioned, cloud-ready store,
-using the Python API — neurozarr's primary interface.
+A neurozarr store holds recordings with full version history and works the
+same locally or in the cloud. Building one from a folder of files takes a few
+steps, using the Python API throughout.
 
 ## Zarr and Icechunk
 
-Two terms recur below; neither requires direct use.
+Neither term requires direct use, but each explains part of what you get.
 
 **Zarr** stores a large array as many small chunks instead of one file, so
 reading a chunk does not require reading the rest.
@@ -13,8 +14,8 @@ reading a chunk does not require reading the rest.
 **Icechunk** adds version history on top, the way git does for source code.
 
 Recordings end up stored once, with full history, and reading ten seconds
-from an hour-long recording moves about ten seconds of data — on disk or in a
-cloud bucket.
+from an hour-long recording moves about ten seconds of data, whether the
+store is local or in a cloud bucket.
 
 ## 1. Add one recording
 
@@ -37,7 +38,7 @@ Load the file with `mne.io.read_raw_fif`, or the `mne.io.read_raw_*` function
 for your format (EDF, BrainVision, GDF, and others are supported). A
 **subject** is one participant, a **visit** is one of their sessions, and
 `add_recording` stores the signal under a `task` label you choose. `attrs`
-takes any metadata — age, device, diagnosis.
+takes any metadata: age, device, diagnosis.
 
 Read it back:
 
@@ -46,13 +47,12 @@ rec = Repo.open("./demo.zarr").subject("sub-001").visit("ses-20220908").recordin
 values, meta = rec.data(tmin=2, tmax=4)      # a numpy array, shape (2, 500)
 ```
 
-Doing this by hand for every file does not scale. The rest of this guide
-converts many files at once.
+Doing this by hand for every file does not scale.
 
 ## 2. Describe multiple files in a table
 
-neurozarr does not infer meaning from filenames — describe your files in a
-table, one row per file.
+neurozarr does not infer meaning from filenames. Describe your files in a
+table instead, one row per file.
 
 | sub | ses | datatype | task | path |
 |---|---|---|---|---|
@@ -94,9 +94,9 @@ with open("manifest.csv", "w", newline="") as f:
     writer.writerows(rows)
 ```
 
-Adjust the two derivations — participant id and visit date from your
-filenames — for your own data. Everything after this is the same regardless
-of source data.
+Adjust the two derivations for your own data: how the participant id and
+visit date come from your filenames. Everything after this step is the same
+regardless of source data.
 
 ## 3. Check before converting
 
@@ -113,8 +113,8 @@ print(report.ok)        # True when nothing is fatal
 ```
 
 Missing files, unreadable formats, and malformed identifiers all show up
-here. A warning — an unsupported format stored as a reference, for example —
-does not make `ok` false.
+here. A warning, such as an unsupported format stored as a reference, does
+not make `ok` false.
 
 ## 4. Convert
 
@@ -189,7 +189,7 @@ values, meta = rec.data(tmin=2, tmax=4)
 
 Credentials resolve the same way other AWS tooling resolves them. Extra
 keyword arguments such as `region=` pass through to the storage layer.
-`gs://`, `az://`, and `r2://` work the same way — see {doc}`guide/cloud`.
+`gs://`, `az://`, and `r2://` work the same way; see {doc}`guide/cloud`.
 
 Windowed reads still fetch only the chunks they need, so the read above stays
 a small request even from a bucket.
@@ -208,8 +208,8 @@ repo.save("added the rest")
 ```
 
 `existing="skip"` writes only what the store does not already hold. Without
-it, writing over an existing path raises rather than replacing it silently —
-pass `existing="replace"` to overwrite deliberately.
+it, writing over an existing path raises rather than replacing it silently.
+Pass `existing="replace"` to overwrite deliberately.
 
 ## The command line
 
@@ -226,7 +226,7 @@ and inspections. See {doc}`guide/cli`.
 
 ## Where to go next
 
-- Already have BIDS-formatted data? The manifest step is unnecessary —
+- Already have BIDS-formatted data? The manifest step is unnecessary.
   {doc}`guide/ingest` covers {class}`~neurozarr.BidsReader` and the other
   ways to fill a store.
 - {doc}`guide/read` — windowed reads, channel selection, and searching in

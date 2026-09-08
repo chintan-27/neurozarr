@@ -32,7 +32,7 @@ Requires Python ≥ 3.11. Dependencies: `icechunk`, `zarr`, `mne`, `pandas`, `nu
 
 **Zarr** stores a large array as many small chunks instead of one file, so reading a chunk does not require reading the rest. **Icechunk** adds version history on top, the way git does for source code.
 
-Recordings end up stored once, with full history, and reading ten seconds from an hour-long recording moves about ten seconds of data — on disk or in a cloud bucket.
+Recordings end up stored once, with full history, and reading ten seconds from an hour-long recording moves about ten seconds of data, whether the store is local or in a cloud bucket.
 
 Load one file and add it to a store directly:
 
