@@ -10,7 +10,33 @@ dataset_version = repo.save("initial conversion")
 
 {meth}`~neurozarr.Repo.save` commits each changed subject, then atomically
 publishes a dataset manifest that pins every subject to an exact snapshot. The
-returned ID identifies that complete dataset state.
+returned ID identifies that complete dataset state. This applies equally to
+ingesting new data, building it up by hand, and the edits and deletions
+covered in {doc}`edit` — none of it is permanent until `save()`.
+
+## Transactions
+
+{meth}`~neurozarr.Repo.transaction` commits on a clean exit and discards
+everything on an exception, so a batch of changes either all land or none do:
+
+```python
+with repo.transaction("add second visit"):
+    repo.subject("sub-001").add_visit("ses-2").add_recording(raw, task="Rest")
+```
+
+Call {meth}`~neurozarr.Repo.abort` directly for the same discard without a
+`with` block — useful after catching an error yourself, or after a
+{class}`~neurozarr.WriteConflictError` you plan to retry:
+
+```python
+repo.subject("sub-001").add_visit("ses-3")
+repo.abort()   # nothing from this Repo instance since the last save() happened
+```
+
+Either way, discarding only affects sessions this `Repo` instance opened but
+never saved — it cannot undo a version that was already committed. To go back
+to an earlier committed state, read it with `version=` below, or start a new
+`save()` that writes over it.
 
 ## Looking at history
 
@@ -51,3 +77,6 @@ On the command line:
 ```bash
 neurozarr history ./study.zarr
 ```
+
+See {doc}`edit` for changing or removing data that's already there — it
+follows the same save-to-commit model as everything above.

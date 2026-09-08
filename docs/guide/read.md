@@ -96,3 +96,32 @@ Tables belonging to a recording are reached through that recording instead, with
 {meth}`~neurozarr.RecordingView.channels` and
 {meth}`~neurozarr.RecordingView.events`, rather than appearing in
 {meth}`~neurozarr.Subject.tables`.
+
+## Reading arrays and external files
+
+Data that isn't a recording or a table — a NIfTI volume, a time-frequency
+decomposition, anything with its own shape and dimensions — comes back as
+{class}`~neurozarr.ArrayView`:
+
+```python
+array = subject.arrays()[0]
+array.dims             # ('channel', 'frequency')
+array.coords           # {'frequency': [0, 1, 2, ...]}, if any were stored
+array.shape
+array.data()                              # the whole array
+array.data((slice(None), slice(0, 20)))   # a NumPy-style selection, read lazily
+```
+
+A file with no reader or format decoder is preserved by reference rather than
+dropped, as {class}`~neurozarr.ExternalFileView`:
+
+```python
+ref = subject.external_files()[0]
+ref.uri            # the original path or URI, unchanged
+ref.media_type      # if the source recorded one
+ref.reader_hint     # e.g. "install or register a reader for '.xyz'"
+```
+
+See {doc}`ingest` for when a file becomes one of these instead of a
+`Recording` or `Table`, and {doc}`extensions` for adding real support for a
+format that currently falls back to a reference.

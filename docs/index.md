@@ -33,14 +33,15 @@ guide/ingest
 :caption: User guide
 
 guide/read
-guide/versioning
+guide/edit
 guide/derivatives
-guide/cloud
-guide/performance
-guide/cli
-guide/layout
+guide/versioning
 guide/reliability
+guide/performance
+guide/cloud
+guide/layout
 guide/extensions
+guide/cli
 ```
 
 ```{toctree}

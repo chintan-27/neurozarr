@@ -6,7 +6,11 @@ Everything below is importable directly from ``neurozarr``.
 At a glance
 -----------
 
-Building a store:
+Grouped in the order you'd actually reach for them: create and fill a store,
+edit what's in it, read it back, then the cross-cutting pieces (the item
+model, extending it, error handling, everything else).
+
+Creating and filling a store:
 
 .. autosummary::
 
@@ -14,8 +18,6 @@ Building a store:
    neurozarr.Repo.create
    neurozarr.Repo.open
    neurozarr.Repo.create_subject
-   neurozarr.Repo.set_attrs
-   neurozarr.Repo.delete_subject
    neurozarr.Repo.ingest
    neurozarr.Repo.save
    neurozarr.Repo.transaction
@@ -28,7 +30,6 @@ Building a store:
    neurozarr.Repo.tag
    neurozarr.Repo.tags
    neurozarr.Subject.add_visit
-   neurozarr.Subject.set_attrs
    neurozarr.Subject.visits
    neurozarr.Subject.visit
    neurozarr.Subject.recordings
@@ -40,12 +41,32 @@ Building a store:
    neurozarr.Visit.add_derivative
    neurozarr.Visit.add
    neurozarr.Visit.add_array
-   neurozarr.Visit.set_attrs
    neurozarr.Visit.recording
+
+Changing or removing what's already there (narrative guide: :doc:`guide/edit`):
+
+.. autosummary::
+
+   neurozarr.Repo.set_attrs
+   neurozarr.Repo.delete_subject
+   neurozarr.Subject.set_attrs
    neurozarr.Subject.rename_visit
    neurozarr.Subject.delete_visit
+   neurozarr.Visit.set_attrs
+   neurozarr.RecordingView.set_attrs
+   neurozarr.RecordingView.rename
+   neurozarr.RecordingView.delete
+   neurozarr.TableView.set_attrs
+   neurozarr.TableView.rename
+   neurozarr.TableView.delete
+   neurozarr.ArrayView.set_attrs
+   neurozarr.ArrayView.rename
+   neurozarr.ArrayView.delete
+   neurozarr.ExternalFileView.set_attrs
+   neurozarr.ExternalFileView.rename
+   neurozarr.ExternalFileView.delete
 
-Reading data back:
+Getting data back out (narrative guide: :doc:`guide/read`):
 
 .. autosummary::
 
@@ -58,21 +79,9 @@ Reading data back:
    neurozarr.RecordingView.duration
    neurozarr.RecordingView.shape
    neurozarr.RecordingView.array
-   neurozarr.RecordingView.set_attrs
-   neurozarr.RecordingView.rename
-   neurozarr.RecordingView.delete
    neurozarr.TableView.df
    neurozarr.TableView.columns
-   neurozarr.TableView.set_attrs
-   neurozarr.TableView.rename
-   neurozarr.TableView.delete
    neurozarr.ArrayView.data
-   neurozarr.ArrayView.set_attrs
-   neurozarr.ArrayView.rename
-   neurozarr.ArrayView.delete
-   neurozarr.ExternalFileView.set_attrs
-   neurozarr.ExternalFileView.rename
-   neurozarr.ExternalFileView.delete
 
 The item stream a reader yields and the writer consumes:
 
@@ -91,7 +100,7 @@ The item stream a reader yields and the writer consumes:
    neurozarr.CodecConfig
    neurozarr.ExistingPolicy
 
-Supporting a new source format:
+Supporting a new source format (narrative guide: :doc:`guide/extensions`):
 
 .. autosummary::
 
@@ -117,11 +126,16 @@ When something is wrong:
    neurozarr.ValidationIssue
    neurozarr.Severity
 
-Everything else:
+Parallel conversion (narrative guide: :doc:`guide/performance`):
 
 .. autosummary::
 
    neurozarr.parallel.convert_parallel
+
+Validation, verification, and storage:
+
+.. autosummary::
+
    neurozarr.storage_from
    neurozarr.validate_source
    neurozarr.inspect_source
