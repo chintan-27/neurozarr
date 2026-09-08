@@ -3,16 +3,19 @@
 There are four ways to fill a store. They all produce the same result, so pick
 whichever matches the shape your data is already in.
 
-## From a pile of files, via a manifest
+## From a set of files, via a manifest
 
 The general case: describe your files in a table, one row per file, and
-{class}`~neurozarr.ManifestReader` does the rest. Nothing is assumed about folder
-layout or naming.
+{class}`~neurozarr.ManifestReader` handles the rest. It makes no assumptions
+about folder layout or naming, and a row's `datatype` is not tied to any
+particular file format — `ieeg`, `beh`, and `anat` below are read by three
+different mechanisms, described after the table.
 
 | sub | ses | datatype | task | path |
 |---|---|---|---|---|
-| sub-001 | ses-1 | ieeg | Stream | /data/patient1_day1.edf |
-| sub-001 | ses-1 | beh | Log | /data/patient1_log.csv |
+| sub-001 | ses-1 | ieeg | Stream | /data/sub-001_stream.edf |
+| sub-001 | ses-1 | beh | TherapyLog | /data/sub-001_therapy.csv |
+| sub-001 | ses-1 | anat | T1w | /data/sub-001_T1w.nii.gz |
 
 ```python
 from neurozarr import Repo, ManifestReader
@@ -31,17 +34,50 @@ rather than renaming it:
 ManifestReader(df, sub_col="subject", path_col="filepath")
 ```
 
+### How each row is read
+
+Files are opened by extension, and what comes back depends on what the
+extension is:
+
+- **Signal formats** (EDF, BDF, GDF, BrainVision, EEGLAB, FIF, CNT) load
+  through `mne.io.read_raw` and become a {class}`~neurozarr.Recording`. This
+  is the `ieeg`/Stream row above.
+- **`.tsv`/`.csv`** load with pandas and become a {class}`~neurozarr.Table`,
+  with column types recorded so they round-trip on read. This is the
+  `beh`/TherapyLog row:
+
+  ```python
+  log = repo.subject("sub-001").visit("ses-1").tables()[0]
+  log.df()
+  #    onset  amplitude_mA  pulse_width_us
+  # 0      0           2.5              60
+  # 1     60           2.5              60
+  ```
+
+- **Anything else** — imaging formats included — becomes an explicit
+  {class}`~neurozarr.ExternalFile`: the path is recorded, not the file's
+  contents. neurozarr has no imaging reader (it does not depend on nibabel),
+  so a NIfTI file such as the `anat`/T1w row is preserved this way rather than
+  skipped or misread:
+
+  ```python
+  ref = repo.subject("sub-001").visit("ses-1").external_files()[0]
+  ref.uri            # the original path
+  ref.reader_hint     # "install or register a reader for '.gz'"
+  ```
+
+  Register a reader for the format instead if you need the data parsed, not
+  just referenced — see {doc}`extensions`.
+
+A row that can't be represented safely — a malformed identifier, or data that
+matches a supported extension but fails to parse — still stops the
+conversion; only formats with no reader at all fall back to a reference.
+
 And when a row needs handling the columns can't express, take over entirely:
 
 ```python
 ManifestReader(df, row_reader=lambda row: my_custom_item(row))
 ```
-
-Files are opened by extension: `.tsv`/`.csv` with pandas, and signal formats
-through `mne.io.read_raw` (EDF, BDF, GDF, BrainVision, EEGLAB, FIF, CNT).
-Anything else becomes an explicit {class}`~neurozarr.ExternalFile` reference
-and produces a structured warning. Malformed identifiers or supported data
-still stop the transaction.
 
 ## By hand
 
@@ -64,25 +100,52 @@ Keyword arguments are entities, and decide where each item lands.
 
 ## By writing a reader
 
-For a source format of your own, implement {class}`~neurozarr.Reader`: one
-method, `read()`, yielding {class}`~neurozarr.Recording`,
-{class}`~neurozarr.Table` and {class}`~neurozarr.Attrs` items.
+Reach for this when your data has no standard layout *and* no standard file
+format — a lab-specific database export, a directory structure a manifest
+can't describe, anything a `path` column and some column-to-entity mapping
+won't capture.
+
+Implement {class}`~neurozarr.Reader`: one method, `read()`, yielding any of
+{class}`~neurozarr.Recording`, {class}`~neurozarr.Table`,
+{class}`~neurozarr.Attrs`, {class}`~neurozarr.ExternalFile`, or
+{class}`~neurozarr.Array`. There is no base class to inherit from — `Reader`
+is a `Protocol`, so any object with a matching `read()` works:
 
 ```python
+import mne
+import pandas as pd
 from neurozarr import Recording, Table, Attrs, Entities
 
-class MyReader:
-    def read(self):
-        yield Attrs((), {"Name": "my study"})                      # dataset-wide
-        yield Recording(Entities("sub-001", "ses-1", "ieeg", {"task": "Rest"}), my_raw)
-        yield Table(Entities("sub-001", "ses-1", "beh", {}), "log", my_dataframe)
+class MyLabReader:
+    """Our lab keeps one CSV of session metadata and a folder of raw
+    recordings named by an internal session id, not by BIDS convention."""
 
-repo.ingest(MyReader())
+    def __init__(self, sessions_csv, recordings_dir):
+        self.sessions = pd.read_csv(sessions_csv)
+        self.recordings_dir = recordings_dir
+
+    def read(self):
+        yield Attrs((), {"Name": "my lab's study"})
+        for _, row in self.sessions.iterrows():
+            entities = Entities(f"sub-{row.patient_id:03d}", f"ses-{row.visit_date}",
+                                 "ieeg", {"task": "Stream"})
+            path = f"{self.recordings_dir}/{row.internal_session_id}.edf"
+            raw = mne.io.read_raw(path, preload=False, verbose=False)
+            yield Recording(entities, raw, meta={"device": row.device})
+
+repo.ingest(MyLabReader("sessions.csv", "./raw"))
 ```
 
-There is no base class to inherit from — `Reader` is a `Protocol`, so anything
-with a matching `read()` works. Since the writer is the only thing that touches
-Zarr, a reader cannot produce a malformed store however unusual your source is.
+`read()` can be a generator, as above, so nothing is loaded until `ingest()`
+asks for it — memory use stays flat regardless of how large the source is.
+
+Since {class}`~neurozarr.Writer` is the only thing that touches Zarr, a reader
+cannot produce a malformed store however unusual its source is: it can only
+describe items, never place them.
+
+This covers a reader written for your own use. To have it selected
+automatically by file extension, or to distribute it so others don't need
+your source code to use it, see {doc}`extensions`.
 
 ## From a BIDS dataset
 

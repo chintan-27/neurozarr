@@ -24,22 +24,76 @@ items.
 
 ## Reader registration
 
-Applications can register a factory in-process:
+Writing a {class}`~neurozarr.Reader` (see {doc}`ingest`) is enough to use it —
+`repo.ingest(MyReader(...))` works with no registration at all. Register a
+reader only when you also want one of:
+
+- **Automatic selection** by file extension, so {func}`~neurozarr.reader_for`
+  or `neurozarr convert` can pick it without importing your class.
+- **Distribution** as an installable package, so other projects discover it
+  without any of your source code.
+
+### Registering for the current process
+
+{func}`~neurozarr.register_reader` adds a reader to the running process. It
+is not saved anywhere — call it once, before the first `reader_for()` call,
+typically at the top of a script or notebook:
 
 ```python
-register_reader("vendor-x", VendorReader, extensions=(".vendor",))
-reader = open_reader("vendor-x", source)
+from neurozarr import Attrs, register_reader, reader_for, available_readers
+
+class NiftiReader:
+    """Reads an imaging format ManifestReader can't parse -- see the note on
+    the anat/T1w row in :doc:`ingest`."""
+
+    def __init__(self, source, **options):
+        self.source = source
+
+    def read(self):
+        yield Attrs((), {"note": f"pretend header read from {self.source}"})
+
+register_reader("nifti", NiftiReader, extensions=(".nii.gz",))
+
+available_readers()                 # ['bids', 'manifest', 'nifti']
+reader_for("sub-001_T1w.nii.gz")    # a NiftiReader, chosen automatically
 ```
 
-Distributed plugins declare the factory under the `neurozarr.readers` package
-entry-point group:
+`extensions` is matched against the full filename, not just its last
+dot-segment, so a compound extension like `.nii.gz` or `.tar.gz` works as
+given. It is used only for automatic selection — call
+{func}`~neurozarr.open_reader` with the name, or construct the class
+directly, to use a registered reader without it. If more than one registered
+reader claims the same file, `reader_for` raises rather than guessing; pass
+`name=` to choose explicitly (`neurozarr convert --reader nifti` does the
+same from the command line).
+
+### Distributing a reader as a plugin
+
+A package installed in the same environment is discovered with no
+`register_reader` call at all, by declaring the class under the
+`neurozarr.readers` entry-point group:
 
 ```toml
+# in the plugin package's pyproject.toml
 [project.entry-points."neurozarr.readers"]
-vendor-x = "vendor_package:VendorReader"
+nifti = "my_package:NiftiReader"
 ```
 
-Use `reader_for(source)` for built-in BIDS/manifest selection. A plugin is
-selected automatically only when exactly one registered reader claims the file
-extension; otherwise select it explicitly. Reader plugins never receive a
-Zarr or Icechunk writer.
+Once that package is installed, `available_readers()` lists `"nifti"` and
+`reader_for()` selects it in any project, with nothing imported and nothing
+called at startup. The one difference from local registration is where
+`extensions` comes from: with no `register_reader` call to pass it to, it is
+read from an `extensions` attribute on the class itself —
+
+```python
+class NiftiReader:
+    extensions = (".nii.gz",)
+    ...
+```
+
+— so a reader meant to work both ways should declare it there; a local
+registration's own `extensions=` argument then simply confirms it.
+
+Either way, a registered or installed reader never receives a Zarr or
+Icechunk writer — only {class}`~neurozarr.Writer` does, reached through
+`repo.ingest()`.
