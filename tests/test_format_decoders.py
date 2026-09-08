@@ -161,3 +161,21 @@ def test_nifti_decoder_reads_real_image_data(tmp_path, store):
 	assert np.array_equal(array.data(), np.arange(24, dtype=np.float32).reshape(2, 3, 4))
 	assert array.meta["_neurozarr_decoder"] == "nibabel:nifti"
 	assert array.meta["affine"] == np.eye(4).tolist()
+
+
+def test_inspect_source_does_not_warn_on_a_file_a_decoder_claims(tmp_path):
+	"""Regression: inspect_source() checked only the built-in tabular/mne
+	extension sets, with no knowledge of the format decoder registry, so it
+	warned 'no reader for .gz' on a NIfTI file even when nibabel was installed
+	and the real conversion would decode it successfully -- a false warning
+	from the exact check meant to be trusted before converting."""
+	pytest.importorskip("nibabel")
+	from neurozarr import inspect_source
+
+	anat = tmp_path / "bids" / "sub-001" / "ses-1" / "anat"
+	anat.mkdir(parents=True)
+	(tmp_path / "bids" / "dataset_description.json").write_text(json.dumps({"Name": "x"}))
+	(anat / "sub-001_ses-1_T1w.nii.gz").write_bytes(b"")  # decoder claims by extension, content unread here
+
+	report = inspect_source(tmp_path / "bids")
+	assert "source.unsupported_format" not in {issue.code for issue in report}

@@ -11,6 +11,7 @@ from .entities import Entities
 from .constraints import validate_metadata, validate_segment
 from .errors import NeurozarrError, ValidationError
 from .readers.bids import MNE_READABLE_EXTS
+from .readers.formats import decoder_for
 
 if TYPE_CHECKING:
 	from .items import Reader
@@ -71,7 +72,7 @@ def inspect_manifest(reader: "ManifestReader") -> ValidationReport:
 				path=str(path)))
 		elif not path.is_file():
 			report.add(_issue("source.not_file", Severity.ERROR, f"not a file: {path}", where, path=str(path)))
-		elif path.suffix.lower() not in TABLE_EXTS | MNE_READABLE_EXTS:
+		elif path.suffix.lower() not in TABLE_EXTS | MNE_READABLE_EXTS and decoder_for(path) is None:
 			report.add(_issue("source.unsupported_format", Severity.WARNING,
 				f"no reader for {path.suffix!r} ({path.name}); it will be preserved as an external reference",
 				where, path=str(path), extension=path.suffix.lower()))
@@ -116,7 +117,9 @@ def inspect_bids(root_dir: str | Path) -> ValidationReport:
 				"no datatype directories (ieeg/, beh/, ...) found", subject.name))
 		for datatype_dir in datatype_dirs:
 			for path in datatype_dir.rglob("*"):
-				if not path.is_file() or path.suffix.lower() in ({".json", ".eeg", ".vmrk"} | TABLE_EXTS | MNE_READABLE_EXTS):
+				if (not path.is_file()
+						or path.suffix.lower() in ({".json", ".eeg", ".vmrk"} | TABLE_EXTS | MNE_READABLE_EXTS)
+						or decoder_for(path) is not None):
 					continue
 				report.add(_issue("source.unsupported_format", Severity.WARNING,
 					f"no reader for {path.suffix!r} ({path.name}); it will be preserved as an external reference",
