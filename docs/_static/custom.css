@@ -1,0 +1,8 @@
+/* autosummary appends a call signature, e.g. "(target[, codec])", after the
+linked name in each "At a glance" table row. The link renders as a pill of
+monospace code; the signature is plain proportional text glued to it with no
+separator, which reads as broken styling rather than one signature. Make the
+whole cell monospace so it reads as a single line. */
+table.autosummary td:first-child p {
+	font-family: var(--font-stack--monospace);
+}

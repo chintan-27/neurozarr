@@ -39,3 +39,5 @@ autodoc_default_options = {"members": True, "undoc-members": False}
 toc_object_entries = False
 
 html_theme = "furo"
+html_static_path = ["_static"]
+html_css_files = ["custom.css"]
