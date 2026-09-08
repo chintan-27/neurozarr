@@ -23,6 +23,7 @@ Inside the store, data is filed by subject → session → datatype → entities
 :hidden:
 :caption: Getting started
 
+quickstart
 installation
 guide/ingest
 ```
