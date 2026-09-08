@@ -11,6 +11,7 @@ from ..entities import Entities
 from ..errors import ValidationError
 from ..items import Attrs, ExternalFile, Item, Recording, Table
 from .bids import MNE_READABLE_EXTS
+from .formats import UnclaimedPolicy, decode_embed, decoder_for
 from ..util import source_provenance
 
 
@@ -51,6 +52,13 @@ class ManifestReader:
 		Columns to treat as BIDS entities. By default every column that isn't
 		one of the six named above becomes an entity, so a ``task`` or ``run``
 		column lands where it should.
+	unclaimed : {"reference", "embed"}, default "reference"
+		What to do with a file no built-in or registered format decoder can
+		read: ``"reference"`` records its path as an
+		:class:`~neurozarr.ExternalFile`, content untouched; ``"embed"`` reads
+		its raw bytes into the store instead. See
+		:func:`neurozarr.readers.register_format` to add real support for a
+		format rather than embedding or referencing it.
 	row_reader : callable, optional
 		Called with each row, returning the item to store. Bypasses all
 		column handling above, for sources that need custom logic.
@@ -72,6 +80,7 @@ class ManifestReader:
 				 name_col: str = "name", meta_col: str = "meta",
 				 entity_cols: list[str] | None = None,
 				 checksum: bool = False,
+				 unclaimed: UnclaimedPolicy | str = UnclaimedPolicy.REFERENCE,
 				 row_reader: Callable[[Any], Item] | None = None):
 		self.manifest_path = None if isinstance(manifest, pd.DataFrame) else Path(manifest)
 		self.base_dir = Path.cwd() if self.manifest_path is None else self.manifest_path.resolve().parent
@@ -80,6 +89,7 @@ class ManifestReader:
 		self.datatype_col, self.name_col, self.meta_col = datatype_col, name_col, meta_col
 		self.entity_cols = entity_cols
 		self.checksum = checksum
+		self.unclaimed = UnclaimedPolicy(unclaimed)
 		self.row_reader = row_reader
 
 		if row_reader is None:  # a row_reader handles its own columns
@@ -111,11 +121,16 @@ class ManifestReader:
 			ext = path.suffix.lower()
 			meta = {**meta, "_neurozarr_provenance": source_provenance(path, "ManifestReader", self.checksum)}
 
+			decoder = decoder_for(path)
 			if ext in (".tsv", ".csv"):
 				yield Table(entities, name, pd.read_csv(path, sep="\t" if ext == ".tsv" else ","), meta)
 			elif ext in MNE_READABLE_EXTS:
 				raw = mne.io.read_raw(path, preload=False, verbose=False)
 				yield Recording(entities, raw, meta)
+			elif decoder is not None:
+				yield from decoder(path, entities, name, meta)
+			elif self.unclaimed is UnclaimedPolicy.EMBED:
+				yield from decode_embed(path, entities, name, meta)
 			else:
 				yield ExternalFile(entities, str(name), path,
 					reader_hint=f"install or register a reader for {ext!r}", meta=meta)

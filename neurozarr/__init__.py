@@ -30,7 +30,10 @@ from .errors import (
 from .items import Array, Attrs, ExternalFile, Reader, Recording, Table
 from .log import set_verbosity
 from .read import ArrayView, ExternalFileView, RecordingView, TableView
-from .readers import BidsReader, ManifestReader, available_readers, open_reader, reader_for, register_reader
+from .readers import (
+	BidsReader, ManifestReader, UnclaimedPolicy, available_readers, open_reader,
+	reader_for, register_format, register_reader, registered_formats,
+)
 from .repo import Repo, Subject, Visit
 from .storage import StorageFactory, StorageTarget, storage_from
 from .validate import inspect_source, inspect_store, validate_source
@@ -47,6 +50,7 @@ __all__ = [
 	"Repo", "Subject", "Visit",
 	"Entities", "Attrs", "Recording", "Table", "ExternalFile", "Array", "Reader",
 	"BidsReader", "ManifestReader", "available_readers", "open_reader", "reader_for", "register_reader",
+	"UnclaimedPolicy", "register_format", "registered_formats",
 	"RecordingView", "TableView", "ExternalFileView", "ArrayView",
 	"CodecConfig", "ExistingPolicy", "Writer",
 	"StorageFactory", "StorageTarget", "storage_from", "set_verbosity",

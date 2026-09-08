@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -8,12 +9,30 @@ from ..entities import Entities, split_stem
 from ..errors import ValidationError
 from ..items import Attrs, ExternalFile, Item, Recording, Table
 from ..util import clean_nan, load_json, source_provenance
+from .formats import UnclaimedPolicy, decode_embed, decoder_for
 
 # Formats mne.io.read_raw() auto-dispatches on, covering eeg/ieeg/meg/nirs data
-# generically. Imaging datatypes (anat/func/dwi -- NIfTI) need nibabel, which
-# isn't a dependency here; files with any other extension fall back to an
-# "unread" Attrs placeholder instead of crashing (see _read_datatype_dir).
+# generically. Imaging datatypes (anat/func/dwi) are handled by a registered
+# format decoder when one claims the extension (NIfTI, automatically, if
+# nibabel is installed -- see readers/formats.py); anything else falls back to
+# the `unclaimed` policy instead of crashing (see _read_datatype_dir).
 MNE_READABLE_EXTS = {".edf", ".bdf", ".gdf", ".vhdr", ".set", ".fif", ".cnt"}
+
+# Path.suffix only ever returns the last dot-segment, so "sub-001_T1w.nii.gz"
+# reports ".gz" -- and the BIDS suffix "T1w" would come out as "T1w.nii". Listed
+# here rather than derived from whatever happens to be registered in
+# readers.formats, so stem-parsing doesn't change depending on whether an
+# optional dependency (nibabel) is installed.
+_COMPOUND_EXTS = (".nii.gz",)
+
+
+def _true_ext(path: Path) -> str:
+	"""path.suffix, but recognizing a compound extension in _COMPOUND_EXTS."""
+	name = path.name.lower()
+	for ext in _COMPOUND_EXTS:
+		if name.endswith(ext):
+			return ext
+	return path.suffix.lower()
 
 
 def _row_dict(row: "pd.Series") -> dict[str, Any]:
@@ -53,12 +72,13 @@ class BidsReader:
 	"""
 
 	def __init__(self, root_dir: str | Path, subjects: list[str] | None = None,
-				 checksum: bool = False):
+				 checksum: bool = False, unclaimed: UnclaimedPolicy | str = UnclaimedPolicy.REFERENCE):
 		# Dataset-level metadata is yielded whatever `subjects` says, so parallel
 		# workers each converting one subject still agree on it.
 		self.root_dir = Path(root_dir)
 		self.subjects = None if subjects is None else set(subjects)
 		self.checksum = checksum
+		self.unclaimed = UnclaimedPolicy(unclaimed)
 
 	def _wanted(self, sub: str) -> bool:
 		return self.subjects is None or sub in self.subjects
@@ -129,13 +149,14 @@ class BidsReader:
 		for f in sorted(dir_path.iterdir()):
 			if not f.is_file():
 				continue
-			entities, suffix = split_stem(f.stem)
+			ext = _true_ext(f)
+			stem = f.name[:-len(ext)] if ext else f.stem
+			entities, suffix = split_stem(stem)
 			entities.pop("sub", None)
 			entities.pop("ses", None)
 			key = (tuple(sorted(entities.items())), suffix)
-			ext = f.suffix.lower()
 			if ext in groups.setdefault(key, {}):
-				raise ValidationError(f"multiple {ext} files represent {f.stem!r} in {dir_path}")
+				raise ValidationError(f"multiple {ext} files represent {stem!r} in {dir_path}")
 			groups[key][ext] = f
 
 		for (entityItems, suffix), exts in groups.items():
@@ -162,13 +183,21 @@ class BidsReader:
 			ext = preferred[0] if preferred else sorted(dataExts)[0]
 			path = exts[ext]
 			meta = {**meta, "_neurozarr_provenance": source_provenance(path, "BidsReader", self.checksum)}
+			decoder = decoder_for(path)
+			item_name = suffix or path.stem
 			if ext == ".tsv":
 				yield Table(item_entities, suffix, pd.read_csv(path, sep="\t"), meta, prefix)
 			elif ext in MNE_READABLE_EXTS:
 				raw = mne.io.read_raw(path, preload=False, verbose=False)
 				yield Recording(item_entities, raw, meta, prefix)
+			elif decoder is not None:
+				# a format decoder builds items with prefix=() -- it has no notion of
+				# derivatives/ routing, which is this reader's concern, not the decoder's.
+				yield from (replace(built, prefix=prefix) for built in decoder(path, item_entities, item_name, meta))
+			elif self.unclaimed is UnclaimedPolicy.EMBED:
+				yield from (replace(built, prefix=prefix) for built in decode_embed(path, item_entities, item_name, meta))
 			else:
-				yield ExternalFile(item_entities, suffix or path.stem, path,
+				yield ExternalFile(item_entities, item_name, path,
 					reader_hint=f"install or register a reader for {ext!r}", meta=meta, prefix=prefix)
 
 	def _find_sidecar(self, start_dir: Path, entities: dict[str, str], suffix: str) -> dict[str, Any]:

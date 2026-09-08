@@ -41,8 +41,9 @@ Changelog = "https://github.com/chintan/neurozarr/blob/main/CHANGELOG.md"
 neurozarr = "neurozarr.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-timeout", "tqdm", "mypy", "pandas-stubs", "build"]
+dev = ["pytest", "pytest-timeout", "tqdm", "mypy", "pandas-stubs", "build", "nibabel"]
 docs = ["sphinx", "myst-parser", "furo"]
+imaging = ["nibabel"]
 
 [tool.setuptools.packages.find]
 include = ["neurozarr*"]
