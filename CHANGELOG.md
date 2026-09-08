@@ -28,6 +28,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `requires-python` is `>=3.11` again, and the `zarr` upper bound is the next major
   rather than the next minor. Both previously refused to install against the
   interpreter and Zarr version the suite passes on.
+- `reader_for()` and `neurozarr convert` now match a registered or installed
+  reader's `extensions` against the full filename rather than only its last
+  dot-segment, so a reader registered for a compound extension such as
+  `.nii.gz` or `.tar.gz` is selected. It previously never matched.
 
 ### Changed
 

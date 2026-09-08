@@ -9,7 +9,8 @@ from neurozarr import (
 	ValidationError, WriteConflictError, inspect_source,
 )
 from neurozarr.items import Table
-from neurozarr.readers import ManifestReader, open_reader, register_reader
+from neurozarr.errors import UnsupportedFormatError
+from neurozarr.readers import ManifestReader, open_reader, reader_for, register_reader
 from neurozarr.util import chunk_shape, safe_uri
 
 
@@ -87,6 +88,29 @@ def test_in_process_reader_registry(tmp_path):
 def test_reader_registry_requires_normalized_extensions():
 	with pytest.raises(ValueError, match="leading dot"):
 		register_reader("bad-extension-test", lambda source: source, extensions=("nwb",))
+
+
+def test_reader_for_matches_a_compound_extension(tmp_path):
+	"""Regression: path.suffix only sees the last dot-segment, so a reader
+	registered for a compound extension like '.nii.gz' never matched -- every
+	such file fell through to 'no reader claims'."""
+	class NiftiReader:
+		def __init__(self, source):
+			self.source = source
+
+		def read(self):
+			return iter(())
+
+	register_reader("nifti-test", NiftiReader, extensions=(".nii.gz",))
+	target = tmp_path / "sub-001_T1w.nii.gz"
+	target.write_bytes(b"")
+	assert isinstance(reader_for(target), NiftiReader)
+
+	# a plain .gz file must not also match a reader registered for the longer suffix
+	plain = tmp_path / "plain.gz"
+	plain.write_bytes(b"")
+	with pytest.raises(UnsupportedFormatError, match="no reader claims"):
+		reader_for(plain)
 
 
 def test_duplicate_write_errors_unless_policy_is_explicit(store, raw):

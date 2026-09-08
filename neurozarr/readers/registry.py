@@ -74,17 +74,22 @@ def reader_for(source: str | Path, name: str | None = None, **options: Any) -> R
 	if path.suffix.lower() in (".csv", ".tsv"):
 		return ManifestReader(path, **options)
 
+	# path.suffix only ever sees the last dot-segment, so a plugin registered for a
+	# compound extension like ".nii.gz" would never match here. Compare against the
+	# filename's tail instead -- extensions are exact strings the caller registered,
+	# not something to reparse.
+	name = path.name.lower()
 	claiming = [registered_name for registered_name, (_, extensions) in _REGISTERED.items()
-				if path.suffix.lower() in extensions]
+				if any(name.endswith(ext) for ext in extensions)]
 	for entry in entry_points(group="neurozarr.readers"):
 		loaded = entry.load()
 		extensions = {str(ext).lower() for ext in getattr(loaded, "extensions", ())}
-		if path.suffix.lower() in extensions:
+		if any(name.endswith(ext) for ext in extensions):
 			claiming.append(entry.name)
 	if len(claiming) == 1:
 		return open_reader(claiming[0], source, **options)
 	if len(claiming) > 1:
 		raise UnsupportedFormatError(
-			f"multiple readers claim {path.suffix!r}: {', '.join(sorted(claiming))}; select one explicitly"
+			f"multiple readers claim {path.name!r}: {', '.join(sorted(claiming))}; select one explicitly"
 		)
-	raise UnsupportedFormatError(f"no reader claims source extension {path.suffix!r}")
+	raise UnsupportedFormatError(f"no reader claims source file {path.name!r}")
