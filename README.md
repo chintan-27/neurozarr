@@ -101,7 +101,7 @@ You do not need BIDS-formatted data to use this. If you happen to have some, the
 
 Reading a source format and writing a well-structured store are two different problems, so they are two different things here:
 
-- A **Reader** understands *your* data and yields standardized items (`Recording`, `Table`, `Attrs`).
+- A **Reader** understands *your* data and yields standardized items (`Recording`, `Table`, `Attrs`, `ExternalFile`, `Array`).
 - The **Writer** owns the store's structure, and is the only thing that touches Zarr.
 
 Support a new input format by writing a Reader — the output stays consistent, because nothing else can write to the store.
@@ -130,7 +130,7 @@ ManifestReader(df, sub_col="subject", path_col="filepath")     # your column nam
 ManifestReader(df, row_reader=lambda row: my_custom_item(row))  # full control per row
 ```
 
-Files are opened by extension: `.tsv`/`.csv` with pandas, signal formats with `mne.io.read_raw` (EDF, BDF, GDF, BrainVision, EEGLAB, FIF, CNT). Anything else is recorded as a reference rather than crashing the run.
+Files are opened by extension: `.tsv`/`.csv` with pandas, signal formats with `mne.io.read_raw` (EDF, BDF, GDF, BrainVision, EEGLAB, FIF, CNT), and NIfTI (`.nii`/`.nii.gz`) if `nibabel` is installed (`pip install "neurozarr[imaging]"`). Anything else is recorded as a reference rather than crashing the run — or read as raw bytes with `unclaimed="embed"`. Add a decoder for another format with `register_format`; see [Extensions](docs/guide/extensions.md).
 
 ### 2. By hand
 
@@ -148,7 +148,7 @@ repo.save("added sub-001")
 
 ### 3. By writing a Reader
 
-Neither built-in reader fits your source? Implement `neurozarr.Reader` — one method, `read()`, yielding `Recording`/`Table`/`Attrs` (see `neurozarr/items.py`):
+Neither built-in reader fits your source? Implement `neurozarr.Reader` — one method, `read()`, yielding any of `Recording`/`Table`/`Attrs`/`ExternalFile`/`Array` (see `neurozarr/items.py`):
 
 ```python
 from neurozarr import Recording, Table, Attrs, Entities
