@@ -246,6 +246,19 @@ class Repo:
 		self._add_attrs(Attrs((), attrs or {}), sub_id)
 		return Subject(self, sub_id)
 
+	def set_attrs(self, attrs: dict[str, Any]) -> None:
+		"""Add or update dataset-wide metadata after creation.
+
+		Merges into whatever attrs already exist rather than replacing them.
+		Not committed until :meth:`save`.
+
+		Parameters
+		----------
+		attrs : dict
+			Metadata to merge into the dataset's own attrs.
+		"""
+		self._add_attrs(Attrs((), attrs), "_dataset")
+
 	def ingest(self, reader: Reader, progress: Any = None,
 			   existing: ExistingPolicy | str = ExistingPolicy.ERROR,
 			   skip_existing: bool | None = None) -> None:
@@ -731,6 +744,19 @@ class Subject:
 		self._repo._add_attrs(Attrs((ses_id,), attrs or {}), self.sub_id)
 		return Visit(self._repo, self.sub_id, ses_id)
 
+	def set_attrs(self, attrs: dict[str, Any]) -> None:
+		"""Add or update this subject's metadata after creation.
+
+		Merges into whatever attrs already exist rather than replacing them.
+		Not committed until :meth:`Repo.save`.
+
+		Parameters
+		----------
+		attrs : dict
+			Metadata to merge into the subject's own attrs.
+		"""
+		self._repo._add_attrs(Attrs((), attrs), self.sub_id)
+
 	# ---- reading ----------------------------------------------------------
 
 	def root(self, version: str | None = None) -> zarr.Group:
@@ -845,6 +871,19 @@ class Visit:
 		self._repo = repo
 		self.sub_id = sub_id
 		self.ses_id = ses_id
+
+	def set_attrs(self, attrs: dict[str, Any]) -> None:
+		"""Add or update this session's metadata after creation.
+
+		Merges into whatever attrs already exist rather than replacing them.
+		Not committed until :meth:`Repo.save`.
+
+		Parameters
+		----------
+		attrs : dict
+			Metadata to merge into the session's own attrs.
+		"""
+		self._repo._add_attrs(Attrs((self.ses_id,), attrs), self.sub_id)
 
 	def add(self, datatype: str, payload: "mne.io.BaseRaw | pd.DataFrame",
 			meta: dict[str, Any] | None = None, prefix: tuple[str, ...] = (),

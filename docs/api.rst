@@ -14,6 +14,7 @@ Building a store:
    neurozarr.Repo.create
    neurozarr.Repo.open
    neurozarr.Repo.create_subject
+   neurozarr.Repo.set_attrs
    neurozarr.Repo.ingest
    neurozarr.Repo.save
    neurozarr.Repo.transaction
@@ -26,6 +27,7 @@ Building a store:
    neurozarr.Repo.tag
    neurozarr.Repo.tags
    neurozarr.Subject.add_visit
+   neurozarr.Subject.set_attrs
    neurozarr.Subject.visits
    neurozarr.Subject.visit
    neurozarr.Subject.recordings
@@ -37,6 +39,7 @@ Building a store:
    neurozarr.Visit.add_derivative
    neurozarr.Visit.add
    neurozarr.Visit.add_array
+   neurozarr.Visit.set_attrs
    neurozarr.Visit.recording
 
 Reading data back:

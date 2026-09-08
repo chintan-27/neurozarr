@@ -24,6 +24,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `unclaimed="embed"` on `ManifestReader`/`BidsReader`: read a file with no
   matching decoder as raw bytes into the store, rather than only referencing
   its path. Opt-in; the default (`"reference"`) is unchanged.
+- `Repo.set_attrs`, `Subject.set_attrs`, and `Visit.set_attrs`, for attaching
+  metadata to a dataset, subject, or session after it already exists. Merges
+  into whatever attrs are already there, same as `create_subject(attrs=)` and
+  `add_visit(attrs=)`; not committed until `save`.
 
 ### Fixed
 

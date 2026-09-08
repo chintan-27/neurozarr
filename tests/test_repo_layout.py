@@ -57,6 +57,24 @@ def test_dataset_level_attrs_go_to_their_own_repo(store):
 	assert Repo(store).subject("sub-001").attrs == {"age": 40}
 
 
+def test_set_attrs_merges_at_every_level_after_creation(store):
+	repo = Repo(store)
+	subject = repo.create_subject("sub-001", attrs={"age": 40})
+	subject.add_visit("ses-1", attrs={"device": "A"})
+	repo.save("first")
+
+	repo = Repo(store)
+	repo.set_attrs({"Name": "My Study"})
+	repo.subject("sub-001").set_attrs({"handedness": "right"})
+	repo.subject("sub-001").visit("ses-1").set_attrs({"technician": "B"})
+	repo.save("attrs added later")
+
+	reopened = Repo(store)
+	assert reopened.subject("sub-001").attrs == {"age": 40, "handedness": "right"}
+	assert reopened.subject("sub-001").visit("ses-1").attrs == {"device": "A", "technician": "B"}
+	assert reopened._dataset_root().attrs.asdict()["Name"] == "My Study"
+
+
 def test_history_and_tags(written):
 	repo = Repo(written)
 	history = repo.history("sub-001")
