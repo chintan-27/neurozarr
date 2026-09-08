@@ -1,14 +1,20 @@
-from typing import TYPE_CHECKING, Any, Iterator, cast
+from typing import TYPE_CHECKING, Any, Callable, Iterator, cast
 
 import numpy as np
 import pandas as pd
 import zarr
 
 from .entities import parse_entities
+from .items import Attrs
 from .log import logger
 
 if TYPE_CHECKING:
 	import mne  # type: ignore[import-untyped]  # mne ships no type information
+
+# Set by Subject/Visit when a view is obtained from a writable Repo, so
+# view.set_attrs() can route a change back through Repo._route_attrs without
+# read.py depending on Repo itself.
+AttrsSink = Callable[[Attrs], None]
 
 
 def _array(node: zarr.Group, name: str) -> zarr.Array:
@@ -97,6 +103,13 @@ def _table_df(node: zarr.Group | zarr.Array, columns: list[str] | None = None) -
 	return df[columns] if columns else df
 
 
+def _sink(attrs_sink: "AttrsSink | None", path: str, name: str | None, attrs: dict[str, Any]) -> None:
+	if attrs_sink is None:
+		raise TypeError("this view has no writable Repo attached")
+	segments = tuple(path.split("/"))
+	attrs_sink(Attrs((*segments, name) if name is not None else segments, attrs))
+
+
 class TableView:
 	"""A stored table: channels, events, electrodes, a behavioral log, and so on.
 
@@ -114,14 +127,25 @@ class TableView:
 		Where the table sits in the store, for display and logging.
 	"""
 
-	def __init__(self, group: zarr.Group, name: str, entities: dict[str, str], path: str):
+	def __init__(self, group: zarr.Group, name: str, entities: dict[str, str], path: str,
+				 _attrs_sink: "AttrsSink | None" = None):
 		self._group, self.name, self.entities, self.path = group, name, entities, path
+		self._attrs_sink = _attrs_sink
 
 	@property
 	def meta(self) -> dict[str, Any]:
 		"""The table's own metadata, without the bookkeeping the writer added."""
 		return {k: v for k, v in self._group[self.name].attrs.asdict().items()
 				if k not in ("_neurozarr_item_type", "table_schema_version", "columns", "dtypes", "schema")}
+
+	def set_attrs(self, attrs: dict[str, Any]) -> None:
+		"""Add or update this table's metadata after creation.
+
+		Merges into whatever attrs already exist rather than replacing them.
+		Not committed until :meth:`Repo.save`. Only available on a view obtained
+		from a writable :class:`Repo`.
+		"""
+		_sink(self._attrs_sink, self.path, self.name, attrs)
 
 	@property
 	def columns(self) -> list[str]:
@@ -165,8 +189,18 @@ class RecordingView:
 		``"sub-001/ses-1/ieeg/task-Rest_run-1"``.
 	"""
 
-	def __init__(self, group: zarr.Group, entities: dict, path: str):
+	def __init__(self, group: zarr.Group, entities: dict, path: str, _attrs_sink: "AttrsSink | None" = None):
 		self._group, self.entities, self.path = group, entities, path
+		self._attrs_sink = _attrs_sink
+
+	def set_attrs(self, attrs: dict[str, Any]) -> None:
+		"""Add or update this recording's metadata after creation.
+
+		Merges into whatever attrs already exist rather than replacing them.
+		Not committed until :meth:`Repo.save`. Only available on a view obtained
+		from a writable :class:`Repo`.
+		"""
+		_sink(self._attrs_sink, self.path, None, attrs)
 
 	@property
 	def meta(self) -> dict[str, Any]:
@@ -382,8 +416,19 @@ class RecordingView:
 class ArrayView:
 	"""A lazily accessed named N-dimensional array."""
 
-	def __init__(self, array: zarr.Array, name: str, entities: dict[str, str], path: str):
+	def __init__(self, array: zarr.Array, name: str, entities: dict[str, str], path: str,
+				 _attrs_sink: "AttrsSink | None" = None):
 		self.array, self.name, self.entities, self.path = array, name, entities, path
+		self._attrs_sink = _attrs_sink
+
+	def set_attrs(self, attrs: dict[str, Any]) -> None:
+		"""Add or update this array's metadata after creation.
+
+		Merges into whatever attrs already exist rather than replacing them.
+		Not committed until :meth:`Repo.save`. Only available on a view obtained
+		from a writable :class:`Repo`.
+		"""
+		_sink(self._attrs_sink, self.path, self.name, attrs)
 
 	@property
 	def dims(self) -> tuple[str, ...]:
@@ -413,8 +458,19 @@ class ArrayView:
 class ExternalFileView:
 	"""A source file preserved by reference because no decoder was available."""
 
-	def __init__(self, group: zarr.Group, name: str, entities: dict[str, str], path: str):
+	def __init__(self, group: zarr.Group, name: str, entities: dict[str, str], path: str,
+				 _attrs_sink: "AttrsSink | None" = None):
 		self._group, self.name, self.entities, self.path = group, name, entities, path
+		self._attrs_sink = _attrs_sink
+
+	def set_attrs(self, attrs: dict[str, Any]) -> None:
+		"""Add or update this external file's metadata after creation.
+
+		Merges into whatever attrs already exist rather than replacing them.
+		Not committed until :meth:`Repo.save`. Only available on a view obtained
+		from a writable :class:`Repo`.
+		"""
+		_sink(self._attrs_sink, self.path, self.name, attrs)
 
 	@property
 	def uri(self) -> str:
@@ -455,13 +511,18 @@ def _is_recording(node: zarr.Group) -> bool:
 _RECORDING_OWN_CHILDREN = frozenset({"data", "events", "channels"})
 
 
-def views_in(root: zarr.Group, base_path: str = "") -> Iterator["RecordingView | TableView | ArrayView | ExternalFileView"]:
+def views_in(root: zarr.Group, base_path: str = "",
+			 attrs_sink: "AttrsSink | None" = None) -> Iterator["RecordingView | TableView | ArrayView | ExternalFileView"]:
 	"""Walk a subject's tree and yield every item view in it. A group holding a
 	"data" array is a recording; anything carrying a "columns" attr is a table
 	(channels, events, electrodes, a beh table, ...). A group can be a recording
 	and still hold a sibling table, array, or external-file reference under the
 	same entities (a BIDS recording next to an unsupported-format sidecar file,
-	say); both are yielded, not one at the expense of the other."""
+	say); both are yielded, not one at the expense of the other.
+
+	attrs_sink, when given, is attached to each view so its set_attrs() can
+	route a change back through Repo._route_attrs -- read.py itself never
+	writes and doesn't know about Repo."""
 	prefix = f"{base_path}/" if base_path else ""
 	for path, node in root.members(max_depth=None):
 		if (not isinstance(node, zarr.Group) or _is_table(node)
@@ -470,13 +531,13 @@ def views_in(root: zarr.Group, base_path: str = "") -> Iterator["RecordingView |
 		entities = parse_entities(path.rsplit("/", 1)[-1])
 		is_recording = _is_recording(node)
 		if is_recording:
-			yield RecordingView(node, entities, prefix + path)
+			yield RecordingView(node, entities, prefix + path, attrs_sink)
 		for name, child in node.members():
 			if is_recording and name in _RECORDING_OWN_CHILDREN:
 				continue
 			if _is_table(child):
-				yield TableView(node, name, entities, prefix + path)
+				yield TableView(node, name, entities, prefix + path, attrs_sink)
 			elif isinstance(child, zarr.Array) and child.attrs.asdict().get("_neurozarr_item_type") == "array":
-				yield ArrayView(child, name, entities, prefix + path)
+				yield ArrayView(child, name, entities, prefix + path, attrs_sink)
 			elif isinstance(child, zarr.Group) and child.attrs.asdict().get("_neurozarr_item_type") == "external_file":
-				yield ExternalFileView(child, name, entities, prefix + path)
+				yield ExternalFileView(child, name, entities, prefix + path, attrs_sink)

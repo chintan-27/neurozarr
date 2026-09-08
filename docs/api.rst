@@ -55,9 +55,13 @@ Reading data back:
    neurozarr.RecordingView.duration
    neurozarr.RecordingView.shape
    neurozarr.RecordingView.array
+   neurozarr.RecordingView.set_attrs
    neurozarr.TableView.df
    neurozarr.TableView.columns
+   neurozarr.TableView.set_attrs
    neurozarr.ArrayView.data
+   neurozarr.ArrayView.set_attrs
+   neurozarr.ExternalFileView.set_attrs
 
 The item stream a reader yields and the writer consumes:
 

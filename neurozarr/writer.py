@@ -204,9 +204,15 @@ class Writer:
 
 	def add_attrs(self, item: Attrs) -> None:
 		group = self.root
-		for part in item.path:
+		for part in item.path[:-1]:
 			group = group.require_group(part)
-		util.set_attrs(group, item.attrs)
+		if not item.path:
+			target: zarr.Group | zarr.Array = group
+		elif item.path[-1] in group:
+			target = group[item.path[-1]]  # an existing item -- a plain Array included, not just a Group
+		else:
+			target = group.require_group(item.path[-1])
+		util.set_attrs(target, item.attrs)
 		log_mem()
 
 	def add_external_file(self, item: ExternalFile, existing: ExistingPolicy = ExistingPolicy.ERROR) -> bool:

@@ -822,7 +822,7 @@ class Subject:
 			Includes derivatives, which carry ``derivatives/<pipeline>/`` in
 			their path.
 		"""
-		return [v for v in views_in(self.root(version), self.sub_id) if isinstance(v, RecordingView)]
+		return [v for v in views_in(self.root(version), self.sub_id, self._repo._route_attrs) if isinstance(v, RecordingView)]
 
 	def tables(self, version: str | None = None) -> list[TableView]:
 		"""Every table belonging to this subject, across all their sessions.
@@ -840,15 +840,15 @@ class Subject:
 		-------
 		list of TableView
 		"""
-		return [v for v in views_in(self.root(version), self.sub_id) if isinstance(v, TableView)]
+		return [v for v in views_in(self.root(version), self.sub_id, self._repo._route_attrs) if isinstance(v, TableView)]
 
 	def arrays(self, version: str | None = None) -> list[ArrayView]:
 		"""Every generic N-dimensional array belonging to this subject."""
-		return [v for v in views_in(self.root(version), self.sub_id) if isinstance(v, ArrayView)]
+		return [v for v in views_in(self.root(version), self.sub_id, self._repo._route_attrs) if isinstance(v, ArrayView)]
 
 	def external_files(self, version: str | None = None) -> list[ExternalFileView]:
 		"""Every unsupported source file preserved by reference for this subject."""
-		return [v for v in views_in(self.root(version), self.sub_id) if isinstance(v, ExternalFileView)]
+		return [v for v in views_in(self.root(version), self.sub_id, self._repo._route_attrs) if isinstance(v, ExternalFileView)]
 
 
 class Visit:
@@ -1037,7 +1037,7 @@ class Visit:
 		list of RecordingView
 		"""
 		base = f"{self.sub_id}/{self.ses_id}"
-		return [v for v in views_in(self._group(version), base) if isinstance(v, RecordingView)]
+		return [v for v in views_in(self._group(version), base, self._repo._route_attrs) if isinstance(v, RecordingView)]
 
 	def tables(self, version: str | None = None) -> list[TableView]:
 		"""Every table in this session.
@@ -1052,17 +1052,17 @@ class Visit:
 		list of TableView
 		"""
 		base = f"{self.sub_id}/{self.ses_id}"
-		return [v for v in views_in(self._group(version), base) if isinstance(v, TableView)]
+		return [v for v in views_in(self._group(version), base, self._repo._route_attrs) if isinstance(v, TableView)]
 
 	def arrays(self, version: str | None = None) -> list[ArrayView]:
 		"""Every generic N-dimensional array in this session."""
 		base = f"{self.sub_id}/{self.ses_id}"
-		return [v for v in views_in(self._group(version), base) if isinstance(v, ArrayView)]
+		return [v for v in views_in(self._group(version), base, self._repo._route_attrs) if isinstance(v, ArrayView)]
 
 	def external_files(self, version: str | None = None) -> list[ExternalFileView]:
 		"""Every unsupported source file preserved by reference in this session."""
 		base = f"{self.sub_id}/{self.ses_id}"
-		return [v for v in views_in(self._group(version), base) if isinstance(v, ExternalFileView)]
+		return [v for v in views_in(self._group(version), base, self._repo._route_attrs) if isinstance(v, ExternalFileView)]
 
 	def recording(self, **entities: Any) -> "RecordingView":
 		"""Get the single recording in this session matching the given entities.

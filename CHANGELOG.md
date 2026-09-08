@@ -28,6 +28,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   metadata to a dataset, subject, or session after it already exists. Merges
   into whatever attrs are already there, same as `create_subject(attrs=)` and
   `add_visit(attrs=)`; not committed until `save`.
+- The same `set_attrs` on `RecordingView`, `TableView`, `ArrayView`, and
+  `ExternalFileView`, for annotating one already-written item without
+  rewriting its data. Views obtained through `Repo`/`Subject`/`Visit` carry a
+  route back to their subject's writer; a view built directly from a bare
+  zarr group has none and raises `TypeError` on `set_attrs`.
 
 ### Fixed
 

@@ -75,6 +75,51 @@ def test_set_attrs_merges_at_every_level_after_creation(store):
 	assert reopened._dataset_root().attrs.asdict()["Name"] == "My Study"
 
 
+def test_set_attrs_on_recording_table_array_and_external_file_views(store, raw):
+	import numpy as np
+	import pandas as pd
+
+	from neurozarr import Entities, ExternalFile
+
+	repo = Repo(store)
+	visit = repo.create_subject("sub-001").add_visit("ses-1")
+	visit.add_recording(raw, task="Rest")
+	visit.add_behavioral_table(pd.DataFrame({"x": [1, 2]}), task="Impedance")
+	visit.add_array("arr", np.zeros((2, 2)), ("x", "y"), datatype="ieeg", task="Rest2")
+	repo._writer_for("sub-001").add_external_file(
+		ExternalFile(Entities("sub-001", "ses-1", "ieeg", {"task": "Rest3"}), "sidecar", "somewhere.mystery"))
+	repo.save("initial")
+
+	repo = Repo(store)
+	visit = repo.subject("sub-001").visit("ses-1")
+	visit.recordings()[0].set_attrs({"note": "checked"})
+	visit.tables()[0].set_attrs({"note": "checked"})
+	visit.arrays()[0].set_attrs({"note": "checked"})
+	visit.external_files()[0].set_attrs({"note": "checked"})
+	repo.save("annotated")
+
+	visit = Repo(store).subject("sub-001").visit("ses-1")
+	assert visit.recordings()[0].meta["note"] == "checked"
+	assert visit.tables()[0].meta["note"] == "checked"
+	assert visit.arrays()[0].meta["note"] == "checked"
+	assert visit.external_files()[0].meta["note"] == "checked"
+
+
+def test_view_set_attrs_needs_a_writable_repo(store, raw):
+	"""Regression: a view constructed without an attrs_sink (the pre-existing
+	default, and what any direct views_in() caller outside repo.py still gets)
+	must fail clearly rather than silently doing nothing."""
+	repo = Repo(store)
+	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="Rest")
+	repo.save("initial")
+
+	from neurozarr.read import RecordingView
+	bare = RecordingView(repo.root_of("sub-001")["ses-1"]["ieeg"]["task-Rest"], {}, "sub-001/ses-1/ieeg/task-Rest")
+	import pytest
+	with pytest.raises(TypeError, match="writable"):
+		bare.set_attrs({"note": "nope"})
+
+
 def test_history_and_tags(written):
 	repo = Repo(written)
 	history = repo.history("sub-001")
