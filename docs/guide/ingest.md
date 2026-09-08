@@ -3,6 +3,15 @@
 There are four ways to fill a store. They all produce the same result, so pick
 whichever matches the shape your data is already in.
 
+Two of them are backed by a **reader** ({class}`~neurozarr.BidsReader`,
+{class}`~neurozarr.ManifestReader`, or one you write): given a whole source —
+a directory tree, a table — it discovers many files and decides where each
+one goes. Underneath both built-in readers is a second, smaller piece: a
+**format decoder** that turns one already-located file into item(s) — the
+per-extension dispatch described below, under "How each row is read". A
+reader decides *where*; a decoder decides *what a file becomes*. See
+{doc}`extensions` to add either.
+
 ## From a set of files, via a manifest
 
 The general case: describe your files in a table, one row per file, and
@@ -54,20 +63,24 @@ extension is:
   # 1     60           2.5              60
   ```
 
-- **Anything else** — imaging formats included — becomes an explicit
-  {class}`~neurozarr.ExternalFile`: the path is recorded, not the file's
-  contents. neurozarr has no imaging reader (it does not depend on nibabel),
-  so a NIfTI file such as the `anat`/T1w row is preserved this way rather than
-  skipped or misread:
+- **NIfTI** (`.nii`/`.nii.gz`), such as the `anat`/T1w row above, decodes to an
+  {class}`~neurozarr.Array` with real voxel data and `x`/`y`/`z` (and `t`, if
+  4D) dimensions — automatically, if `nibabel` is installed
+  (`pip install "neurozarr[imaging]"`). Without it, a NIfTI file falls through
+  to the next rule like any other unrecognized format.
+- **Anything else** becomes an explicit {class}`~neurozarr.ExternalFile` by
+  default: the path is recorded, not the file's contents.
 
   ```python
   ref = repo.subject("sub-001").visit("ses-1").external_files()[0]
   ref.uri            # the original path
-  ref.reader_hint     # "install or register a reader for '.gz'"
+  ref.reader_hint     # "install or register a reader for '.xyz'"
   ```
 
-  Register a reader for the format instead if you need the data parsed, not
-  just referenced — see {doc}`extensions`.
+  Pass `unclaimed="embed"` to `ManifestReader`/`BidsReader` to read the file's
+  raw bytes into the store instead of only referencing it — see
+  {doc}`extensions` for that and for adding real support for a format via
+  {func}`~neurozarr.register_format`.
 
 A row that can't be represented safely — a malformed identifier, or data that
 matches a supported extension but fails to parse — still stops the

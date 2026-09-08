@@ -81,6 +81,9 @@ Supporting a new source format:
    neurozarr.available_readers
    neurozarr.reader_for
    neurozarr.open_reader
+   neurozarr.register_format
+   neurozarr.registered_formats
+   neurozarr.UnclaimedPolicy
 
 When something is wrong:
 
@@ -161,6 +164,13 @@ Readers
 .. autofunction:: neurozarr.reader_for
 
 .. autofunction:: neurozarr.open_reader
+
+.. autofunction:: neurozarr.register_format
+
+.. autofunction:: neurozarr.registered_formats
+
+.. autoclass:: neurozarr.UnclaimedPolicy
+   :members:
 
 Reading data back
 ------------------

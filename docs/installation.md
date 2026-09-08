@@ -6,6 +6,15 @@ pip install -e .
 
 Requires Python ≥ 3.11. Pulls in `icechunk`, `zarr`, `mne`, `pandas`, and `numpy`.
 
+```bash
+pip install -e ".[imaging]"
+```
+
+Adds `nibabel`, which enables automatic NIfTI decoding (`.nii`/`.nii.gz`) in
+{class}`~neurozarr.ManifestReader` and {class}`~neurozarr.BidsReader` — see
+{doc}`guide/ingest`. Without it, NIfTI files are handled like any other
+unrecognized format.
+
 ## Type checking
 
 The package ships a `py.typed` marker, so mypy, Pyright and other type checkers

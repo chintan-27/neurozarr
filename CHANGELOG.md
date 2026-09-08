@@ -15,6 +15,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Safe duplicate policies, external-file references, typed nullable tables,
   N-dimensional arrays, source provenance, and reader plugin registration.
 - A lean Python 3.11 quality workflow with deterministic test timeouts.
+- A format decoder registry (`register_format`, `registered_formats`), distinct
+  from reader registration: given one already-located file, a decoder turns it
+  into item(s), shared automatically by `ManifestReader` and `BidsReader`
+  rather than each reimplementing per-format dispatch. `.nii`/`.nii.gz` decode
+  to a real `Array` automatically when the new optional `nibabel` extra
+  (`pip install "neurozarr[imaging]"`) is installed.
+- `unclaimed="embed"` on `ManifestReader`/`BidsReader`: read a file with no
+  matching decoder as raw bytes into the store, rather than only referencing
+  its path. Opt-in; the default (`"reference"`) is unchanged.
 
 ### Fixed
 
@@ -32,6 +41,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reader's `extensions` against the full filename rather than only its last
   dot-segment, so a reader registered for a compound extension such as
   `.nii.gz` or `.tar.gz` is selected. It previously never matched.
+- A group holding a `Recording` could silently hide a sibling `Table`, `Array`,
+  or `ExternalFile` filed under the same entities (a recording and an
+  unsupported-format sidecar sharing one BIDS task, for instance): the sibling
+  never appeared in `visit.tables()`/`arrays()`/`external_files()` or
+  `repo.find()`. Both are now found; `RecordingView.channels()`/`.events()`
+  remain the only way to reach those two specific facade tables, unchanged.
+- `BidsReader` recovered a BIDS suffix like `T1w` as `T1w.nii` for any
+  `.nii.gz` file, since `Path.stem` only strips the file's last extension.
 
 ### Changed
 
