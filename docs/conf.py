@@ -33,4 +33,9 @@ napoleon_preprocess_types = True
 autodoc_member_order = "bysource"
 autodoc_default_options = {"members": True, "undoc-members": False}
 
+# Without this, every autodoc'd method signature (Repo.create(), Subject.add_visit(), ...)
+# becomes its own entry in the page's sidebar TOC -- unusable once a class has more than
+# a handful of members. The API page's own "At a glance" tables are the intended navigation.
+toc_object_entries = False
+
 html_theme = "furo"
