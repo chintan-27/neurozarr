@@ -35,21 +35,30 @@ def _array(node: zarr.Group, name: str) -> zarr.Array:
 def _table_df(node: zarr.Group | zarr.Array, columns: list[str] | None = None) -> pd.DataFrame:
 	"""Rebuild a DataFrame from a stored table.
 
-	Tables are groups of one typed array per column. Stores written before that
-	(a single string array for the whole table) are still read, by casting each
-	column back to the dtype recorded in attrs.
+	Tables are groups of typed arrays, one per column or, since schema 3,
+	shared by several columns that pack into one array (see
+	util.create_table). Stores written before either (a single string array
+	for the whole table) are still read, by casting each column back to the
+	dtype recorded in attrs.
 	"""
 	attrs = node.attrs.asdict()
 	names = cast("list[str] | None", attrs.get("columns"))
 
-	if isinstance(node, zarr.Group) and attrs.get("table_schema_version") == 2:
+	if isinstance(node, zarr.Group) and attrs.get("table_schema_version") in (2, 3):
 		series_list: list[pd.Series] = []
 		for spec in cast("list[dict[str, Any]]", attrs.get("schema", [])):
-			internal = str(spec["id"])
-			values = np.asarray(_array(node, internal)[:])
-			mask_name = f"{internal}__mask"
-			mask = np.asarray(_array(node, mask_name)[:]).astype(bool) if mask_name in node \
-				else np.zeros(len(values), dtype=bool)
+			if "array" in spec:  # schema 3: packed into a shared array, one row per column
+				array_name, row = str(spec["array"]), int(spec["row"])
+				values = np.asarray(_array(node, array_name)[row])
+				mask_name = f"{array_name}__mask"
+				mask = np.asarray(_array(node, mask_name)[row]).astype(bool) if mask_name in node \
+					else np.zeros(len(values), dtype=bool)
+			else:  # schema 2, or a schema-3 column that wasn't packed
+				internal = str(spec["id"])
+				values = np.asarray(_array(node, internal)[:])
+				mask_name = f"{internal}__mask"
+				mask = np.asarray(_array(node, mask_name)[:]).astype(bool) if mask_name in node \
+					else np.zeros(len(values), dtype=bool)
 			encoding = spec.get("encoding", "native")
 			logical = str(spec.get("dtype", values.dtype))
 
@@ -91,7 +100,7 @@ def _table_df(node: zarr.Group | zarr.Array, columns: list[str] | None = None) -
 				data = pd.Series(values)
 				if mask.any():
 					data[mask] = np.nan
-			series_list.append(pd.Series(data, name=str(spec.get("name", internal))))
+			series_list.append(pd.Series(data, name=str(spec.get("name", spec.get("id", spec.get("array"))))))
 		df = pd.concat(series_list, axis=1) if series_list else pd.DataFrame(columns=names or [])
 		return df[columns] if columns else df
 

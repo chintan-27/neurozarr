@@ -74,6 +74,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Table columns sharing a physical dtype and nullability are now packed into
+  one shared zarr array instead of each getting its own (`table_schema_version`
+  3). icechunk's per-array bookkeeping cost dominated writing tables with many
+  small columns -- measured ~56% of total conversion time on a real BIDS
+  dataset, and ~4x faster table writes after packing on a table shaped like a
+  typical `channels.tsv`. Reading is unaffected: a column's own schema entry
+  is all that's needed to decode it, so `table_schema_version` 2 stores remain
+  readable unchanged.
 - MNE recordings are opened lazily and written one time chunk at a time.
 - BIDS JSON inheritance merges applicable sidecars from root to leaf and
   BrainVision companion files are treated as one bundle.
