@@ -7,7 +7,7 @@ name = "neurozarr"
 version = "0.2.0"
 description = "Put neural/behavioral recordings into a versioned, cloud-ready Zarr/Icechunk store"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Chintan Acharya" }]
@@ -15,7 +15,6 @@ keywords = ["zarr", "icechunk", "neuroscience", "ieeg", "eeg", "dbs", "bids"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",

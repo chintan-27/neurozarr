@@ -26,7 +26,7 @@ pip install -e .          # from a checkout
 pip install -e ".[dev]"   # plus pytest, pytest-timeout, mypy, pandas-stubs, tqdm and build
 ```
 
-Requires Python ≥ 3.11. Dependencies: `icechunk`, `zarr`, `mne`, `pandas`, `numpy`.
+Requires Python ≥ 3.12. Dependencies: `icechunk`, `zarr`, `mne`, `pandas`, `numpy`.
 
 ## Quickstart
 

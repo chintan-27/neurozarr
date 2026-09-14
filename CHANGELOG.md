@@ -74,6 +74,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `requires-python` raised to `>=3.12` -- `icechunk>=2.1` dropped Python 3.11
+  wheels, so declaring 3.11 support was already false; CI's `test` matrix and
+  `quality`/`docs` jobs (previously pinned to 3.11) moved to 3.12 to match.
 - Icechunk's own Rust-side warnings (e.g. "LocalFileSystem storage is not safe
   for concurrent commits") no longer print by default -- `RUST_LOG` never
   reached them, so seeing clean output required importing `icechunk` directly
