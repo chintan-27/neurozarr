@@ -13,6 +13,24 @@ subject.attrs                         # {'age': 63, 'diagnosis': 'PD', ...}
 subject.visits()                      # ['ses-20220908', ...]
 ```
 
+## Exploring what's there
+
+{meth}`~neurozarr.Repo.describe` and {meth}`~neurozarr.Visit.describe` answer
+"what's actually in here" as data, without listing each item kind separately
+and reading `.path`/`.entities` off every result by hand:
+
+```python
+repo.describe()
+# [{'sub_id': 'sub-001', 'visits': 1, 'recordings': 3, 'tables': 2, 'arrays': 0, 'external_files': 0}]
+
+subject.visit("ses-20220908").describe()
+# [{'kind': 'recording', 'path': 'sub-001/ses-20220908/ieeg/task-Stream_run-1', 'task': 'Stream', 'run': '1'},
+#  {'kind': 'table', 'path': 'sub-001/ses-20220908/beh/task-TherapyHistory/table', 'task': 'TherapyHistory'}]
+```
+
+Both return a plain list of dicts, sorted by path — hand either straight to
+`pandas.DataFrame(...)` for a table view.
+
 ## Getting to a recording
 
 A {class}`~neurozarr.RecordingView` is a handle, not the data — nothing is read
