@@ -25,6 +25,7 @@ Creating and filling a store:
    neurozarr.Repo.migrate
    neurozarr.Repo.subjects
    neurozarr.Repo.subject
+   neurozarr.Repo.describe
    neurozarr.Repo.find
    neurozarr.Repo.history
    neurozarr.Repo.tag
@@ -36,12 +37,17 @@ Creating and filling a store:
    neurozarr.Subject.tables
    neurozarr.Subject.arrays
    neurozarr.Subject.external_files
+   neurozarr.Subject.add_recording
+   neurozarr.Subject.add_behavioral_table
+   neurozarr.Subject.add_derivative
+   neurozarr.Subject.add_array
    neurozarr.Visit.add_recording
    neurozarr.Visit.add_behavioral_table
    neurozarr.Visit.add_derivative
    neurozarr.Visit.add
    neurozarr.Visit.add_array
    neurozarr.Visit.recording
+   neurozarr.Visit.describe
 
 Changing or removing what's already there (narrative guide: :doc:`guide/edit`):
 
@@ -152,9 +158,13 @@ Repo, Subject, Visit
 
 .. autoclass:: neurozarr.Subject
    :members:
+   :inherited-members: object
+   :exclude-members: sub_id
 
 .. autoclass:: neurozarr.Visit
    :members:
+   :inherited-members: object
+   :exclude-members: sub_id
 
 Data model
 ----------

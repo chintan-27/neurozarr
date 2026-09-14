@@ -61,11 +61,12 @@ class Repo:
 		How sample data is packed and compressed. Defaults to int16 packing
 		with zstd compression.
 	verbose : bool, default False
-		Log one line per item as it's written -- what it is, its size, and
-		current + peak process memory right before the write (current needs
-		the optional ``psutil``; peak alone otherwise) -- plus one line per
-		commit. Equivalent to ``neurozarr.set_verbosity(logging.INFO)``; the
-		package stays quiet by default, as a library should.
+		Log one line per item as it's written -- what it is, its size, live +
+		peak memory actually referenced by real Python objects (not raw
+		process footprint), and a running total of bytes written so far --
+		plus one line per commit. Equivalent to
+		``neurozarr.set_verbosity(logging.INFO)``; the package stays quiet by
+		default, as a library should.
 	**storage_options
 		Passed through to the underlying icechunk storage constructor, e.g.
 		``region="us-east-1"``, ``anonymous=True``, ``from_env=True``.

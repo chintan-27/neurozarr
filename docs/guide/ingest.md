@@ -111,6 +111,17 @@ repo.save("added sub-001")
 
 Keyword arguments are entities, and decide where each item lands.
 
+For a dataset with no sessions at all, skip {meth}`~neurozarr.Subject.add_visit`
+entirely — {class}`~neurozarr.Subject` has the same
+{meth}`~neurozarr.Visit.add_recording`/{meth}`~neurozarr.Visit.add_behavioral_table`/
+{meth}`~neurozarr.Visit.add_array`/{meth}`~neurozarr.Visit.add_derivative`
+methods {class}`~neurozarr.Visit` does — both share one internal
+implementation, differing only in whether a session segment goes in the path:
+
+```python
+repo.create_subject("sub-001").add_recording(my_mne_raw, task="Rest")
+```
+
 ## By writing a reader
 
 Reach for this when your data has no standard layout *and* no standard file
@@ -179,6 +190,15 @@ applicable metadata from the dataset root toward the data file.
 
 This is a convenience for data that happens to be in that form. The store's own
 layout borrows BIDS conventions either way — see {doc}`layout`.
+
+A `derivatives/` folder, if the dataset has one, is read unconditionally right
+alongside the raw data — the same way any other datatype directory is, just
+filed under its own `derivatives/<pipeline>/` prefix. Pass
+`include_derivatives=False` to convert only the dataset's raw data:
+
+```python
+repo.ingest(BidsReader("./my_bids_dataset", include_derivatives=False))
+```
 
 ## Existing paths
 

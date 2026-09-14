@@ -146,6 +146,14 @@ visit.add_behavioral_table(my_dataframe, task="TherapyHistory")
 repo.save("added sub-001")
 ```
 
+Datasets with no sessions at all skip `add_visit` entirely — `Subject` has the
+same `add_recording`/`add_behavioral_table`/`add_array`/`add_derivative`
+methods `Visit` does, writing with no `ses-` segment in the path:
+
+```python
+repo.create_subject("sub-001").add_recording(my_mne_raw, task="Rest")
+```
+
 ### 3. By writing a Reader
 
 Neither built-in reader fits your source? Implement `neurozarr.Reader` — one method, `read()`, yielding any of `Recording`/`Table`/`Attrs`/`ExternalFile`/`Array` (see `neurozarr/items.py`):
@@ -174,17 +182,24 @@ from neurozarr import BidsReader
 repo.ingest(BidsReader("./my_bids_dataset"))
 ```
 
+A `derivatives/` folder, if the dataset has one, is converted automatically
+right along with the raw data — pass `include_derivatives=False` to skip it.
+
 ## Reading data back
 
 ```python
 repo = Repo.open("./study.zarr")
 
 repo.subjects()                       # ['sub-001', 'sub-002', ...]
+repo.describe()                       # [{'sub_id': 'sub-001', 'visits': 1, 'recordings': 3, ...}, ...]
 subject = repo.subject("sub-001")
 subject.attrs                         # {'age': 63, ...}
 subject.visits()                      # ['ses-20220908', ...]
 
-rec = subject.visit("ses-20220908").recording(task="Stream", run=1)
+visit = subject.visit("ses-20220908")
+visit.describe()                      # [{'kind': 'recording', 'path': ..., 'task': 'Stream', 'run': '1'}, ...]
+
+rec = visit.recording(task="Stream", run=1)
 values, meta = rec.data()             # ndarray in physical units + its metadata
 raw = rec.raw()                       # a real mne.io.RawArray, ready for mne
 df = rec.channels()                   # the channels table as a DataFrame
@@ -286,7 +301,7 @@ repo.ingest(reader, existing="skip")                    # only write what's new
 
 Subjects are independent repositories, so they convert concurrently. A subject is the unit of work, so the total time is bounded by the largest single subject however many workers you give it. Existing paths fail by default; select `existing="skip"` for incremental conversion or `existing="replace"` for deliberate replacement.
 
-Pass `verbose=True` to `Repo.create`/`Repo.open`/`convert_parallel` to see what a conversion is actually doing — one line per item written (what it is, its size, and current + peak process memory right before the write — install `psutil` for the current figure, peak alone otherwise), and one per commit. Quiet by default, as a library should be.
+Pass `verbose=True` to `Repo.create`/`Repo.open`/`convert_parallel` to see what a conversion is actually doing — one line per item written (what it is, its size, live + peak memory actually referenced by real Python objects, and a running total of bytes written so far), and one per commit. Quiet by default, as a library should be.
 
 ## Command line
 
