@@ -368,6 +368,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how the package is organized and how
 to add support for a new source format. Release notes are in
 [CHANGELOG.md](CHANGELOG.md).
 
+## About
+
+The design and direction are mine; roughly half the commits — mainly
+documentation, CI, typing, and other routine or mechanical changes — were
+written with [Claude Code](https://claude.com/claude-code)'s help, credited
+as co-author on those commits.
+
 ## License
 
 [MIT](LICENSE).
