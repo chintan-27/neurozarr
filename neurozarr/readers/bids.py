@@ -8,6 +8,7 @@ import pandas as pd
 from ..entities import Entities, split_stem
 from ..errors import ValidationError
 from ..items import Attrs, ExternalFile, Item, Recording, Table
+from ..log import log_progress
 from ..util import clean_nan, load_json, source_provenance
 from .formats import UnclaimedPolicy, decode_embed, decoder_for
 
@@ -65,25 +66,34 @@ class BidsReader:
 	subjects : list of str, optional
 		Read only these subjects. An empty list reads none, which is how
 		dataset-level metadata is ingested on its own. Default reads all.
+	include_derivatives : bool, default True
+		Also convert everything under a ``derivatives/`` folder, if the
+		dataset has one — read unconditionally by default, the same as any
+		other datatype directory, filtered by ``subjects`` the same way.
+		Pass ``False`` to convert only the dataset's raw data.
 
 	Examples
 	--------
 	>>> repo.ingest(BidsReader("./my_bids_dataset"))
+	>>> repo.ingest(BidsReader("./my_bids_dataset", include_derivatives=False))
 	"""
 
 	def __init__(self, root_dir: str | Path, subjects: list[str] | None = None,
-				 checksum: bool = False, unclaimed: UnclaimedPolicy | str = UnclaimedPolicy.REFERENCE):
+				 checksum: bool = False, unclaimed: UnclaimedPolicy | str = UnclaimedPolicy.REFERENCE,
+				 include_derivatives: bool = True):
 		# Dataset-level metadata is yielded whatever `subjects` says, so parallel
 		# workers each converting one subject still agree on it.
 		self.root_dir = Path(root_dir)
 		self.subjects = None if subjects is None else set(subjects)
 		self.checksum = checksum
 		self.unclaimed = UnclaimedPolicy(unclaimed)
+		self.include_derivatives = include_derivatives
 
 	def _wanted(self, sub: str) -> bool:
 		return self.subjects is None or sub in self.subjects
 
 	def read(self) -> Iterator[Item]:
+		log_progress("Reading BIDS dataset", str(self.root_dir))
 		yield Attrs((), clean_nan(load_json(self.root_dir / "dataset_description.json")))
 
 		participantAttrs, participantsFieldInfo = self._load_participants()
@@ -96,6 +106,7 @@ class BidsReader:
 			sub = subDir.name
 			if not self._wanted(sub):
 				continue
+			log_progress("Reading subject", sub)
 			if sub in participantAttrs:
 				yield Attrs((sub,), participantAttrs[sub])
 
@@ -112,7 +123,8 @@ class BidsReader:
 					if dtDir.is_dir() and dtDir.name != "derivatives":
 						yield from self._read_datatype_dir(sub, ses, dtDir.name, dtDir)
 
-		yield from self._read_derivatives()
+		if self.include_derivatives:
+			yield from self._read_derivatives()
 
 	def _load_participants(self) -> tuple[dict[str, Any], dict[str, Any]]:
 		path = self.root_dir / "participants.tsv"

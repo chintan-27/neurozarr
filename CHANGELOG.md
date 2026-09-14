@@ -8,6 +8,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `verbose=True` on `Repo.create`/`Repo.open` and `convert_parallel`: logs one
+  line per item as it's written -- what it is, its size, live + peak
+  `tracemalloc`-tracked memory (real Python-level allocations, not raw
+  process RSS, which is dominated by one-time import cost and allocator
+  retention rather than anything neurozarr itself is holding), and a running
+  total of logical bytes handed to storage so far this session -- plus one
+  line per commit and per reader/subject-repo step. Shorthand for
+  `neurozarr.set_verbosity(logging.INFO)`, which is what starts the
+  `tracemalloc` tracking; the package stays quiet by default, as a library
+  should. `convert_parallel` applies it inside each worker process, since a
+  fresh spawned interpreter doesn't inherit the caller's logging setup.
+- `Repo.describe()` and `Visit.describe()`: a store's or one session's
+  contents summarized as data (a list of dicts, sorted by path) instead of
+  printed text -- `neurozarr info` is now a thin wrapper around
+  `Repo.describe()` rather than a separate copy of the same counting logic.
+- `Subject.add_recording`, `add_behavioral_table`, `add_array`, and
+  `add_derivative`, for datasets with no sessions at all: the same methods
+  `Visit` has, writing with no `ses-` segment in the path rather than
+  requiring a session that doesn't exist for this data. Both classes share
+  one internal implementation now, differing only in which session (or none)
+  items get filed under.
+- `BidsReader(..., include_derivatives=False)`: skip everything under a
+  `derivatives/` folder entirely. Previously read unconditionally whenever
+  present; that remains the default.
+
 - Explicit `Repo.create`, `Repo.open`, and transactional write APIs.
 - A schema-v2 dataset manifest that atomically pins exact subject snapshots,
   plus `doctor` and explicit metadata-only migration commands.
@@ -49,6 +74,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Icechunk's own Rust-side warnings (e.g. "LocalFileSystem storage is not safe
+  for concurrent commits") no longer print by default -- `RUST_LOG` never
+  reached them, so seeing clean output required importing `icechunk` directly
+  and calling `set_logs_filter` yourself. Silenced once at import time instead;
+  using neurozarr no longer requires knowing icechunk exists.
 - `find()` no longer hides subjects whose manifest catalog entry is missing or out
   of date. Catalog entries now record the snapshot they describe, and an entry that
   does not match the published snapshot falls back to scanning that subject instead

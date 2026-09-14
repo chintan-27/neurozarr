@@ -15,7 +15,7 @@ neurozarr convert <source> <dest>
 by extension. `dest` is a path or a cloud URI.
 
 These are the two sources the command line understands. The other ways of
-filling a store — building it up by hand, or with a reader of your own — are
+filling a store — building it up explicitly, or with a reader of your own — are
 Python APIs, since they need code either way.
 
 The source is validated first, and the conversion stops if anything fatal turns

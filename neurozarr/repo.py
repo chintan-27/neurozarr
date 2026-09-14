@@ -3,6 +3,7 @@ from dataclasses import replace
 from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import Any, Iterator, Literal, cast
+import logging
 import warnings
 
 import icechunk
@@ -13,6 +14,7 @@ import zarr
 from .entities import Entities
 from .errors import SchemaVersionError, StoreIntegrityError, WriteConflictError
 from .items import Array, Attrs, ExternalFile, Recording, Reader, Table
+from .log import log_progress, set_verbosity
 from .read import ArrayView, ExternalFileView, RecordingView, TableView, WriteBack, views_in
 from .schema import MANIFEST_ATTR, SCHEMA_VERSION, StoreManifest, utc_now
 from .storage import StorageTarget, storage_from
@@ -31,8 +33,8 @@ _NO_COMMITTED_ROOT = (
 )
 
 
-def _open_writer(icechunk_repo: icechunk.Repository, codec: CodecConfig | None) -> Writer:
-	return Writer(icechunk_repo.writable_session("main"), codec)
+def _open_writer(icechunk_repo: icechunk.Repository, codec: CodecConfig | None, label: str = "") -> Writer:
+	return Writer(icechunk_repo.writable_session("main"), codec, label)
 
 
 class Repo:
@@ -44,7 +46,7 @@ class Repo:
 	single subject, such as the dataset description and participant field
 	definitions.
 
-	Fill a store either in bulk with :meth:`ingest`, or by hand with
+	Fill a store either in bulk with :meth:`ingest`, or explicitly with
 	:meth:`create_subject` and the methods on :class:`Subject` and
 	:class:`Visit`. Either way, call :meth:`save` to commit.
 
@@ -58,6 +60,12 @@ class Repo:
 	codec : CodecConfig, optional
 		How sample data is packed and compressed. Defaults to int16 packing
 		with zstd compression.
+	verbose : bool, default False
+		Log one line per item as it's written -- what it is, its size, and
+		current + peak process memory right before the write (current needs
+		the optional ``psutil``; peak alone otherwise) -- plus one line per
+		commit. Equivalent to ``neurozarr.set_verbosity(logging.INFO)``; the
+		package stays quiet by default, as a library should.
 	**storage_options
 		Passed through to the underlying icechunk storage constructor, e.g.
 		``region="us-east-1"``, ``anonymous=True``, ``from_env=True``.
@@ -90,21 +98,26 @@ class Repo:
 		self._failed = False
 
 	@classmethod
-	def create(cls, target: StorageTarget, codec: CodecConfig | None = None,
+	def create(cls, target: StorageTarget, codec: CodecConfig | None = None, verbose: bool = False,
 			   **storage_options: Any) -> "Repo":
 		"""Create a new store, failing if its dataset repository already exists."""
+		if verbose:
+			set_verbosity(logging.INFO)
 		self = cls.__new__(cls)
 		self._init(target, codec, "x", storage_options)
 		if self._repo_exists("_dataset"):
 			raise FileExistsError(f"a neurozarr store already exists at {target}")
+		log_progress("Creating store", str(target))
 		self._initialize_dataset("initialize neurozarr store")
 		self._mode = "a"
 		return self
 
 	@classmethod
 	def open(cls, target: StorageTarget, mode: Literal["r", "a"] = "r",
-			 codec: CodecConfig | None = None, **storage_options: Any) -> "Repo":
+			 codec: CodecConfig | None = None, verbose: bool = False, **storage_options: Any) -> "Repo":
 		"""Open an existing store without accidentally creating an empty one."""
+		if verbose:
+			set_verbosity(logging.INFO)
 		self = cls.__new__(cls)
 		self._init(target, codec, mode, storage_options)
 		if not self._repo_exists("_dataset"):
@@ -112,6 +125,7 @@ class Repo:
 		manifest = self._manifest()
 		if manifest is None and mode == "a":
 			raise SchemaVersionError("legacy store is read-only until `neurozarr migrate` is run")
+		log_progress("Opened store", str(target))
 		return self
 
 	def _repo_exists(self, sub_id: str) -> bool:
@@ -121,10 +135,12 @@ class Repo:
 		if sub_id not in self._repos:
 			storage = storage_from(self.target, sub_id, **self._storage_options)
 			if icechunk.Repository.exists(storage):
+				log_progress("Opening repository", sub_id)
 				self._repos[sub_id] = icechunk.Repository.open(storage)
 			elif self._mode == "r":
 				raise StoreIntegrityError(f"store manifest references missing repository {sub_id!r}")
 			else:
+				log_progress("Creating repository", sub_id)
 				self._repos[sub_id] = icechunk.Repository.create(storage)
 		return self._repos[sub_id]
 
@@ -147,7 +163,7 @@ class Repo:
 				else:
 					raise SchemaVersionError("legacy store must be migrated before it can be modified")
 		if sub_id not in self._writers:
-			self._writers[sub_id] = _open_writer(self._icechunk_repo(sub_id), self._codec)
+			self._writers[sub_id] = _open_writer(self._icechunk_repo(sub_id), self._codec, sub_id)
 		return self._writers[sub_id]
 
 	def _dispatch(self, item: Recording | Table | ExternalFile | Array,
@@ -576,7 +592,7 @@ class Repo:
 			subject_snapshots=snapshots,
 			catalog={sub_id: self._catalog_entry(sub_id, snapshot) for sub_id, snapshot in snapshots.items()},
 		)
-		writer = _open_writer(self._icechunk_repo("_dataset"), self._codec)
+		writer = _open_writer(self._icechunk_repo("_dataset"), self._codec, "_dataset")
 		writer.add_attrs(Attrs((), {MANIFEST_ATTR: manifest.as_dict(), "subjects": subjects}))
 		writer.save(f"migrate neurozarr schema to {SCHEMA_VERSION}")
 		self._writers.clear()
@@ -664,6 +680,41 @@ class Repo:
 		Subject
 		"""
 		return Subject(self, sub_id)
+
+	def describe(self) -> list[dict[str, Any]]:
+		"""Summarize every subject in the store, as data rather than printed text.
+
+		The same counts ``neurozarr info`` prints, returned as one dict per
+		subject so a Python caller can build a table from them instead of
+		parsing CLI output. Opens every subject's repository to count its
+		items, so on a store with many subjects this costs one session open
+		per subject -- pass ``sub`` to :meth:`find` instead when you already
+		know which subject you care about.
+
+		Returns
+		-------
+		list of dict
+			One dict per subject, sorted by subject id, with keys
+			``sub_id``, ``visits``, ``recordings``, ``tables``, ``arrays``,
+			``external_files``.
+
+		Examples
+		--------
+		>>> import pandas as pd
+		>>> pd.DataFrame(repo.describe())
+		"""
+		overview = []
+		for sub_id in self.subjects():
+			subject = self.subject(sub_id)
+			overview.append({
+				"sub_id": sub_id,
+				"visits": len(subject.visits()),
+				"recordings": len(subject.recordings()),
+				"tables": len(subject.tables()),
+				"arrays": len(subject.arrays()),
+				"external_files": len(subject.external_files()),
+			})
+		return overview
 
 	def find(self, datatype: str | None = None, sub: str | None = None,
 			 **entities: Any) -> Iterator[RecordingView]:
@@ -784,12 +835,167 @@ class Repo:
 		return sorted(self._icechunk_repo(sub_id).list_tags())
 
 
-class Subject:
+class _ItemHost:
+	"""Shared add/add_recording/add_behavioral_table/add_derivative/add_array
+	logic for anything items can be added directly to -- :class:`Subject`
+	(session-less) and :class:`Visit` (one session). The two differ only in
+	which ``ses_id`` to build :class:`~neurozarr.Entities` with; not a public
+	type itself, so a caller never needs to know it exists.
+
+	A subclass must set ``self._repo``/``self.sub_id`` and override
+	:meth:`_ses_id` before any of these are called. Not a shared ``ses_id``
+	attribute directly: :class:`Visit` needs its own to stay a plain ``str``
+	rather than the ``str | None`` a session-less :class:`Subject` needs.
+	"""
+
+	_repo: Repo
+	sub_id: str
+
+	def _ses_id(self) -> str | None:
+		"""Which session items added here belong to. None (the default) for a
+		session-less host; Visit overrides this to its own real session id."""
+		return None
+
+	def add(self, datatype: str, payload: "mne.io.BaseRaw | pd.DataFrame",
+			meta: dict[str, Any] | None = None, prefix: tuple[str, ...] = (),
+			existing: ExistingPolicy | str = ExistingPolicy.ERROR, **entities: Any) -> None:
+		"""Store a recording or a table under any datatype.
+
+		Parameters
+		----------
+		datatype : str
+			BIDS datatype directory, e.g. ``"ieeg"``, ``"eeg"``, ``"beh"``.
+		payload : mne.io.BaseRaw or pandas.DataFrame
+			The data to store.
+		meta : dict, optional
+			Sidecar metadata to store alongside it.
+		prefix : tuple of str, optional
+			Extra path segments placed before the subject, e.g.
+			``("derivatives", "my-pipeline")``.
+		**entities
+			BIDS entities, e.g. ``task="Rest", run=1``.
+
+		Raises
+		------
+		TypeError
+			If ``payload`` is neither an mne ``Raw`` nor a DataFrame.
+
+		See Also
+		--------
+		add_recording : Shorthand for ``ieeg`` recordings.
+		add_behavioral_table : Shorthand for ``beh`` tables.
+		add_derivative : Store processed results under ``derivatives/``.
+		"""
+		e = Entities(self.sub_id, self._ses_id(), datatype, entities)
+		item: Recording | Table
+		if isinstance(payload, mne.io.BaseRaw):
+			item = Recording(e, payload, meta or {}, prefix)
+		elif isinstance(payload, pd.DataFrame):
+			item = Table(e, "table", payload, meta or {}, prefix)
+		else:
+			raise TypeError(f"unsupported recording/table payload type {type(payload)!r}")
+		self._repo._dispatch(item, ExistingPolicy(existing))
+
+	def add_recording(self, raw: "mne.io.BaseRaw", meta: dict[str, Any] | None = None,
+					  *, existing: ExistingPolicy | str = ExistingPolicy.ERROR, **entities: Any) -> None:
+		"""Store a recording under the ``ieeg`` datatype.
+
+		Parameters
+		----------
+		raw : mne.io.BaseRaw
+			The recording to store.
+		meta : dict, optional
+			Sidecar metadata. Sampling frequency and channel names are taken
+			from ``raw`` itself when not given here.
+		**entities
+			BIDS entities, e.g. ``task="Rest", run=1``.
+		"""
+		self.add("ieeg", raw, meta, existing=existing, **entities)
+
+	def add_behavioral_table(self, df: pd.DataFrame, meta: dict[str, Any] | None = None,
+							 *, existing: ExistingPolicy | str = ExistingPolicy.ERROR,
+							 **entities: Any) -> None:
+		"""Store a table under the ``beh`` datatype.
+
+		Parameters
+		----------
+		df : pandas.DataFrame
+			The table to store. Column dtypes are preserved on read-back.
+		meta : dict, optional
+			Sidecar metadata.
+		**entities
+			BIDS entities, e.g. ``task="TherapyHistory"``.
+		"""
+		self.add("beh", df, meta, existing=existing, **entities)
+
+	def add_derivative(self, pipeline: str, payload: "mne.io.BaseRaw | pd.DataFrame",
+					   datatype: str = "ieeg", meta: dict[str, Any] | None = None,
+					   *, pipeline_version: str | None = None,
+					   parameters: dict[str, Any] | None = None,
+					   inputs: list[str] | None = None,
+					   existing: ExistingPolicy | str = ExistingPolicy.ERROR,
+					   **entities: Any) -> None:
+		"""Store a processed result under ``derivatives/<pipeline>/``.
+
+		This keeps analysis outputs separate from raw data, the way BIDS does.
+		Derivatives read back like any other data, through
+		:meth:`Subject.recordings`, :meth:`Subject.tables` or :meth:`Repo.find`,
+		with ``derivatives/<pipeline>/`` in their path.
+
+		Parameters
+		----------
+		pipeline : str
+			Name of the pipeline that produced this result, e.g.
+			``"my-filter"``. Recorded as ``GeneratedBy`` in the metadata.
+		payload : mne.io.BaseRaw or pandas.DataFrame
+			The processed result.
+		datatype : str, default "ieeg"
+			BIDS datatype directory to file it under.
+		meta : dict, optional
+			Additional sidecar metadata.
+		**entities
+			BIDS entities, e.g. ``task="Rest", run=1``.
+
+		Examples
+		--------
+		>>> filtered = raw.copy().filter(l_freq=1, h_freq=40)
+		>>> visit.add_derivative("my-filter", filtered, task="Rest", run=1)
+		"""
+		manifest = self._repo._manifest()
+		provenance = {
+			"kind": "derivative",
+			"pipeline": pipeline,
+			"pipeline_version": pipeline_version,
+			"parameters": parameters or {},
+			"inputs": inputs or [],
+			"source_dataset_id": manifest.dataset_id if manifest else None,
+		}
+		meta = {"GeneratedBy": pipeline, "_neurozarr_provenance": provenance, **(meta or {})}
+		self.add(datatype, payload, meta, prefix=("derivatives", pipeline), existing=existing, **entities)
+
+	def add_array(self, name: str, data: Any, dims: tuple[str, ...], *, datatype: str,
+				  coords: dict[str, Any] | None = None, meta: dict[str, Any] | None = None,
+				  prefix: tuple[str, ...] = (), existing: ExistingPolicy | str = ExistingPolicy.ERROR,
+				  **entities: Any) -> None:
+		"""Store a named N-dimensional array under a neuroscience datatype."""
+		item = Array(Entities(self.sub_id, self._ses_id(), datatype, entities), name, data, dims,
+					 coords or {}, meta or {}, prefix)
+		self._repo._dispatch(item, ExistingPolicy(existing))
+
+
+class Subject(_ItemHost):
 	"""One participant, backed by their own repository.
 
-	Obtained from :meth:`Repo.subject` or :meth:`Repo.create_subject`. Add data
-	with :meth:`add_visit`; read it back with :meth:`visits`,
-	:meth:`recordings` and :meth:`tables`.
+	Obtained from :meth:`Repo.subject` or :meth:`Repo.create_subject`.
+
+	For a session-based study, add data with :meth:`add_visit` and the
+	methods on the :class:`Visit` it returns. For a session-less one, add
+	data directly with :meth:`add_recording`, :meth:`add_behavioral_table`,
+	:meth:`add_derivative` or :meth:`add_array` -- the same methods
+	:class:`Visit` has, inherited here, writing with no session segment in
+	the path rather than requiring one that doesn't exist for this data.
+
+	Read data back with :meth:`visits`, :meth:`recordings` and :meth:`tables`.
 
 	Attributes
 	----------
@@ -801,6 +1007,8 @@ class Subject:
 		Entities(sub_id)
 		self._repo = repo
 		self.sub_id = sub_id
+		# _ses_id() default (None) is correct here -- items added directly to a
+		# Subject carry no session segment; no need to override it.
 
 	def add_visit(self, ses_id: str, attrs: dict[str, Any] | None = None) -> "Visit":
 		"""Add a session to this subject — typically one clinic visit or upload day.
@@ -965,12 +1173,15 @@ class Subject:
 		return [v for v in views_in(self.root(version), self.sub_id, self._repo._write_back()) if isinstance(v, ExternalFileView)]
 
 
-class Visit:
+class Visit(_ItemHost):
 	"""One session of one subject.
 
 	Obtained from :meth:`Subject.add_visit` or :meth:`Subject.visit`. Throughout
 	this class, keyword arguments are BIDS entities (``task=``, ``run=``,
-	``acq=``, …) and determine where data lands in the tree.
+	``acq=``, …) and determine where data lands in the tree. Add data with
+	:meth:`add_recording`, :meth:`add_behavioral_table`, :meth:`add_derivative`
+	or :meth:`add_array`, inherited from the same place :class:`Subject` gets
+	its session-less equivalents from.
 
 	Attributes
 	----------
@@ -986,6 +1197,9 @@ class Visit:
 		self.sub_id = sub_id
 		self.ses_id = ses_id
 
+	def _ses_id(self) -> str | None:
+		return self.ses_id
+
 	def set_attrs(self, attrs: dict[str, Any]) -> None:
 		"""Add or update this session's metadata after creation.
 
@@ -998,132 +1212,6 @@ class Visit:
 			Metadata to merge into the session's own attrs.
 		"""
 		self._repo._add_attrs(Attrs((self.ses_id,), attrs), self.sub_id)
-
-	def add(self, datatype: str, payload: "mne.io.BaseRaw | pd.DataFrame",
-			meta: dict[str, Any] | None = None, prefix: tuple[str, ...] = (),
-			existing: ExistingPolicy | str = ExistingPolicy.ERROR, **entities: Any) -> None:
-		"""Store a recording or a table under any datatype.
-
-		Parameters
-		----------
-		datatype : str
-			BIDS datatype directory, e.g. ``"ieeg"``, ``"eeg"``, ``"beh"``.
-		payload : mne.io.BaseRaw or pandas.DataFrame
-			The data to store.
-		meta : dict, optional
-			Sidecar metadata to store alongside it.
-		prefix : tuple of str, optional
-			Extra path segments placed before the subject, e.g.
-			``("derivatives", "my-pipeline")``.
-		**entities
-			BIDS entities, e.g. ``task="Rest", run=1``.
-
-		Raises
-		------
-		TypeError
-			If ``payload`` is neither an mne ``Raw`` nor a DataFrame.
-
-		See Also
-		--------
-		add_recording : Shorthand for ``ieeg`` recordings.
-		add_behavioral_table : Shorthand for ``beh`` tables.
-		add_derivative : Store processed results under ``derivatives/``.
-		"""
-		e = Entities(self.sub_id, self.ses_id, datatype, entities)
-		item: Recording | Table
-		if isinstance(payload, mne.io.BaseRaw):
-			item = Recording(e, payload, meta or {}, prefix)
-		elif isinstance(payload, pd.DataFrame):
-			item = Table(e, "table", payload, meta or {}, prefix)
-		else:
-			raise TypeError(f"unsupported recording/table payload type {type(payload)!r}")
-		self._repo._dispatch(item, ExistingPolicy(existing))
-
-	def add_recording(self, raw: "mne.io.BaseRaw", meta: dict[str, Any] | None = None,
-					  *, existing: ExistingPolicy | str = ExistingPolicy.ERROR, **entities: Any) -> None:
-		"""Store a recording under the ``ieeg`` datatype.
-
-		Parameters
-		----------
-		raw : mne.io.BaseRaw
-			The recording to store.
-		meta : dict, optional
-			Sidecar metadata. Sampling frequency and channel names are taken
-			from ``raw`` itself when not given here.
-		**entities
-			BIDS entities, e.g. ``task="Rest", run=1``.
-		"""
-		self.add("ieeg", raw, meta, existing=existing, **entities)
-
-	def add_behavioral_table(self, df: pd.DataFrame, meta: dict[str, Any] | None = None,
-							 *, existing: ExistingPolicy | str = ExistingPolicy.ERROR,
-							 **entities: Any) -> None:
-		"""Store a table under the ``beh`` datatype.
-
-		Parameters
-		----------
-		df : pandas.DataFrame
-			The table to store. Column dtypes are preserved on read-back.
-		meta : dict, optional
-			Sidecar metadata.
-		**entities
-			BIDS entities, e.g. ``task="TherapyHistory"``.
-		"""
-		self.add("beh", df, meta, existing=existing, **entities)
-
-	def add_derivative(self, pipeline: str, payload: "mne.io.BaseRaw | pd.DataFrame",
-					   datatype: str = "ieeg", meta: dict[str, Any] | None = None,
-					   *, pipeline_version: str | None = None,
-					   parameters: dict[str, Any] | None = None,
-					   inputs: list[str] | None = None,
-					   existing: ExistingPolicy | str = ExistingPolicy.ERROR,
-					   **entities: Any) -> None:
-		"""Store a processed result under ``derivatives/<pipeline>/``.
-
-		This keeps analysis outputs separate from raw data, the way BIDS does.
-		Derivatives read back like any other data, through
-		:meth:`Subject.recordings`, :meth:`Subject.tables` or :meth:`Repo.find`,
-		with ``derivatives/<pipeline>/`` in their path.
-
-		Parameters
-		----------
-		pipeline : str
-			Name of the pipeline that produced this result, e.g.
-			``"my-filter"``. Recorded as ``GeneratedBy`` in the metadata.
-		payload : mne.io.BaseRaw or pandas.DataFrame
-			The processed result.
-		datatype : str, default "ieeg"
-			BIDS datatype directory to file it under.
-		meta : dict, optional
-			Additional sidecar metadata.
-		**entities
-			BIDS entities, e.g. ``task="Rest", run=1``.
-
-		Examples
-		--------
-		>>> filtered = raw.copy().filter(l_freq=1, h_freq=40)
-		>>> visit.add_derivative("my-filter", filtered, task="Rest", run=1)
-		"""
-		manifest = self._repo._manifest()
-		provenance = {
-			"kind": "derivative",
-			"pipeline": pipeline,
-			"pipeline_version": pipeline_version,
-			"parameters": parameters or {},
-			"inputs": inputs or [],
-			"source_dataset_id": manifest.dataset_id if manifest else None,
-		}
-		meta = {"GeneratedBy": pipeline, "_neurozarr_provenance": provenance, **(meta or {})}
-		self.add(datatype, payload, meta, prefix=("derivatives", pipeline), existing=existing, **entities)
-
-	def add_array(self, name: str, data: Any, dims: tuple[str, ...], *, datatype: str,
-				  coords: dict[str, Any] | None = None, meta: dict[str, Any] | None = None,
-				  prefix: tuple[str, ...] = (), existing: ExistingPolicy | str = ExistingPolicy.ERROR,
-				  **entities: Any) -> None:
-		"""Store a named N-dimensional array under a neuroscience datatype."""
-		item = Array(Entities(self.sub_id, self.ses_id, datatype, entities), name, data, dims,
-					 coords or {}, meta or {}, prefix)
-		self._repo._dispatch(item, ExistingPolicy(existing))
 
 	# ---- reading ----------------------------------------------------------
 
@@ -1177,6 +1265,45 @@ class Visit:
 		"""Every unsupported source file preserved by reference in this session."""
 		base = f"{self.sub_id}/{self.ses_id}"
 		return [v for v in views_in(self._group(version), base, self._repo._write_back()) if isinstance(v, ExternalFileView)]
+
+	def describe(self, version: str | None = None) -> list[dict[str, Any]]:
+		"""Every item in this session, with its kind, path, and BIDS entities.
+
+		Answers "what's actually in here, and what entity is each one" in one
+		call, across every item kind, instead of listing each kind separately
+		and reading ``.path``/``.entities`` off every result by hand.
+
+		Parameters
+		----------
+		version : str, optional
+			A tag or snapshot id. Default reads the current state.
+
+		Returns
+		-------
+		list of dict
+			One dict per item, with ``kind`` (``"recording"``, ``"table"``,
+			``"array"``, or ``"external_file"``), ``path``, and every BIDS
+			entity that item carries.
+
+		Examples
+		--------
+		>>> import pandas as pd
+		>>> pd.DataFrame(visit.describe())
+		"""
+		items: list[dict[str, Any]] = []
+		for r in self.recordings(version):
+			items.append({"kind": "recording", "path": r.path, **r.entities})
+		for t in self.tables(version):
+			items.append({"kind": "table", "path": f"{t.path}/{t.name}", **t.entities})
+		for a in self.arrays(version):
+			items.append({"kind": "array", "path": f"{a.path}/{a.name}", **a.entities})
+		for e in self.external_files(version):
+			items.append({"kind": "external_file", "path": f"{e.path}/{e.name}", **e.entities})
+		# recordings()/tables()/etc. come back in whatever order the underlying
+		# tree walk found them, not a useful one -- sort by path so items that
+		# sit next to each other in the store also read next to each other here.
+		items.sort(key=lambda item: item["path"])
+		return items
 
 	def recording(self, **entities: Any) -> "RecordingView":
 		"""Get the single recording in this session matching the given entities.

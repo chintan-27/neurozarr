@@ -92,7 +92,7 @@ And when a row needs handling the columns can't express, take over entirely:
 ManifestReader(df, row_reader=lambda row: my_custom_item(row))
 ```
 
-## By hand
+## Explicitly
 
 When you are building a dataset programmatically, or only have a few
 recordings, skip the readers entirely:

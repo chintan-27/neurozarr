@@ -11,3 +11,5 @@ build/
 .mypy_cache/
 .pytest_cache/
 AGENTS.md
+BRAVO
+examples/__marimo__/

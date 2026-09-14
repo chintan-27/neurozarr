@@ -69,19 +69,17 @@ def cmd_convert(args: argparse.Namespace) -> int:
 
 def cmd_info(args: argparse.Namespace) -> int:
 	repo = Repo.open(args.store)
-	subjects = repo.subjects()
-	if not subjects:
+	overview = repo.describe()
+	if not overview:
 		print(f"{args.store}: no subjects found", file=sys.stderr)
 		return 1
-	print(f"{args.store}: {len(subjects)} subject(s)")
-	for sub_id in subjects:
-		subject = repo.subject(sub_id)
-		visits = subject.visits()
-		print(f"  {sub_id}: {len(visits)} visit(s), "
-			  f"{len(subject.recordings())} recording(s), {len(subject.tables())} table(s), "
-			  f"{len(subject.arrays())} array(s), {len(subject.external_files())} external file(s)")
+	print(f"{args.store}: {len(overview)} subject(s)")
+	for row in overview:
+		print(f"  {row['sub_id']}: {row['visits']} visit(s), "
+			  f"{row['recordings']} recording(s), {row['tables']} table(s), "
+			  f"{row['arrays']} array(s), {row['external_files']} external file(s)")
 		if args.verbose:
-			for ses in visits:
+			for ses in repo.subject(row["sub_id"]).visits():
 				print(f"      {ses}")
 	return 0
 

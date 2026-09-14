@@ -6,6 +6,7 @@ no write conflicts. Reading EDF and compressing with zstd are both CPU-bound, so
 this uses processes rather than threads.
 """
 
+import logging
 import multiprocessing
 import warnings
 from concurrent.futures import ProcessPoolExecutor
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Iterator
 
 from .items import Attrs, Item, Reader
-from .log import logger
+from .log import logger, set_verbosity
 from .readers import BidsReader
 from .repo import Repo
 from .writer import CodecConfig, ExistingPolicy
@@ -39,8 +40,13 @@ class _SubjectOnly:
 
 
 def _convert_subject(job: tuple) -> tuple[str, int, str]:
-	"""Runs in a worker process: convert exactly one subject into its own repo."""
-	source, dest, sub_id, codec, message, existing = job
+	"""Runs in a worker process: convert exactly one subject into its own repo.
+
+	"spawn" gives this a fresh interpreter, so the parent's logging setup (and
+	everything else in memory) isn't inherited -- `verbose` has to be redone here."""
+	source, dest, sub_id, codec, message, existing, verbose = job
+	if verbose:
+		set_verbosity(logging.INFO)
 	repo = Repo.open(dest, mode="a", codec=codec)
 	reader = _SubjectOnly(BidsReader(source, subjects=[sub_id]), sub_id)
 	repo.ingest(reader, existing=existing)
@@ -55,7 +61,7 @@ def _convert_subject(job: tuple) -> tuple[str, int, str]:
 def convert_parallel(source: str | Path, dest: str | Path, workers: int | None = None,
 					 codec: CodecConfig | None = None, message: str = "convert",
 					 existing: ExistingPolicy | str = ExistingPolicy.ERROR,
-					 skip_existing: bool | None = None) -> dict[str, int]:
+					 skip_existing: bool | None = None, verbose: bool = False) -> dict[str, int]:
 	"""Convert a BIDS dataset using one worker process per subject.
 
 	Since a subject is the unit of work, the wall-clock time is bounded by the
@@ -78,6 +84,9 @@ def convert_parallel(source: str | Path, dest: str | Path, workers: int | None =
 		How to handle an item already present at the same path.
 	skip_existing : bool, optional
 		Deprecated alias for the skip/replace policies.
+	verbose : bool, default False
+		Log each worker's progress -- workers are separate processes, so this
+		is applied inside each one rather than inherited from the caller.
 
 	Returns
 	-------
@@ -94,6 +103,8 @@ def convert_parallel(source: str | Path, dest: str | Path, workers: int | None =
 	>>> convert_parallel("./BIDS", "./study.zarr", workers=6)
 	{'sub-001': 412, 'sub-002': 173, ...}
 	"""
+	if verbose:
+		set_verbosity(logging.INFO)
 	subjects = _subject_ids(source)
 	if not subjects:
 		raise ValueError(f"no sub-* directories in {source}")
@@ -113,7 +124,7 @@ def convert_parallel(source: str | Path, dest: str | Path, workers: int | None =
 	parent.save(message)
 
 	logger.info("converting %d subjects with %s workers", len(subjects), workers or "default")
-	jobs = [(str(source), str(dest), sub_id, codec, message, policy) for sub_id in subjects]
+	jobs = [(str(source), str(dest), sub_id, codec, message, policy, verbose) for sub_id in subjects]
 
 	# "spawn", not the Linux default "fork": the parent has already opened icechunk
 	# repositories, and forking a process with that runtime's threads live deadlocks

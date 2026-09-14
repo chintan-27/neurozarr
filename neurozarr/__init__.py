@@ -21,6 +21,8 @@ requirement on the input.
 
 from importlib.metadata import PackageNotFoundError, version
 
+import icechunk
+
 from .entities import Entities
 from .diagnostics import Severity, ValidationIssue, ValidationReport
 from .errors import (
@@ -39,6 +41,13 @@ from .storage import StorageFactory, StorageTarget, storage_from
 from .validate import inspect_source, inspect_store, validate_source
 from .verify import export_bids, verify
 from .writer import CodecConfig, ExistingPolicy, Writer
+
+# Icechunk's own Rust-side warnings (e.g. "LocalFileSystem storage is not safe
+# for concurrent commits") print regardless of RUST_LOG, and don't apply to how
+# neurozarr uses it -- each subject already gets its own repository, so the
+# concurrent-commit case it's warning about doesn't happen here. Silenced once,
+# at import time, so using neurozarr never requires knowing icechunk exists.
+icechunk.set_logs_filter("error")
 
 try:
 	__version__ = version("neurozarr")

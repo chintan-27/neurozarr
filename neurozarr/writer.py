@@ -14,7 +14,7 @@ from .constraints import validate_segment
 from .entities import Entities
 from .errors import ValidationError, WriteConflictError
 from .items import Array, Attrs, ExternalFile, Item, Recording, Table
-from .log import log_mem
+from .log import log_mem, log_progress, record_write
 
 
 def _copy_node(source: zarr.Group | zarr.Array, dest_parent: zarr.Group, dest_name: str) -> None:
@@ -100,9 +100,10 @@ class Writer:
 	is laid out by subject/session/datatype/entities following BIDS naming.
 	Not user-facing directly -- use Repo/Subject/Visit, which own a Writer."""
 
-	def __init__(self, session: icechunk.Session, codec: CodecConfig | None = None):
+	def __init__(self, session: icechunk.Session, codec: CodecConfig | None = None, label: str = ""):
 		self._session = session
 		self._codec = codec or CodecConfig()
+		self._label = label
 		# mode="a" (create if missing), never "w" -- "w" means "overwrite if exists",
 		# which silently wipes a store you reopened to add more data to.
 		self.root = zarr.open_group(store=session.store, mode="a")
@@ -130,6 +131,7 @@ class Writer:
 		group = self._group_for(item.prefix, item.entities)
 		if not self._should_write(group, "data", existing):
 			return False
+		log_progress("Writing recording", f"{group.path}/data", f"{len(item.raw.ch_names)} ch, {item.raw.n_times} samples")
 		attrs = dict(item.meta)
 		attrs["_neurozarr_item_type"] = "recording"
 
@@ -195,6 +197,7 @@ class Writer:
 			else:
 				data = physical.astype(storage_dtype)
 			array[:, start:stop] = data
+		record_write(array.nbytes)
 		log_mem()
 		return True
 
@@ -215,7 +218,9 @@ class Writer:
 		group = self._group_for(item.prefix, item.entities)
 		if not self._should_write(group, item.name, existing):
 			return False
+		log_progress("Writing table", f"{group.path}/{item.name}", f"{len(item.df.columns)} cols, {len(item.df)} rows")
 		util.create_table(group, item.name, item.df, item.meta)
+		record_write(int(item.df.memory_usage(deep=True).sum()))
 		log_mem()
 		return True
 
@@ -229,6 +234,7 @@ class Writer:
 			target = group[item.path[-1]]  # an existing item -- a plain Array included, not just a Group
 		else:
 			target = group.require_group(item.path[-1])
+		log_progress("Writing attrs", "/".join(item.path) or "(dataset root)")
 		util.set_attrs(target, item.attrs)
 		log_mem()
 
@@ -260,6 +266,7 @@ class Writer:
 		group = self._group_for(item.prefix, item.entities)
 		if not self._should_write(group, item.name, existing):
 			return False
+		log_progress("Writing external file", f"{group.path}/{item.name}", str(item.uri))
 		reference = group.create_group(item.name, overwrite=True)
 		util.set_attrs(reference, {
 			"_neurozarr_item_type": "external_file",
@@ -275,6 +282,7 @@ class Writer:
 		group = self._group_for(item.prefix, item.entities)
 		if not self._should_write(group, item.name, existing):
 			return False
+		log_progress("Writing array", f"{group.path}/{item.name}", f"shape {tuple(int(s) for s in item.data.shape)}")
 		shape = tuple(int(size) for size in item.data.shape)
 		dtype = np.dtype(item.data.dtype)
 		chunks = util.chunk_shape(shape, dtype.itemsize,
@@ -290,6 +298,7 @@ class Writer:
 			"coords": item.coords,
 			**item.meta,
 		})
+		record_write(array.nbytes)
 		log_mem()
 		return True
 
@@ -315,5 +324,6 @@ class Writer:
 		if not self._session.has_uncommitted_changes:
 			return None
 		snapshot = self._session.commit(message)
+		log_progress("Committed", self._label or "store", f"snapshot {snapshot}")
 		log_mem()
 		return snapshot

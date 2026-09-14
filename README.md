@@ -132,7 +132,7 @@ ManifestReader(df, row_reader=lambda row: my_custom_item(row))  # full control p
 
 Files are opened by extension: `.tsv`/`.csv` with pandas, signal formats with `mne.io.read_raw` (EDF, BDF, GDF, BrainVision, EEGLAB, FIF, CNT), and NIfTI (`.nii`/`.nii.gz`) if `nibabel` is installed (`pip install "neurozarr[imaging]"`). Anything else is recorded as a reference rather than crashing the run — or read as raw bytes with `unclaimed="embed"`. Add a decoder for another format with `register_format`; see [Extensions](docs/guide/extensions.md).
 
-### 2. By hand
+### 2. Explicitly
 
 ```python
 repo = Repo.create("./study.zarr")
@@ -245,6 +245,24 @@ Repo.create(lambda sub: make_storage(sub))   # custom storage per subject repo
 
 Extra keyword arguments (`region=`, `anonymous=`, `from_env=`, …) pass straight through to Icechunk.
 
+## Editing and removing data
+
+```python
+repo = Repo.open("./study.zarr", mode="a")
+
+repo.subject("sub-001").set_attrs({"handedness": "right"})   # merges into existing attrs
+repo.subject("sub-001").visit("ses-1").recordings()[0].rename("renamed-rec")
+repo.subject("sub-001").delete_visit("ses-2")                 # drops a whole session
+repo.delete_subject("sub-003")                                 # removes it from the index only
+
+repo.save("annotated and cleaned up")
+```
+
+`set_attrs`, `rename`, and `delete` work the same way on subjects, sessions,
+recordings, tables, arrays, and external files. Nothing is committed until
+`save`. See [Editing and removing data](docs/guide/edit.md) for the full
+picture, including why there's no `rename_subject`.
+
 ## Storing processed results
 
 Analysis outputs go under `derivatives/`, kept separate from raw data the way BIDS does it:
@@ -267,6 +285,8 @@ repo.ingest(reader, existing="skip")                    # only write what's new
 ```
 
 Subjects are independent repositories, so they convert concurrently. A subject is the unit of work, so the total time is bounded by the largest single subject however many workers you give it. Existing paths fail by default; select `existing="skip"` for incremental conversion or `existing="replace"` for deliberate replacement.
+
+Pass `verbose=True` to `Repo.create`/`Repo.open`/`convert_parallel` to see what a conversion is actually doing — one line per item written (what it is, its size, and current + peak process memory right before the write — install `psutil` for the current figure, peak alone otherwise), and one per commit. Quiet by default, as a library should be.
 
 ## Command line
 

@@ -71,3 +71,22 @@ def test_validate_flags_a_non_bids_directory(tmp_path):
 
 def test_validate_accepts_the_tiny_dataset(tiny_bids):
 	assert validate_bids(tiny_bids) == []
+
+
+def test_include_derivatives_flag(tiny_bids, store):
+	"""derivatives/ is read unconditionally by default; include_derivatives=False
+	must skip it entirely, converting only the dataset's raw data."""
+	deriv_beh = tiny_bids / "derivatives" / "my-pipeline" / "sub-001" / "ses-1" / "beh"
+	deriv_beh.mkdir(parents=True)
+	pd.DataFrame({"score": [1.0]}).to_csv(
+		deriv_beh / "sub-001_ses-1_task-summary_beh.tsv", sep="\t", index=False)
+
+	with_derivatives = Repo(store)
+	with_derivatives.ingest(BidsReader(tiny_bids))
+	with_derivatives.save("with derivatives")
+	assert any("derivatives" in t.path for t in Repo(store).subject("sub-001").tables())
+
+	without_derivatives = Repo(f"{store}-no-derivatives")
+	without_derivatives.ingest(BidsReader(tiny_bids, include_derivatives=False))
+	without_derivatives.save("without derivatives")
+	assert not any("derivatives" in t.path for t in without_derivatives.subject("sub-001").tables())

@@ -10,6 +10,7 @@ import pandas as pd
 from ..entities import Entities
 from ..errors import ValidationError
 from ..items import Attrs, ExternalFile, Item, Recording, Table
+from ..log import log_progress
 from .bids import MNE_READABLE_EXTS
 from .formats import UnclaimedPolicy, decode_embed, decoder_for
 from ..util import source_provenance
@@ -102,6 +103,8 @@ class ManifestReader:
 				)
 
 	def read(self) -> Iterator[Item]:
+		log_progress("Reading manifest", str(self.manifest_path) if self.manifest_path else "(inline DataFrame)",
+			f"{len(self.df)} rows")
 		for _, row in self.df.iterrows():
 			if self.row_reader:
 				yield self.row_reader(row)

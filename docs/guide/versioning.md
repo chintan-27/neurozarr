@@ -11,7 +11,7 @@ dataset_version = repo.save("initial conversion")
 {meth}`~neurozarr.Repo.save` commits each changed subject, then atomically
 publishes a dataset manifest that pins every subject to an exact snapshot. The
 returned ID identifies that complete dataset state. This applies equally to
-ingesting new data, building it up by hand, and the edits and deletions
+ingesting new data, building it up explicitly, and the edits and deletions
 covered in {doc}`edit` — none of it is permanent until `save()`.
 
 ## Transactions

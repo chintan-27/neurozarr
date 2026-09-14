@@ -128,3 +128,41 @@ def test_history_and_tags(written):
 	repo.tag("v1")
 	assert "v1" in repo.tags()
 	assert "v1" not in repo.tags("sub-001")
+
+
+def test_describe_summarizes_without_printing(store, raw, table):
+	"""Repo.describe()/Visit.describe() give the same information neurozarr
+	info prints, but as data a caller can build a table from directly."""
+	repo = Repo(store)
+	visit = repo.create_subject("sub-001", attrs={"age": 63}).add_visit("ses-1")
+	visit.add_recording(raw, task="Rest", run=1)
+	visit.add_behavioral_table(table, task="Log")
+	repo.save("test data")
+
+	overview = Repo(store).describe()
+	assert overview == [{
+		"sub_id": "sub-001", "visits": 1, "recordings": 1, "tables": 1,
+		"arrays": 0, "external_files": 0,
+	}]
+
+	items = Repo(store).subject("sub-001").visit("ses-1").describe()
+	kinds = {item["kind"] for item in items}
+	assert kinds == {"recording", "table"}
+	recording_item = next(item for item in items if item["kind"] == "recording")
+	assert recording_item["task"] == "Rest" and recording_item["run"] == "1"
+
+
+def test_subject_add_recording_is_session_less(store, raw, table):
+	"""Subject has the same add_recording/add_behavioral_table/add_array/
+	add_derivative methods as Visit, session-less: no add_visit() call, and
+	the resulting path carries no ses- segment at all."""
+	repo = Repo(store)
+	subject = repo.create_subject("sub-001")
+	subject.add_recording(raw, task="Rest")
+	subject.add_behavioral_table(table, task="Log")
+	repo.save("session-less data")
+
+	readback = Repo(store).subject("sub-001")
+	assert readback.visits() == []
+	assert [r.path for r in readback.recordings()] == ["sub-001/ieeg/task-Rest"]
+	assert [t.path for t in readback.tables()] == ["sub-001/beh/task-Log"]
