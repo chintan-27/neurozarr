@@ -11,10 +11,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 MYPY = Path(sys.executable).with_name("mypy")
 
-# Each test shells out to mypy, so these are slow next to the rest of the suite:
-#     pytest -m "not slow"   skips them
 pytestmark = [
-	pytest.mark.slow,
 	pytest.mark.skipif(not MYPY.exists(), reason="mypy not installed"),
 ]
 

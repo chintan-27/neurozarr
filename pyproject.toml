@@ -52,7 +52,6 @@ neurozarr = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["slow: shells out to a type checker; skip with -m 'not slow'"]
 timeout = 30
 
 [tool.mypy]

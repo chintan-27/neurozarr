@@ -5,7 +5,6 @@
 ```bash
 pip install -e ".[dev]"     # pytest, tqdm, mypy
 pytest                      # the whole suite
-pytest -m "not slow"        # skip the type-checker tests, ~2s
 ```
 
 Tests build their stores on `memory://`, so they run in a couple of seconds and

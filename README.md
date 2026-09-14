@@ -361,7 +361,7 @@ open docs/_build/index.html
 
 ```bash
 pip install -e ".[dev]"
-pytest -m "not slow"      # fast in-memory tests
+pytest                    # in-memory tests, no cleanup needed
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how the package is organized and how
