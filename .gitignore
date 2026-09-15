@@ -1,5 +1,6 @@
 .venv
 BIDS/
+datasets/
 __pycache__/
 *.pyc
 zarr/

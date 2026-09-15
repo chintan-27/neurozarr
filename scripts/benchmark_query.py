@@ -1,21 +1,18 @@
-"""Query benchmarks against a converted store.
+"""Query benchmarks against a converted store -- any dataset, not just BRAVO's.
 
-	python scripts/benchmark_query.py ./study.zarr
+	python scripts/benchmark_query.py ./study.zarr [sub_id] [--sample N]
 
-Ported to the neurozarr read API: each subject is its own Icechunk repository now,
-so there is no single root to index into with root["sub-001"].
+Each subject is its own Icechunk repository, so there is no single root to index
+into with root["sub-001"]; goes through Repo/Subject/Visit instead. `--sample` caps
+how many recordings a "read everything" query actually reads, so this stays a quick
+probe on a 100GB dataset instead of reading the whole thing.
 """
 
+import argparse
 import random
-import sys
 import time
 
-import zarr
-
 from neurozarr import Repo
-
-STORE = "zarr"
-SUBJECT = "sub-001"
 
 
 def timeIt(fn):
@@ -24,12 +21,22 @@ def timeIt(fn):
 	return result, time.perf_counter() - t0
 
 
-def main(store=STORE, sub_id=SUBJECT):
-	repo = Repo(store)
+def main() -> None:
+	parser = argparse.ArgumentParser(description=__doc__)
+	parser.add_argument("store")
+	parser.add_argument("sub_id", nargs="?", default=None, help="default: the store's first subject")
+	parser.add_argument("--sample", type=int, default=50, help="cap on recordings touched per query")
+	args = parser.parse_args()
+
+	repo = Repo.open(args.store)
+	sub_id = args.sub_id or next(iter(repo.subjects()), None)
+	if sub_id is None:
+		print(f"{args.store}: no subjects")
+		return
 	subject = repo.subject(sub_id)
 	recordings = subject.recordings()
 	if not recordings:
-		print(f"{store}: no recordings for {sub_id}")
+		print(f"{args.store}: no recordings for {sub_id}")
 		return
 
 	biggest = max(recordings, key=lambda r: r.shape[-1])
@@ -44,14 +51,16 @@ def main(store=STORE, sub_id=SUBJECT):
 	_, t = timeIt(lambda: biggest.channels())
 	print(f"channels table decode: {t*1000:.1f} ms")
 
-	# one session, every run in it
+	# one session, up to `sample` runs in it
 	ses_id = biggest.path.split("/")[1]
 	visit = subject.visit(ses_id)
-	_, t = timeIt(lambda: [r.data() for r in visit.recordings()])
-	print(f"full session read ({ses_id}, {len(visit.recordings())} runs): {t:.2f} s")
+	visit_sample = visit.recordings()[:args.sample]
+	_, t = timeIt(lambda: [r.data() for r in visit_sample])
+	print(f"session read ({ses_id}, {len(visit_sample)} of {len(visit.recordings())} runs): {t:.2f} s")
 
-	_, t = timeIt(lambda: [r.data() for r in recordings])
-	print(f"full subject read ({sub_id}, {len(recordings)} runs): {t:.2f} s")
+	subject_sample = recordings[:args.sample]
+	_, t = timeIt(lambda: [r.data() for r in subject_sample])
+	print(f"subject read ({sub_id}, {len(subject_sample)} of {len(recordings)} runs): {t:.2f} s")
 
 	def scanAttrs():
 		count = 0
@@ -64,10 +73,15 @@ def main(store=STORE, sub_id=SUBJECT):
 	count, t = timeIt(scanAttrs)
 	print(f"attrs-only scan, no chunk data ({count} nodes, full dataset): {t:.2f} s")
 
-	# cross-subject entity search, which the old single-repo layout had no API for
-	found, t = timeIt(lambda: list(repo.find(task="BrainSenseStream", acq="TD")))
-	print(f"cross-subject find(task=BrainSenseStream, acq=TD): {len(found)} hits in {t:.2f} s")
+	# cross-subject entity search -- reuses whatever entities the biggest run
+	# actually has (e.g. task/acq for BRAVO, task alone for a dataset with no
+	# acquisition split) rather than assuming any dataset-specific label
+	search_entities = {k: v for k, v in biggest.entities.items() if k in ("task", "acq")}
+	if search_entities:
+		found, t = timeIt(lambda: list(repo.find(**search_entities)))
+		query = ", ".join(f"{k}={v}" for k, v in search_entities.items())
+		print(f"cross-subject find({query}): {len(found)} hits in {t:.2f} s")
 
 
 if __name__ == "__main__":
-	main(*sys.argv[1:])
+	main()

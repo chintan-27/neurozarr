@@ -1,20 +1,29 @@
+"""Compression + read-speed + accessibility benchmark, generalized to run against
+any BIDS dataset (not just BRAVO's) so the same numbers are comparable across them.
+
+	python scripts/benchmark_compressors.py [bids_dir] [--name LABEL] [--sample N]
+
+`bids_dir` defaults to ./BIDS (BRAVO). `--sample` caps how many run groups/tables the
+per-codec query benchmarks touch, so a 100GB dataset finishes in the same ballpark of
+time as a 500MB one -- these are meant to compare codecs/datasets against each other,
+not to be an exhaustive read of everything ever written.
+"""
+
+import argparse
 import random
 import shutil
 import tempfile
 import time
 from pathlib import Path
 
-import icechunk as ic
 import numpy as np
-import zarr
 from zarr.codecs import BloscCodec, BloscShuffle, ZstdCodec
 from zarr.codecs.numcodecs import BZ2, LZ4, LZMA, Delta
 
 from neurozarr import BidsReader, CodecConfig, Repo
+from neurozarr.repo import Subject
 
 verbose = False
-BIDS_DIR = Path("./BIDS")
-REPO_DIR = Path(tempfile.mkdtemp())
 
 ZSTD19 = [ZstdCodec(level=19)]
 
@@ -37,101 +46,121 @@ CODECS = {
 	"int16+zstd-19+bitround-k7 (lossy)": ([], ZSTD19, 7, "int16"),
 }
 
+
 def _dir_size(path: Path) -> int:
 	return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
 
 
-def runQueries(sub: zarr.Group) -> dict:
-	"""sub is sub-001's own repo root (one repo per subject -- no shared root to index into)."""
+def run_queries(subject: Subject, sample: int) -> dict:
+	"""Goes through the public read API (RecordingView/TableView), not raw zarr
+	internals, so this works unchanged across table_schema_version bumps and any
+	BIDS dataset's own task/entity naming. Every query is capped at `sample` items
+	so this stays a comparable, bounded-time probe regardless of whether the
+	subject holds megabytes or hundreds of gigabytes."""
 	random.seed(0)
-	runGroups = [(p, n) for p, n in sub.members(max_depth=None) if isinstance(n, zarr.Group) and "data" in n]
-	biggest = max(runGroups, key=lambda pn: pn[1]["data"].shape[-1])
+	recordings = subject.recordings()
+	if not recordings:
+		return {}
+	biggest = max(recordings, key=lambda r: r.shape[-1])
 
 	t0 = time.perf_counter()
-	biggest[1]["data"][:]
-	fullRunS = time.perf_counter() - t0
+	biggest.data()
+	full_run_s = time.perf_counter() - t0
 
-	nSamp = biggest[1]["data"].shape[-1]
-	start = random.randint(0, max(0, nSamp - 1000))
+	n_samp = biggest.shape[-1]
+	start = random.randint(0, max(0, n_samp - 1000))
 	t0 = time.perf_counter()
-	biggest[1]["data"][:, start:start + 1000]
-	sliceMs = (time.perf_counter() - t0) * 1000
+	biggest.data(start=start, stop=start + 1000)
+	slice_ms = (time.perf_counter() - t0) * 1000
 
-	# scan every channels table for sub-001, filter rows whose first column contains "TD"
+	# decode up to `sample` recordings' channels tables (whatever the dataset calls them)
+	sampled = recordings.copy()
+	random.shuffle(sampled)
 	t0 = time.perf_counter()
-	for path, node in sub.members(max_depth=None):
-		if isinstance(node, zarr.Array) and path.endswith("channels"):
-			arr = node[:]
-			_ = [row for row in arr if "TD" in row[0]]
-	tableScanS = time.perf_counter() - t0
+	for rec in sampled[:sample]:
+		rec.channels()
+	table_scan_s = time.perf_counter() - t0
 
-	# cross-run aggregate: mean abs amplitude over every acq-TD run for sub-001
+	# cross-run aggregate: mean abs amplitude over up to `sample` recordings sharing
+	# the most common task entity, so this exercises "one task across many runs"
+	# without assuming any particular task name
+	tasks = [r.entities.get("task") for r in recordings if r.entities.get("task")]
+	target_task = max(set(tasks), key=tasks.count) if tasks else None
+	matching = [r for r in recordings if r.entities.get("task") == target_task] if target_task else recordings
+	matching = matching.copy()
+	random.shuffle(matching)
 	t0 = time.perf_counter()
 	total, count = 0.0, 0
-	for p, n in runGroups:
-		if "TD" in p:
-			vals = n["data"][:].astype(np.float64)
-			total += np.abs(vals).sum()
-			count += vals.size
-	aggregateS = time.perf_counter() - t0
+	for rec in matching[:sample]:
+		values, _ = rec.data()
+		total += np.abs(values).sum()
+		count += values.size
+	aggregate_s = time.perf_counter() - t0
 
-	# task scan: sum every BrainSenseSurvey run's data across sub-001's sessions
+	# random scattered access: small slice from `sample` random recordings
+	random.shuffle(sampled)
 	t0 = time.perf_counter()
-	for path, node in sub.members(max_depth=None):
-		if isinstance(node, zarr.Array) and path.endswith("/data") and "BrainSenseSurvey" in path:
-			_ = node[:].astype(np.float64).sum()
-	taskScanS = time.perf_counter() - t0
-
-	# random scattered access: small slice from 20 random data arrays within sub-001
-	allDataArrays = [n for p, n in sub.members(max_depth=None) if isinstance(n, zarr.Array) and p.endswith("/data")]
-	random.shuffle(allDataArrays)
-	t0 = time.perf_counter()
-	for arr in allDataArrays[:20]:
-		n = arr.shape[-1]
+	for rec in sampled[:sample]:
+		n = rec.shape[-1]
 		s = random.randint(0, max(0, n - 100))
-		_ = arr[:, s:s + 100]
-	randomAccessMs = (time.perf_counter() - t0) * 1000
+		rec.data(start=s, stop=s + 100)
+	random_access_ms = (time.perf_counter() - t0) * 1000
 
+	# listing cost: what it takes to discover this subject's recordings/tables at all
 	t0 = time.perf_counter()
-	for _, node in sub.members(max_depth=None):
-		_ = node.attrs.asdict()
-	attrsS = time.perf_counter() - t0
+	subject.recordings(), subject.tables(), subject.arrays(), subject.external_files()
+	listing_s = time.perf_counter() - t0
 
-	return dict(fullRunS=fullRunS, sliceMs=sliceMs, tableScanS=tableScanS,
-		aggregateS=aggregateS, taskScanS=taskScanS, randomAccessMs=randomAccessMs, attrsS=attrsS)
+	return dict(fullRunS=full_run_s, sliceMs=slice_ms, tableScanS=table_scan_s,
+		aggregateS=aggregate_s, randomAccessMs=random_access_ms, listingS=listing_s)
 
-def main():
-	cols = ["write_s", "commit_s", "full_run_s", "slice_ms", "table_scan_s", "aggregate_s", "task_scan_s", "rand_ms", "attrs_s", "stored_MB"]
-	print(f"{'codec':45} " + " ".join(f"{c:>12}" for c in cols))
-	for name, (filters, compressors, bitroundK, dtype) in CODECS.items():
+
+def main() -> None:
+	parser = argparse.ArgumentParser(description=__doc__)
+	parser.add_argument("bids_dir", nargs="?", default="./BIDS")
+	parser.add_argument("--name", default=None, help="label for the printed table (default: bids_dir's name)")
+	parser.add_argument("--sample", type=int, default=20, help="cap on run groups/tables touched per query")
+	args = parser.parse_args()
+
+	bids_dir = Path(args.bids_dir)
+	name = args.name or bids_dir.name
+	repo_dir = Path(tempfile.mkdtemp())
+
+	cols = ["write_s", "commit_s", "full_run_s", "slice_ms", "table_scan_s", "aggregate_s", "rand_ms", "listing_s", "stored_MB"]
+	print(f"dataset: {name} ({bids_dir})")
+	print(f"{'codec':55} " + " ".join(f"{c:>12}" for c in cols))
+	for codec_name, (filters, compressors, bitround_k, dtype) in CODECS.items():
 		# one repo per subject means no shared store to branch across configs --
 		# each codec gets its own fresh base_path instead.
-		codecDir = REPO_DIR / name
-		repo = Repo(codecDir, codec=CodecConfig(filters, compressors, bitroundK, dtype))
+		codec_dir = repo_dir / codec_name
+		repo = Repo.create(codec_dir, codec=CodecConfig(filters, compressors, bitround_k, dtype))
 
 		t0 = time.perf_counter()
-		repo.ingest(BidsReader(BIDS_DIR))
-		writeTime = time.perf_counter() - t0
+		repo.ingest(BidsReader(bids_dir))
+		write_time = time.perf_counter() - t0
 
 		t0 = time.perf_counter()
-		repo.save(f"convert with {name}")
-		commitTime = time.perf_counter() - t0
+		repo.save(f"convert with {codec_name}")
+		commit_time = time.perf_counter() - t0
 
-		storedBytes = _dir_size(codecDir)
+		stored_bytes = _dir_size(codec_dir)
 
-		subStorage = ic.local_filesystem_storage(str(codecDir / "sub-001"))
-		subRepo = ic.Repository.open(subStorage)
-		readSession = subRepo.readonly_session("main")
-		subRoot = zarr.open_group(store=readSession.store, mode="r")
-		q = runQueries(subRoot)
+		# benchmark whichever subject actually has recordings
+		q: dict = {}
+		for sub_id in repo.subjects():
+			subject = repo.subject(sub_id)
+			q = run_queries(subject, args.sample)
+			if q:
+				if verbose:
+					print(repo.root_of(sub_id).tree())
+				break
 
-		if verbose:
-			print(subRoot.tree())
-		vals = [writeTime, commitTime, q["fullRunS"], q["sliceMs"], q["tableScanS"],
-			q["aggregateS"], q["taskScanS"], q["randomAccessMs"], q["attrsS"], storedBytes / 1e6]
-		print(f"{name:45} " + " ".join(f"{v:12.2f}" for v in vals))
+		vals = [write_time, commit_time, q.get("fullRunS", 0.0), q.get("sliceMs", 0.0), q.get("tableScanS", 0.0),
+			q.get("aggregateS", 0.0), q.get("randomAccessMs", 0.0), q.get("listingS", 0.0), stored_bytes / 1e6]
+		print(f"{codec_name:55} " + " ".join(f"{v:12.2f}" for v in vals))
 
-	shutil.rmtree(REPO_DIR)
+	shutil.rmtree(repo_dir)
+
 
 if __name__ == "__main__":
 	main()
