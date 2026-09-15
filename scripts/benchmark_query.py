@@ -51,12 +51,15 @@ def main() -> None:
 	_, t = timeIt(lambda: biggest.channels())
 	print(f"channels table decode: {t*1000:.1f} ms")
 
-	# one session, up to `sample` runs in it
-	ses_id = biggest.path.split("/")[1]
-	visit = subject.visit(ses_id)
-	visit_sample = visit.recordings()[:args.sample]
-	_, t = timeIt(lambda: [r.data() for r in visit_sample])
-	print(f"session read ({ses_id}, {len(visit_sample)} of {len(visit.recordings())} runs): {t:.2f} s")
+	# one session, up to `sample` runs in it -- session-less subjects (no ses- segment
+	# in a recording's path at all, see Subject's own add_recording) have none
+	segments = biggest.path.split("/")
+	ses_id = segments[1] if len(segments) > 1 and segments[1].startswith("ses-") else None
+	if ses_id:
+		visit = subject.visit(ses_id)
+		visit_sample = visit.recordings()[:args.sample]
+		_, t = timeIt(lambda: [r.data() for r in visit_sample])
+		print(f"session read ({ses_id}, {len(visit_sample)} of {len(visit.recordings())} runs): {t:.2f} s")
 
 	subject_sample = recordings[:args.sample]
 	_, t = timeIt(lambda: [r.data() for r in subject_sample])
