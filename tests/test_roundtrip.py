@@ -103,6 +103,37 @@ def test_recording_without_annotations_has_no_events_table(written):
 	assert rec.raw().annotations is not None  # just empty, not broken
 
 
+def test_bids_events_sidecar_wins_over_annotations_written_first(store):
+	"""A source format that carries its own annotations (EEGLAB's boundary markers,
+	for instance) auto-derives an "events" table when a recording is added -- but a
+	reader streams that recording and its real BIDS events.tsv sidecar as two
+	independent items with no ordering guarantee between them (see BidsReader's
+	per-directory grouping). If the recording is processed first, its annotations
+	placeholder must not block the sidecar from landing right after -- the sidecar
+	is always the real data and should win regardless of which came first."""
+	import mne
+	import pandas as pd
+
+	from neurozarr.items import Entities, Table
+	from neurozarr.writer import ExistingPolicy
+
+	raw = mne.io.RawArray(np.zeros((2, 1000)),
+						  mne.create_info(["a", "b"], sfreq=100.0, ch_types="eeg"), verbose=False)
+	raw.set_annotations(mne.Annotations(onset=[0.5], duration=[0.0], description=["boundary"]), verbose=False)
+
+	repo = Repo(store)
+	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="X")
+
+	sidecar = pd.DataFrame({"onset": [1.0, 2.0], "duration": [0.0, 0.0],
+							 "trial_type": ["stim_on", "stim_off"]})
+	entities = Entities("sub-001", "ses-1", "ieeg", {"task": "X"})
+	repo._writer_for("sub-001").add_table(Table(entities, "events", sidecar, {}), ExistingPolicy.ERROR)
+	repo.save("recording then sidecar")
+
+	events = Repo(store).subject("sub-001").visit("ses-1").recording(task="X").events()
+	assert events["trial_type"].tolist() == ["stim_on", "stim_off"]
+
+
 def test_table_dtypes_are_restored(written, table):
 	tables = Repo(written).subject("sub-001").visit("ses-1").tables()
 	got = tables[0].df()

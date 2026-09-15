@@ -216,6 +216,14 @@ class Writer:
 
 	def add_table(self, item: Table, existing: ExistingPolicy = ExistingPolicy.ERROR) -> bool:
 		group = self._group_for(item.prefix, item.entities)
+		# _add_annotations's "events" placeholder is only ever a fallback for when a
+		# recording has no real BIDS events sidecar -- a genuine sidecar table always
+		# supersedes it, regardless of which of the two this ingest processed first
+		# (a reader streams a recording and its sidecar as independent items with no
+		# ordering guarantee between them).
+		if item.name == "events" and item.name in group \
+				and group[item.name].attrs.get("source") == "mne.Raw.annotations":
+			existing = ExistingPolicy.REPLACE
 		if not self._should_write(group, item.name, existing):
 			return False
 		log_progress("Writing table", f"{group.path}/{item.name}", f"{len(item.df.columns)} cols, {len(item.df)} rows")

@@ -74,6 +74,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `BidsReader` ingest could raise a spurious `WriteConflictError` on a fresh,
+  unmodified dataset: a recording's own annotations (e.g. EEGLAB's structural
+  `boundary` markers) auto-derive an `events` table as a fallback, but a
+  reader streams a recording and its real BIDS `events.tsv` sidecar as two
+  independent items with no ordering guarantee between them -- if the
+  recording landed first, its placeholder blocked the real sidecar from
+  writing at all. The sidecar now always supersedes the placeholder,
+  regardless of which is processed first.
 - Table string columns are stored as numpy's variable-length `StringDType`
   instead of a fixed-width `<U*>` array -- the latter maps to zarr's
   `FixedLengthUTF32`, a Zarr V3 extension with no ratified spec yet, so every
