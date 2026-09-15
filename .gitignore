@@ -1,6 +1,7 @@
 .venv
 BIDS/
 datasets/
+.bench_scratch/
 __pycache__/
 *.pyc
 zarr/

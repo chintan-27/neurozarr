@@ -120,11 +120,21 @@ def main() -> None:
 	parser.add_argument("bids_dir", nargs="?", default="./BIDS")
 	parser.add_argument("--name", default=None, help="label for the printed table (default: bids_dir's name)")
 	parser.add_argument("--sample", type=int, default=20, help="cap on run groups/tables touched per query")
+	parser.add_argument("--subjects", default=None,
+						 help="comma-separated subject ids to ingest (default: the whole dataset -- "
+							  "scope this on anything with more than a handful of subjects)")
 	args = parser.parse_args()
 
 	bids_dir = Path(args.bids_dir)
 	name = args.name or bids_dir.name
-	repo_dir = Path(tempfile.mkdtemp())
+	subjects = args.subjects.split(",") if args.subjects else None
+	# Not tempfile.mkdtemp()'s default location: /tmp is commonly a small,
+	# RAM-backed tmpfs, and a full 14-codec sweep's converted output for even a
+	# modest subject can run into multiple GB -- scratch next to the repo, on
+	# real disk, instead.
+	scratch_root = Path(__file__).resolve().parent.parent / ".bench_scratch"
+	scratch_root.mkdir(exist_ok=True)
+	repo_dir = Path(tempfile.mkdtemp(dir=scratch_root))
 
 	cols = ["write_s", "commit_s", "full_run_s", "slice_ms", "table_scan_s", "aggregate_s", "rand_ms", "listing_s", "stored_MB"]
 	print(f"dataset: {name} ({bids_dir})")
@@ -133,31 +143,37 @@ def main() -> None:
 		# one repo per subject means no shared store to branch across configs --
 		# each codec gets its own fresh base_path instead.
 		codec_dir = repo_dir / codec_name
-		repo = Repo.create(codec_dir, codec=CodecConfig(filters, compressors, bitround_k, dtype))
+		try:
+			repo = Repo.create(codec_dir, codec=CodecConfig(filters, compressors, bitround_k, dtype))
 
-		t0 = time.perf_counter()
-		repo.ingest(BidsReader(bids_dir))
-		write_time = time.perf_counter() - t0
+			t0 = time.perf_counter()
+			repo.ingest(BidsReader(bids_dir, subjects=subjects))
+			write_time = time.perf_counter() - t0
 
-		t0 = time.perf_counter()
-		repo.save(f"convert with {codec_name}")
-		commit_time = time.perf_counter() - t0
+			t0 = time.perf_counter()
+			repo.save(f"convert with {codec_name}")
+			commit_time = time.perf_counter() - t0
 
-		stored_bytes = _dir_size(codec_dir)
+			stored_bytes = _dir_size(codec_dir)
 
-		# benchmark whichever subject actually has recordings
-		q: dict = {}
-		for sub_id in repo.subjects():
-			subject = repo.subject(sub_id)
-			q = run_queries(subject, args.sample)
-			if q:
-				if verbose:
-					print(repo.root_of(sub_id).tree())
-				break
+			# benchmark whichever subject actually has recordings
+			q: dict = {}
+			for sub_id in repo.subjects():
+				subject = repo.subject(sub_id)
+				q = run_queries(subject, args.sample)
+				if q:
+					if verbose:
+						print(repo.root_of(sub_id).tree())
+					break
 
-		vals = [write_time, commit_time, q.get("fullRunS", 0.0), q.get("sliceMs", 0.0), q.get("tableScanS", 0.0),
-			q.get("aggregateS", 0.0), q.get("randomAccessMs", 0.0), q.get("listingS", 0.0), stored_bytes / 1e6]
-		print(f"{codec_name:55} " + " ".join(f"{v:12.2f}" for v in vals))
+			vals = [write_time, commit_time, q.get("fullRunS", 0.0), q.get("sliceMs", 0.0), q.get("tableScanS", 0.0),
+				q.get("aggregateS", 0.0), q.get("randomAccessMs", 0.0), q.get("listingS", 0.0), stored_bytes / 1e6]
+			print(f"{codec_name:55} " + " ".join(f"{v:12.2f}" for v in vals))
+		except Exception as exc:
+			# One misbehaving codec (e.g. a numcodecs filter that mishandles a
+			# ragged final chunk on some particular data shape) shouldn't cost the
+			# whole comparison -- report it and move on to the rest.
+			print(f"{codec_name:55} FAILED: {exc!r}")
 
 	shutil.rmtree(repo_dir)
 
