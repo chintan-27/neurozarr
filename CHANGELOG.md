@@ -74,6 +74,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Table string columns are stored as numpy's variable-length `StringDType`
+  instead of a fixed-width `<U*>` array -- the latter maps to zarr's
+  `FixedLengthUTF32`, a Zarr V3 extension with no ratified spec yet, so every
+  string column write raised an `UnstableSpecificationWarning`. `StringDType`
+  maps to zarr's core `"string"` type, which is spec'd and warning-free.
 - `requires-python` raised to `>=3.12` -- `icechunk>=2.1` dropped Python 3.11
   wheels, so declaring 3.11 support was already false; CI's `test` matrix and
   `quality`/`docs` jobs (previously pinned to 3.11) moved to 3.12 to match.

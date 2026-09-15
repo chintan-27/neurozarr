@@ -94,7 +94,12 @@ def _table_df(node: zarr.Group | zarr.Array, columns: list[str] | None = None) -
 				else:
 					data = pd.Series(values.astype(logical))
 			elif encoding == "string":
-				data = pd.Series(values.astype(str), dtype="object" if logical == "object" else "string")
+				# Not .astype(str): values may be numpy's variable-length
+				# StringDType (util.py's create_table writes string columns as
+				# that, not a fixed-width `<U*>` array), which numpy refuses to
+				# cast to a fixed-width str dtype of unspecified length.
+				# pandas builds a Series from either array kind directly.
+				data = pd.Series(values, dtype="object" if logical == "object" else "string")
 				data[mask] = None if logical == "object" else pd.NA
 			else:
 				data = pd.Series(values)

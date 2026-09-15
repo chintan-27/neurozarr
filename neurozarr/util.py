@@ -86,7 +86,11 @@ def _column_arrays(df: pd.DataFrame) -> list[dict[str, Any]]:
 				raise ValidationError(
 					f"table column {series.name!r} has unsupported object values; use a concrete scalar dtype"
 				)
-			values = series.fillna("").astype(str).to_numpy(dtype=str)
+			# StringDType, not a fixed-width `<U*>` array: zarr maps the latter to
+			# FixedLengthUTF32, a Zarr V3 extension with no ratified spec yet (and
+			# a real per-write UnstableSpecificationWarning) -- StringDType maps to
+			# zarr's core "string" type instead, spec'd and warning-free.
+			values = series.fillna("").astype(str).to_numpy(dtype=np.dtypes.StringDType())  # type: ignore[arg-type]
 			encoding = "string"
 			ordered = False
 		else:
