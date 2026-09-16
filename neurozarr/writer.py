@@ -18,9 +18,14 @@ from .log import log_mem, log_progress, record_write
 
 
 def _copy_node(source: zarr.Group | zarr.Array, dest_parent: zarr.Group, dest_name: str) -> None:
-	"""Recursively copy a zarr node under a new key. Neither zarr nor icechunk
-	has a move/rename primitive (zarr.Group.move raises NotImplementedError),
-	so a rename is a copy to the new key followed by deleting the old one."""
+	"""Recursively copy a zarr node under a new key. zarr has no move/rename
+	primitive (zarr.Group.move raises NotImplementedError). icechunk does
+	(Repository.rearrange_session().move()), but that session type commits
+	independently of a writable_session and has its own lifecycle -- adopting
+	it means rename()/delete() would need their own commit path, breaking the
+	"not committed until Repo.save()" contract every other write follows.
+	ponytail: copy-then-delete is O(size) instead of O(1); move to
+	rearrange_session if a rename-heavy workload ever makes that cost matter."""
 	if isinstance(source, zarr.Array):
 		dest_array = dest_parent.create_array(dest_name, shape=source.shape, dtype=source.dtype,
 											   chunks=source.chunks, overwrite=True)

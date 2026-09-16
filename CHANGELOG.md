@@ -59,9 +59,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   route back to their subject's writer; a view built directly from a bare
   zarr group has none and raises `TypeError` on `set_attrs`.
 - `rename()` and `delete()` on `RecordingView`, `TableView`, `ArrayView`, and
-  `ExternalFileView`, and `Subject.rename_visit`/`delete_visit`. Neither zarr
-  nor icechunk has a move primitive, so a rename copies the item to its new
-  key and deletes the old one, all within the same subject repository.
+  `ExternalFileView`, and `Subject.rename_visit`/`delete_visit`. zarr has no
+  move primitive; icechunk does (`Repository.rearrange_session().move()`), but
+  it commits independently of a `writable_session`, which conflicts with the
+  "not committed until `Repo.save()`" contract every other write here follows
+  -- so for now a rename copies the item to its new key and deletes the old
+  one, all within the same subject repository. (Thanks to @ianhi for the
+  correction -- see [#1](https://github.com/chintan-27/neurozarr/issues/1).)
 - `Repo.delete_subject`: removes a subject from schema v2's published index
   (`subjects`, `subject_snapshots`, `catalog`) without touching its own
   repository or version history -- a soft removal, consistent with
