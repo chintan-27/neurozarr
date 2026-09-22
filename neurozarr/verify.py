@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 
 from .log import logger
-from .readers import BidsReader
+from .readers import reader_for
 from .repo import Repo
 from .items import Recording, Table
 
@@ -19,7 +19,8 @@ if TYPE_CHECKING:
 
 
 def verify(source: "str | Path", store: "str | Path | icechunk.Storage",
-		   tolerance: float = 1e-9, sample_limit: int | None = None) -> list[str]:
+		   tolerance: float = 1e-9, sample_limit: int | None = None,
+		   reader: str | None = None) -> list[str]:
 	"""Check that a store faithfully matches the source it was converted from.
 
 	Re-reads the source and compares each recording's samples and each table's
@@ -28,7 +29,8 @@ def verify(source: "str | Path", store: "str | Path | icechunk.Storage",
 	Parameters
 	----------
 	source : str or pathlib.Path
-		The BIDS dataset the store was converted from.
+		The dataset the store was converted from -- a BIDS directory or a
+		manifest .csv/.tsv, picked the same way ``neurozarr convert`` does.
 	store : str or pathlib.Path or icechunk.Storage
 		The store to check.
 	tolerance : float, default 1e-9
@@ -36,6 +38,9 @@ def verify(source: "str | Path", store: "str | Path | icechunk.Storage",
 	sample_limit : int, optional
 		Stop after checking this many items, for a quick spot check. Default
 		checks everything.
+	reader : str, optional
+		Explicit reader name, for a source ``reader_for`` can't tell apart on
+		its own (mirrors ``convert``'s ``--reader``).
 
 	Returns
 	-------
@@ -51,7 +56,7 @@ def verify(source: "str | Path", store: "str | Path | icechunk.Storage",
 	checked = 0
 	roots: dict[str, "zarr.Group | None"] = {}
 
-	for item in BidsReader(source).read():
+	for item in reader_for(source, reader).read():
 		if sample_limit is not None and checked >= sample_limit:
 			break
 		if not isinstance(item, (Recording, Table)):

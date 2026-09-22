@@ -1,9 +1,12 @@
 """Compression + read-speed + accessibility benchmark, generalized to run against
-any BIDS dataset (not just BRAVO's) so the same numbers are comparable across them.
+any BIDS dataset (not just BRAVO's) -- or, with --reader manifest, any source
+ManifestReader can describe, BIDS or not (e.g. PhysioNet's CHB-MIT, see
+build_chbmit_manifest.py) -- so the same numbers are comparable across them.
 
-	python scripts/benchmark_compressors.py [bids_dir] [--name LABEL] [--sample N]
+	python scripts/benchmark_compressors.py [source] [--name LABEL] [--sample N]
+	python scripts/benchmark_compressors.py manifest.csv --reader manifest
 
-`bids_dir` defaults to ./BIDS (BRAVO). `--sample` caps how many run groups/tables the
+`source` defaults to ./BIDS (BRAVO). `--sample` caps how many run groups/tables the
 per-codec query benchmarks touch, so a 100GB dataset finishes in the same ballpark of
 time as a 500MB one -- these are meant to compare codecs/datasets against each other,
 not to be an exhaustive read of everything ever written.
@@ -17,10 +20,11 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from zarr.codecs import BloscCodec, BloscShuffle, ZstdCodec
 from zarr.codecs.numcodecs import BZ2, LZ4, LZMA, Delta
 
-from neurozarr import BidsReader, CodecConfig, Repo
+from neurozarr import BidsReader, CodecConfig, ManifestReader, Repo
 from neurozarr.repo import Subject
 
 verbose = False
@@ -115,19 +119,32 @@ def run_queries(subject: Subject, sample: int) -> dict:
 		aggregateS=aggregate_s, randomAccessMs=random_access_ms, listingS=listing_s)
 
 
+def _build_reader(args: argparse.Namespace) -> "BidsReader | ManifestReader":
+	subjects = args.subjects.split(",") if args.subjects else None
+	if args.reader == "manifest":
+		# ManifestReader has no subjects= filter of its own -- filter the table
+		# ourselves before constructing it, or a --subjects filter silently
+		# does nothing and every codec ingests the whole source.
+		df = pd.read_csv(args.source)
+		if subjects is not None:
+			df = df[df["sub"].isin(subjects)]
+		return ManifestReader(df)
+	return BidsReader(args.source, subjects=subjects)
+
+
 def main() -> None:
 	parser = argparse.ArgumentParser(description=__doc__)
-	parser.add_argument("bids_dir", nargs="?", default="./BIDS")
-	parser.add_argument("--name", default=None, help="label for the printed table (default: bids_dir's name)")
+	parser.add_argument("source", nargs="?", default="./BIDS", help="a BIDS directory, or a manifest .csv with --reader manifest")
+	parser.add_argument("--reader", choices=["bids", "manifest"], default="bids")
+	parser.add_argument("--name", default=None, help="label for the printed table (default: source's name)")
 	parser.add_argument("--sample", type=int, default=20, help="cap on run groups/tables touched per query")
 	parser.add_argument("--subjects", default=None,
-						 help="comma-separated subject ids to ingest (default: the whole dataset -- "
-							  "scope this on anything with more than a handful of subjects)")
+						 help="comma-separated subject ids to ingest, BidsReader only (default: the whole "
+							  "dataset -- scope this on anything with more than a handful of subjects)")
 	args = parser.parse_args()
 
-	bids_dir = Path(args.bids_dir)
-	name = args.name or bids_dir.name
-	subjects = args.subjects.split(",") if args.subjects else None
+	source = Path(args.source)
+	name = args.name or source.name
 	# Not tempfile.mkdtemp()'s default location: /tmp is commonly a small,
 	# RAM-backed tmpfs, and a full 14-codec sweep's converted output for even a
 	# modest subject can run into multiple GB -- scratch next to the repo, on
@@ -137,7 +154,7 @@ def main() -> None:
 	repo_dir = Path(tempfile.mkdtemp(dir=scratch_root))
 
 	cols = ["write_s", "commit_s", "full_run_s", "slice_ms", "table_scan_s", "aggregate_s", "rand_ms", "listing_s", "stored_MB"]
-	print(f"dataset: {name} ({bids_dir})")
+	print(f"dataset: {name} ({source}, reader={args.reader})")
 	print(f"{'codec':55} " + " ".join(f"{c:>12}" for c in cols))
 	for codec_name, (filters, compressors, bitround_k, dtype) in CODECS.items():
 		# one repo per subject means no shared store to branch across configs --
@@ -147,7 +164,7 @@ def main() -> None:
 			repo = Repo.create(codec_dir, codec=CodecConfig(filters, compressors, bitround_k, dtype))
 
 			t0 = time.perf_counter()
-			repo.ingest(BidsReader(bids_dir, subjects=subjects))
+			repo.ingest(_build_reader(args))
 			write_time = time.perf_counter() - t0
 
 			t0 = time.perf_counter()

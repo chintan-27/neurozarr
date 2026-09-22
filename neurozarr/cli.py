@@ -115,7 +115,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 def cmd_verify(args: argparse.Namespace) -> int:
 	from .verify import verify
 
-	problems = verify(args.source, args.store, sample_limit=args.limit)
+	problems = verify(args.source, args.store, sample_limit=args.limit, reader=args.reader)
 	if not problems:
 		print(f"{args.store}: matches {args.source}")
 		return 0
@@ -196,6 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
 	verify.add_argument("source", help="the BIDS directory it was converted from")
 	verify.add_argument("store")
 	verify.add_argument("--limit", type=int, metavar="N", help="stop after N items (quick check)")
+	verify.add_argument("--reader", help="explicit built-in or installed reader name")
 	verify.set_defaults(func=cmd_verify)
 
 	export = sub.add_parser("export", help="write a store back out as a BIDS folder")
