@@ -31,7 +31,11 @@ def convert_visit(repo: Repo, visit, ieeg_dir: Path, existing: ExistingPolicy) -
 	count = 0
 	for edf_path in sorted(ieeg_dir.glob("*_ieeg.edf")):
 		stem = edf_path.stem.removesuffix("_ieeg")
-		entities = parse_entities(stem)  # same parser BidsReader itself uses -- {"task": "seizure", "run": "01"}
+		# parse_entities parses the whole stem, sub-/ses- included -- passing those
+		# through unfiltered leaks them into the recording's path as extra entities
+		# (e.g. "task-seizure_run-01_ses-01_sub-01" instead of "task-seizure_run-01"),
+		# since visit.add_recording already places the recording under this sub/ses
+		entities = {k: v for k, v in parse_entities(stem).items() if k not in ("sub", "ses")}
 
 		raw = mne.io.read_raw(edf_path, preload=False, verbose=False)
 		visit.add_recording(raw, existing=existing, **entities)
@@ -49,6 +53,16 @@ def convert_visit(repo: Repo, visit, ieeg_dir: Path, existing: ExistingPolicy) -
 				repo._dispatch(table, existing)
 
 		count += 1
+
+	# One electrodes.tsv per session, sibling to the runs but describing no
+	# particular one -- same low-level path as channels/events, entities scoped
+	# to just (sub, ses, "ieeg") since it carries no task/run of its own.
+	electrodes_path = next(ieeg_dir.glob("*_electrodes.tsv"), None)
+	if electrodes_path is not None:
+		session_entities = Entities(visit.sub_id, visit.ses_id, "ieeg", {})
+		table = Table(session_entities, "electrodes", pd.read_csv(electrodes_path, sep="\t"), {})
+		repo._dispatch(table, existing)
+
 	return count
 
 
