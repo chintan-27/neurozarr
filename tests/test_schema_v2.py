@@ -168,10 +168,32 @@ def test_a_valid_catalog_still_prunes_subjects_that_cannot_match(store, raw):
 	repo.save("two tasks")
 
 	opened, scanned = Repo.open(store), []
-	real_subject = opened.subject
-	opened.subject = lambda sub_id: (scanned.append(sub_id), real_subject(sub_id))[1]
+	real_root_of = opened.root_of
+	opened.root_of = lambda sub_id, version=None: (scanned.append(sub_id), real_root_of(sub_id, version))[1]
 	assert [view.entities["task"] for view in opened.find(task="Rest")] == ["Rest"]
 	assert scanned == ["sub-001"], "the catalog should have spared sub-002 from being opened"
+
+
+def test_find_does_not_walk_when_the_catalog_is_current(store, raw, monkeypatch):
+	"""Regression: find() used to answer from the catalog only to decide which
+	subjects to re-walk -- it still fully re-walked every surviving one via
+	Subject.recordings() (a members(max_depth=None) scan of the whole tree).
+	Assert on whether that walk ran at all, not on wall-clock: a timing
+	assertion here would be flaky by construction."""
+	from neurozarr import Subject
+
+	repo = Repo.create(store)
+	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="Rest")
+	repo.save("one subject")
+
+	walked: list[str] = []
+	real_recordings = Subject.recordings
+	monkeypatch.setattr(Subject, "recordings",
+		lambda self, *a, **kw: (walked.append(self.sub_id), real_recordings(self, *a, **kw))[1])
+
+	found = list(Repo.open(store).find(task="Rest"))
+	assert [v.entities["task"] for v in found] == ["Rest"]
+	assert walked == [], "find() walked a subject its current catalog could already answer"
 
 
 def test_find_does_not_hide_subjects_whose_catalog_entry_is_unusable(store, raw):

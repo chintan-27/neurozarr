@@ -95,6 +95,14 @@ class Repo:
 		self._repos: dict[str, icechunk.Repository] = {}  # opened lazily
 		self._writers: dict[str, Writer] = {}  # opened lazily on first write
 		self._base_manifest: StoreManifest | None = None
+		# Read-side caches: a readonly_session("main") pins whatever snapshot
+		# "main" resolved to at open time, so a cached zarr.Group never goes
+		# stale on its own -- only a new commit (from this Repo or another)
+		# can outdate it, which is exactly when _invalidate_read_cache() is
+		# called. Conflict-detection during save() must see the true current
+		# state, so it bypasses these via _fetch_manifest/_fetch_dataset_root.
+		self._manifest_cache: dict[str | None, StoreManifest | None] = {}
+		self._root_cache: dict[tuple[str, str | None], zarr.Group] = {}
 		self._removed_subjects: set[str] = set()
 		self._failed = False
 
@@ -206,6 +214,7 @@ class Repo:
 		assert snapshot is not None
 		self._writers.clear()
 		self._base_manifest = manifest
+		self._invalidate_read_cache()
 		return snapshot
 
 	@staticmethod
@@ -215,7 +224,16 @@ class Repo:
 		except PackageNotFoundError:
 			return "0.0.0.dev0"
 
-	def _dataset_root(self, version: str | None = None) -> zarr.Group:
+	def _invalidate_read_cache(self) -> None:
+		"""Clear memoized manifest/root reads -- call after any commit this
+		Repo instance makes, so a read right after save() doesn't see the
+		pre-save state. Reads made *during* a save's own conflict detection
+		must never go through the cache at all; those call _fetch_manifest/
+		_fetch_dataset_root directly instead of clearing around them."""
+		self._manifest_cache.clear()
+		self._root_cache.clear()
+
+	def _fetch_dataset_root(self, version: str | None = None) -> zarr.Group:
 		repo = self._icechunk_repo("_dataset")
 		if version is not None:
 			session = repo.readonly_session(tag=version) if version in repo.list_tags() \
@@ -224,11 +242,17 @@ class Repo:
 			session = repo.readonly_session("main")
 		return zarr.open_group(store=session.store, mode="r")
 
-	def _manifest(self, version: str | None = None) -> StoreManifest | None:
+	def _dataset_root(self, version: str | None = None) -> zarr.Group:
+		key = ("_dataset", version)
+		if key not in self._root_cache:
+			self._root_cache[key] = self._fetch_dataset_root(version)
+		return self._root_cache[key]
+
+	def _fetch_manifest(self, version: str | None = None) -> StoreManifest | None:
 		if not self._repo_exists("_dataset"):
 			return None
 		try:
-			value = self._dataset_root(version).attrs.asdict().get(MANIFEST_ATTR)
+			value = self._fetch_dataset_root(version).attrs.asdict().get(MANIFEST_ATTR)
 		except _NO_COMMITTED_ROOT:
 			return None
 		if value is None:
@@ -246,6 +270,11 @@ class Repo:
 				f"store schema {manifest.schema_version} needs migration to schema {SCHEMA_VERSION}"
 			)
 		return manifest
+
+	def _manifest(self, version: str | None = None) -> StoreManifest | None:
+		if version not in self._manifest_cache:
+			self._manifest_cache[version] = self._fetch_manifest(version)
+		return self._manifest_cache[version]
 
 	def _subject_index(self) -> list[str]:
 		"""Subject ids recorded in the _dataset repo. Object stores can't be listed
@@ -434,7 +463,9 @@ class Repo:
 	def _publish_subject_snapshots(self, touched: dict[str, str], message: str) -> str | None:
 		"""Publish already-committed subject snapshots as one dataset version."""
 		base = self._base_manifest or self._manifest() or StoreManifest(created_with=self._package_version())
-		current = self._manifest()
+		# Conflict detection needs the true current state, not a memoized read
+		# from before this save started -- bypasses the read cache on purpose.
+		current = self._fetch_manifest()
 		if current is not None and current.subject_snapshots != base.subject_snapshots:
 			for sub_id, snapshot in touched.items():
 				base_snapshot = base.subject_snapshots.get(sub_id)
@@ -464,7 +495,7 @@ class Repo:
 		dataset_writer = self._writers.get("_dataset") or self._writer_for("_dataset")
 		pending_attrs = dataset_writer.root.attrs.asdict()
 		try:
-			committed_attrs = self._dataset_root().attrs.asdict()
+			committed_attrs = self._fetch_dataset_root().attrs.asdict()
 		except (*_NO_COMMITTED_ROOT, icechunk.IcechunkError, KeyError):
 			committed_attrs = {}
 		user_changes = {
@@ -487,7 +518,7 @@ class Repo:
 			# disjoint subject updates into a fresh dataset session and retry once.
 			self._writers.pop("_dataset", None)
 			self._repos.pop("_dataset", None)
-			current = self._manifest() or base
+			current = self._fetch_manifest() or base
 			for sub_id, snapshot in touched.items():
 				base_snapshot = base.subject_snapshots.get(sub_id)
 				current_snapshot = current.subject_snapshots.get(sub_id)
@@ -520,6 +551,7 @@ class Repo:
 		self._writers.clear()
 		self._removed_subjects.clear()
 		self._base_manifest = manifest
+		self._invalidate_read_cache()
 		return dataset_snapshot
 
 	@staticmethod
@@ -577,7 +609,7 @@ class Repo:
 		"""Upgrade a readable 0.1 store to the current manifest schema in place."""
 		if not self._repo_exists("_dataset"):
 			raise FileNotFoundError(f"no neurozarr store exists at {self.target}")
-		current = self._manifest()
+		current = self._fetch_manifest()  # "already migrated?" must see true current state
 		if current is not None:
 			return {"changed": False, "schema_version": current.schema_version,
 					"subjects": sorted(current.subject_snapshots)}
@@ -598,6 +630,7 @@ class Repo:
 		writer.save(f"migrate neurozarr schema to {SCHEMA_VERSION}")
 		self._writers.clear()
 		self._base_manifest = manifest
+		self._invalidate_read_cache()
 		return result
 
 	def _legacy_subjects(self) -> list[str]:
@@ -635,6 +668,12 @@ class Repo:
 		"""
 		if sub_id == "_dataset":
 			return self._dataset_root(version)
+		key = (sub_id, version)
+		if key not in self._root_cache:
+			self._root_cache[key] = self._fetch_subject_root(sub_id, version)
+		return self._root_cache[key]
+
+	def _fetch_subject_root(self, sub_id: str, version: str | None) -> zarr.Group:
 		Entities(sub_id)
 		manifest = self._manifest(version)
 		repo = self._icechunk_repo(sub_id)
@@ -721,9 +760,11 @@ class Repo:
 			 **entities: Any) -> Iterator[RecordingView]:
 		"""Search the whole store for recordings matching a set of BIDS entities.
 
-		Because each subject is a separate repository, searching every subject
-		opens a session per subject; pass ``sub`` to restrict the search when
-		you already know where to look.
+		Answered straight from each subject's catalog entry in the ``_dataset``
+		manifest when it's current for that subject (the common case) -- no
+		tree walk, one session opened only for a subject that actually has a
+		match. A subject whose catalog is missing or stale (older stores,
+		mid-migration) falls back to a full walk of just that subject.
 
 		Parameters
 		----------
@@ -747,24 +788,49 @@ class Repo:
 		"""
 		candidate_subjects = [sub] if sub else self.subjects()
 		manifest = self._manifest()
-		if manifest is not None and sub is None and entities:
-			# The catalog only ever prunes subjects it can currently vouch for. An entry
-			# that is missing, unstamped (written before entries carried a snapshot) or
-			# stamped with a snapshot this version no longer publishes means "unknown",
-			# never "no match" -- treating it as a match list would silently drop
-			# recordings that are really there.
-			candidate_subjects = [
-				sub_id for sub_id in candidate_subjects
-				if not self._catalog_is_current(manifest, sub_id)
-				or any(all(str(entry.get("entities", {}).get(k)) == str(v) for k, v in entities.items())
-					   for entry in manifest.catalog[sub_id].get("recordings", []))
-			]
 		for sub_id in candidate_subjects:
+			# The catalog is only ever trusted for a subject it can currently vouch
+			# for (see _catalog_is_current): missing, unstamped, or stamped with a
+			# snapshot this version no longer publishes all mean "unknown", so those
+			# subjects take the full-walk fallback rather than risk silently
+			# dropping a recording that's really there.
+			if manifest is not None and self._catalog_is_current(manifest, sub_id):
+				yield from self._find_in_catalog(manifest, sub_id, datatype, entities)
+				continue
 			for view in self.subject(sub_id).recordings():
 				if datatype and f"/{datatype}/" not in f"/{view.path}/":
 					continue
 				if all(str(view.entities.get(k)) == str(v) for k, v in entities.items()):
 					yield view
+
+	def _find_in_catalog(self, manifest: StoreManifest, sub_id: str, datatype: str | None,
+						  entities: dict[str, Any]) -> Iterator[RecordingView]:
+		"""find()'s fast path: filter the catalog's own path+entities index and
+		only then open the subject's root -- and only if something matched.
+
+		No existence check against the tree before indexing into it: a current
+		catalog entry (_catalog_is_current already gated this) was built by
+		walking this exact snapshot id, and root_of resolves the subject to
+		that same snapshot id, so every path it lists is guaranteed present.
+		Checking anyway would cost one zarr existence lookup per matching
+		recording -- for a query that matches most of a subject, that check
+		alone was measured as the dominant cost after the walk itself was
+		removed. If the invariant is ever wrong, indexing raises loudly
+		instead of silently dropping a recording that is really there.
+		"""
+		root: zarr.Group | None = None
+		write = self._write_back()
+		for entry in manifest.catalog[sub_id].get("recordings", []):
+			path = cast(str, entry["path"])
+			if datatype and f"/{datatype}/" not in f"/{path}/":
+				continue
+			rec_entities = cast("dict[str, Any]", entry.get("entities", {}))
+			if not all(str(rec_entities.get(k)) == str(v) for k, v in entities.items()):
+				continue
+			if root is None:
+				root = self.root_of(sub_id)
+			group_path = path.split("/", 1)[1] if "/" in path else ""
+			yield RecordingView(cast("zarr.Group", root[group_path]), rec_entities, path, write)
 
 	# ---- versioning -------------------------------------------------------
 
