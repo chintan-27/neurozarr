@@ -2,6 +2,9 @@
 BIDS/
 datasets/
 .bench_scratch/
+.bench_scratch_cluster/
+bench_results*.jsonl
+bench_results*_scratch/
 __pycache__/
 *.pyc
 zarr/

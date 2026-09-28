@@ -7,9 +7,18 @@ Skips a file whose expected size already matches what's on disk, so a killed run
 resumes by just re-running the same command. Downloads `--workers` files at once:
 a single S3 connection tops out well below this network's real capacity, so one
 file at a time leaves most of the available bandwidth unused on a multi-GB dataset.
+
+A resume check is size-match only (cheap, and good enough to resume a killed
+run), but that alone isn't provenance a paper can cite -- every freshly
+downloaded file's SHA-256 is recorded in `<dest>/_checksums.sha256`
+(`sha256sum -c`-compatible), appended immediately so a killed run doesn't lose
+already-computed hashes. A file this run *skipped* (already on disk, right
+size) keeps whatever checksum a prior run recorded for it; it isn't
+re-hashed, since that would make "resume" as slow as downloading again.
 """
 
 import argparse
+import hashlib
 import sys
 import threading
 import xml.etree.ElementTree as ET
@@ -20,6 +29,25 @@ import requests
 
 BUCKET = "https://s3.amazonaws.com/openneuro.org"
 NS = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+
+
+def _sha256_file(path: Path) -> str:
+	digest = hashlib.sha256()
+	with path.open("rb") as fid:
+		for block in iter(lambda: fid.read(1 << 20), b""):
+			digest.update(block)
+	return digest.hexdigest()
+
+
+def _load_checksums(path: Path) -> dict[str, str]:
+	if not path.exists():
+		return {}
+	checksums = {}
+	for line in path.read_text().splitlines():
+		digest, _, rel = line.partition("  ")
+		if digest and rel:
+			checksums[rel] = digest
+	return checksums
 
 
 def _list_objects(prefix: str):
@@ -41,16 +69,18 @@ def _list_objects(prefix: str):
 		token = root.find("s3:NextContinuationToken", NS).text
 
 
-def _download_one(key: str, size: int, out_path: Path) -> int:
+def _download_one(key: str, size: int, out_path: Path) -> bool:
+	"""Returns whether this file was freshly downloaded (and so needs
+	hashing) as opposed to already present at the right size."""
 	if out_path.exists() and out_path.stat().st_size == size:
-		return size
+		return False
 	out_path.parent.mkdir(parents=True, exist_ok=True)
 	with requests.get(f"{BUCKET}/{key}", stream=True, timeout=60) as resp:
 		resp.raise_for_status()
 		with open(out_path, "wb") as fid:
 			for chunk in resp.iter_content(chunk_size=1 << 20):
 				fid.write(chunk)
-	return size
+	return True
 
 
 def main(dataset_id: str, dest: str, workers: int) -> None:
@@ -60,6 +90,9 @@ def main(dataset_id: str, dest: str, workers: int) -> None:
 	total_bytes = sum(size for _, size in objects)
 	print(f"{dataset_id}: {len(objects)} files, {total_bytes / 1e9:.2f} GB, {workers} workers")
 
+	checksums_path = dest_dir / "_checksums.sha256"
+	checksums = _load_checksums(checksums_path)
+
 	done_bytes = 0
 	lock = threading.Lock()
 	with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -67,12 +100,19 @@ def main(dataset_id: str, dest: str, workers: int) -> None:
 			pool.submit(_download_one, key, size, dest_dir / key[len(prefix):]): (key, size)
 			for key, size in objects
 		}
-		for future in as_completed(futures):
-			key, size = futures[future]
-			future.result()
-			with lock:
-				done_bytes += size
-				print(f"  {done_bytes / 1e9:6.2f} / {total_bytes / 1e9:.2f} GB  {key}")
+		with checksums_path.open("a") as checksums_file:
+			for future in as_completed(futures):
+				key, size = futures[future]
+				rel = key[len(prefix):]
+				fresh = future.result()
+				if fresh or rel not in checksums:
+					digest = _sha256_file(dest_dir / rel)
+					checksums[rel] = digest
+					checksums_file.write(f"{digest}  {rel}\n")
+					checksums_file.flush()
+				with lock:
+					done_bytes += size
+					print(f"  {done_bytes / 1e9:6.2f} / {total_bytes / 1e9:.2f} GB  {key}")
 
 
 if __name__ == "__main__":
