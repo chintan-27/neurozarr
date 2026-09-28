@@ -8,8 +8,26 @@ def test_recording_data_roundtrips(written, raw):
 	rec = Repo(written).subject("sub-001").visit("ses-1").recording(task="Stream", run=1)
 	values, _ = rec.data()
 	assert values.shape == raw.get_data().shape
-	# int16 packing is lossy at the LSB, but only there
+	# `raw` has no _raw_extras[0]["cal"], so this is the float32 fallback path,
+	# not int16 packing -- see test_int16_calibration_path_roundtrips for that.
 	assert np.abs(values - raw.get_data()).max() < 1e-9
+
+
+def test_int16_calibration_path_roundtrips(store, raw_calibrated):
+	"""The default codec path (int16 packing keyed off _raw_extras[0]["cal"])
+	is what real EDF-family reads use, but no fixture exercised it until now --
+	`raw` above has no such calibration and only ever hits the float32
+	fallback. `raw_calibrated`'s values are exact multiples of its LSB, so a
+	correct implementation round-trips them exactly, not just within a
+	tolerance."""
+	repo = Repo(store)
+	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw_calibrated, task="Stream")
+	repo.save("calibrated")
+
+	rec = Repo(store).subject("sub-001").visit("ses-1").recording(task="Stream")
+	values, _ = rec.data()
+	assert rec.array.dtype == np.dtype("int16")
+	assert np.array_equal(values, raw_calibrated.get_data())
 
 
 def test_recording_rebuilds_mne_raw(written, raw):

@@ -83,6 +83,34 @@ def test_verify_passes_for_a_faithful_conversion(bids_source, store):
 	assert verify(bids_source, store) == []
 
 
+def test_verify_reports_a_differing_table_value(bids_source, store):
+	"""Row count alone wouldn't catch this -- verify() used to compare tables
+	by len() only, so a value that changed after conversion went unnoticed."""
+	repo = Repo(store)
+	repo.ingest(BidsReader(bids_source))
+	repo.save("converted")
+
+	events_path = bids_source / "sub-001" / "ses-1" / "ieeg" / "sub-001_ses-1_task-rest_run-1_events.tsv"
+	pd.DataFrame({"onset": [0.5], "duration": [999.0]}).to_csv(events_path, sep="\t", index=False)
+
+	problems = verify(bids_source, store)
+	assert any("duration" in p and "values differ" in p for p in problems)
+
+
+def test_verify_reports_a_differing_dataset_attrs(bids_source, store):
+	"""verify() used to skip Attrs items entirely -- dataset_description.json
+	diverging from what was stored went unnoticed."""
+	repo = Repo(store)
+	repo.ingest(BidsReader(bids_source))
+	repo.save("converted")
+
+	(bids_source / "dataset_description.json").write_text(
+		json.dumps({"Name": "Renamed", "BIDSVersion": "1.10.0"}))
+
+	problems = verify(bids_source, store)
+	assert any("metadata differs" in p for p in problems)
+
+
 def test_verify_reports_missing_data(bids_source, store):
 	repo = Repo.create(store)
 	repo.create_subject("sub-001").add_visit("ses-1")  # nothing actually ingested

@@ -6,16 +6,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
+import pandas as pd
+import zarr
 
 from .log import logger
 from .readers import reader_for
 from .repo import Repo
-from .items import Recording, Table
+from .items import Attrs, Recording, Table
 
 if TYPE_CHECKING:
 	import icechunk
 	import mne  # type: ignore[import-untyped]  # mne ships no type information
-	import zarr
 
 
 def verify(source: "str | Path", store: "str | Path | icechunk.Storage",
@@ -23,8 +24,9 @@ def verify(source: "str | Path", store: "str | Path | icechunk.Storage",
 		   reader: str | None = None) -> list[str]:
 	"""Check that a store faithfully matches the source it was converted from.
 
-	Re-reads the source and compares each recording's samples and each table's
-	row count against what the store holds.
+	Re-reads the source and compares each recording sample-for-sample, each
+	table cell-for-cell (values, dtypes, column names, and nulls), and each
+	item's sidecar metadata against what the store holds.
 
 	Parameters
 	----------
@@ -46,8 +48,8 @@ def verify(source: "str | Path", store: "str | Path | icechunk.Storage",
 	-------
 	list of str
 		One message per problem found: data missing from the store, a shape
-		mismatch, differing values, or a differing row count. An empty list
-		means the conversion is faithful.
+		mismatch, a differing value, dtype, column, or a metadata key that
+		doesn't match. An empty list means the conversion is faithful.
 	"""
 	from .read import RecordingView, _table_df
 
@@ -56,13 +58,7 @@ def verify(source: "str | Path", store: "str | Path | icechunk.Storage",
 	checked = 0
 	roots: dict[str, "zarr.Group | None"] = {}
 
-	for item in reader_for(source, reader).read():
-		if sample_limit is not None and checked >= sample_limit:
-			break
-		if not isinstance(item, (Recording, Table)):
-			continue
-
-		sub_id = item.entities.sub
+	def get_root(sub_id: str) -> "zarr.Group | None":
 		if sub_id not in roots:
 			try:
 				roots[sub_id] = repo.root_of(sub_id)
@@ -70,7 +66,32 @@ def verify(source: "str | Path", store: "str | Path | icechunk.Storage",
 				# nothing committed for this subject -- report its items as missing,
 				# which is more useful than one opaque "cannot open" line
 				roots[sub_id] = None
-		root = roots[sub_id]
+		return roots[sub_id]
+
+	for item in reader_for(source, reader).read():
+		if sample_limit is not None and checked >= sample_limit:
+			break
+
+		if isinstance(item, Attrs):
+			# Same routing rule as Repo._route_attrs: a "sub-XXX" segment anywhere
+			# in the path picks that subject's repo and is dropped; no such
+			# segment means the shared _dataset repo.
+			sub_id, stripped = Repo._route(item.path)
+			where = "/".join((sub_id, *stripped)) if stripped else sub_id
+			root = get_root(sub_id)
+			node = _navigate(root, stripped) if root is not None else None
+			if node is None:
+				problems.append(f"missing from store: {where}")
+				continue
+			checked += 1
+			problems.extend(_compare_attrs(where, item.attrs, node.attrs.asdict()))
+			continue
+
+		if not isinstance(item, (Recording, Table)):
+			continue
+
+		sub_id = item.entities.sub
+		root = get_root(sub_id)
 
 		# inside a subject's own repo the leading sub-XXX is dropped, as the writer does
 		group_path = "/".join((*item.prefix, *item.entities.path()[1:]))
@@ -91,14 +112,105 @@ def verify(source: "str | Path", store: "str | Path | icechunk.Storage",
 			expected = item.raw.get_data()
 			if values.shape != expected.shape:
 				problems.append(f"{where}: shape {values.shape} != source {expected.shape}")
-			elif not np.allclose(values, expected, atol=tolerance):
-				problems.append(f"{where}: values differ (max abs error {np.abs(values - expected).max():.3e})")
+			else:
+				max_err = float(np.abs(values - expected).max())
+				if not np.allclose(values, expected, atol=tolerance):
+					problems.append(f"{where}: values differ (max abs error {max_err:.3e})")
+				else:
+					logger.debug("%s: verified (max abs error %.3e)", where, max_err)
+			problems.extend(_compare_attrs(where, item.meta, group.attrs.asdict()))
 		else:
-			stored_rows = len(_table_df(group[name]))
-			if stored_rows != len(item.df):
-				problems.append(f"{where}: {stored_rows} rows != source {len(item.df)}")
+			stored = _table_df(group[name])
+			problems.extend(_compare_tables(where, stored, item.df))
+			problems.extend(_compare_attrs(where, item.meta, group[name].attrs.asdict()))
 
 	logger.info("verified %d items against %s", checked, source)
+	return problems
+
+
+def _navigate(root: "zarr.Group", path: tuple[str, ...]) -> "zarr.Group | None":
+	"""Walk a tuple of group names from root, or None if any segment is missing."""
+	node = root
+	for part in path:
+		if part not in node or not isinstance(node[part], zarr.Group):
+			return None
+		node = cast("zarr.Group", node[part])
+	return node
+
+
+def _compare_attrs(where: str, expected: dict[str, Any], stored: dict[str, Any]) -> list[str]:
+	"""Check that every key in ``expected`` (sidecar metadata a reader supplied)
+	survives in ``stored`` (the group's actual attrs) with an equal value.
+
+	A subset check, not full-dict equality: the writer adds its own bookkeeping
+	keys (``_neurozarr_item_type``, ``data_scale``, ``table_schema_version``,
+	inferred defaults, ...) on top of what a reader passed in, and those are not
+	part of what fidelity means here. Values are compared through a JSON
+	round-trip so a tuple in ``expected`` (which zarr attrs store as a JSON
+	list) doesn't read as a mismatch.
+	"""
+	canonical = cast("dict[str, Any]", json.loads(json.dumps(expected)))
+	missing = sorted(key for key in canonical if key not in stored)
+	if missing:
+		return [f"{where}: metadata missing from store: {missing}"]
+	differing = sorted(key for key in canonical if stored[key] != canonical[key])
+	if differing:
+		return [f"{where}: metadata differs for key(s): {differing}"]
+	return []
+
+
+def _dtype_compatible(a: Any, b: Any) -> bool:
+	"""Whether two column dtypes represent the same fidelity, even if their
+	exact repr differs.
+
+	pandas 3's new default text dtype (``"str"``) and the older nullable
+	``"string"`` extension dtype are both ``StringDtype``, differing only in
+	na_value/storage backend (``nan`` vs ``pd.NA``) -- not in the text they
+	hold. Treating that as a mismatch would flag every text column in every
+	table as "corrupted" on a newer pandas, which is a false alarm: the
+	values compared right after this check are what actually matters.
+	"""
+	return a == b or (pd.api.types.is_string_dtype(a) and pd.api.types.is_string_dtype(b))
+
+
+def _compare_tables(where: str, stored: "pd.DataFrame", expected: "pd.DataFrame") -> list[str]:
+	"""Compare a decoded stored table against the source DataFrame cell-for-cell.
+
+	Row count alone doesn't catch a dropped column, a dtype that silently
+	changed on round-trip, or a value that differs -- this checks all of them.
+	"""
+	if len(stored) != len(expected):
+		return [f"{where}: {len(stored)} rows != source {len(expected)}"]
+
+	problems: list[str] = []
+	stored_cols, expected_cols = list(stored.columns), list(expected.columns)
+	missing = [c for c in expected_cols if c not in stored_cols]
+	extra = [c for c in stored_cols if c not in expected_cols]
+	if missing:
+		problems.append(f"{where}: columns missing from store: {missing}")
+	if extra:
+		problems.append(f"{where}: extra columns in store: {extra}")
+
+	for col in expected_cols:
+		if col not in stored_cols:
+			continue
+		s_col, e_col = stored[col], expected[col]
+		if not _dtype_compatible(s_col.dtype, e_col.dtype):
+			problems.append(f"{where}: column {col!r} dtype {s_col.dtype} != source {e_col.dtype}")
+			continue  # comparing values across mismatched dtypes isn't meaningful
+
+		s_null, e_null = s_col.isna(), e_col.isna()
+		if not s_null.equals(e_null):
+			problems.append(f"{where}: column {col!r} null mask differs in {int((s_null != e_null).sum())} row(s)")
+			continue
+
+		try:
+			equal = ((s_col == e_col) | s_null).to_numpy(dtype=bool)
+		except (TypeError, ValueError):
+			equal = np.array([a == b or bool(m) for a, b, m in zip(s_col, e_col, s_null)])
+		if not equal.all():
+			problems.append(f"{where}: column {col!r} values differ in {int((~equal).sum())} row(s)")
+
 	return problems
 
 
