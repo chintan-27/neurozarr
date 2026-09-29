@@ -360,11 +360,19 @@ class Hdf5Arm:
 				if not isinstance(item, Recording):
 					continue
 				rec_id = _rec_id(item.entities)
-				data = item.raw.get_data().astype("float32")
-				chunks = util.chunk_shape(data.shape, data.itemsize, 8 * 1024 * 1024, 65536)
+				shape = (len(item.raw.ch_names), int(item.raw.n_times))
+				chunks = util.chunk_shape(shape, np.dtype("float32").itemsize, 8 * 1024 * 1024, 65536)
 				grp = f.require_group(rec_id)
-				ds = grp.create_dataset("data", data=data, chunks=chunks,
+				ds = grp.create_dataset("data", shape=shape, dtype="float32", chunks=chunks,
 										 compression="gzip", compression_opts=4, shuffle=True)
+				# Stream chunk-by-chunk like neurozarr's own writer does --
+				# item.raw.get_data() with no start/stop loads the whole
+				# recording at once, which is what OOM-killed this arm on a
+				# real 165GB dataset (a single large recording, not the
+				# "many subjects" shape the other OOM fix addressed).
+				for start in range(0, shape[-1], chunks[-1]):
+					stop = min(shape[-1], start + chunks[-1])
+					ds[:, start:stop] = item.raw.get_data(start=start, stop=stop).astype("float32")
 				ds.attrs["sfreq"] = float(item.raw.info["sfreq"])
 				ds.attrs["ch_names"] = list(item.raw.ch_names)
 				for key, value in item.entities.extra.items():
