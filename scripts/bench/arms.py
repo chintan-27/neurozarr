@@ -84,48 +84,67 @@ class RawArm:
 
 
 class RawStore:
+	"""Holds only a file path + cheap metadata per recording, not a live mne
+	Raw handle for every one -- a dataset with hundreds of subjects (measured:
+	185, real OOM at 32GB) means hundreds of simultaneously-open Raw objects
+	if discovery holds onto what BidsReader hands it. mne.io.read_raw with
+	preload=False doesn't load samples, but each Raw's own info/annotation
+	structures still add up across that many live objects. Only the one
+	recording actually being read is ever open at a time."""
+
 	def __init__(self, dest: Path):
 		from neurozarr.readers import reader_for
 		from neurozarr.items import Recording
 
 		source = next(Path(dest).iterdir())
-		self._raws: dict[str, Any] = {}
+		self._paths: dict[str, Path] = {}
 		self._info: dict[str, RecInfo] = {}
+		self._cache: tuple[str, Any] | None = None
 		for item in reader_for(source).read():
 			if not isinstance(item, Recording):
 				continue
 			rec_id = _rec_id(item.entities)
-			self._raws[rec_id] = item.raw
+			self._paths[rec_id] = Path(item.raw.filenames[0])
 			self._info[rec_id] = RecInfo(
 				id=rec_id, entities=dict(item.entities.extra),
 				n_channels=len(item.raw.ch_names), n_samples=int(item.raw.n_times),
 				sfreq=float(item.raw.info["sfreq"]), chunk_shape=None,
 			)
+			# item.raw is now unreferenced and can be garbage-collected before
+			# the next iteration opens the next file.
+
+	def _raw(self, rec_id: str) -> Any:
+		import mne
+		if self._cache is not None and self._cache[0] == rec_id:
+			return self._cache[1]
+		raw = mne.io.read_raw(self._paths[rec_id], preload=False, verbose=False)
+		self._cache = (rec_id, raw)
+		return raw
 
 	def recordings(self) -> list[RecInfo]:
 		return list(self._info.values())
 
 	def full_read(self, rec_id: str) -> np.ndarray:
-		return self._raws[rec_id].get_data()
+		return self._raw(rec_id).get_data()
 
 	def window_read(self, rec_id: str, start: int, n: int) -> np.ndarray:
-		return self._raws[rec_id].get_data(start=start, stop=start + n)
+		return self._raw(rec_id).get_data(start=start, stop=start + n)
 
 	def channel_read(self, rec_id: str, channel: int) -> np.ndarray:
-		return self._raws[rec_id].get_data(picks=[channel])[0]
+		return self._raw(rec_id).get_data(picks=[channel])[0]
 
 	def search(self, **entities: str) -> list[str]:
 		return [rid for rid, info in self._info.items()
 				if all(str(info.entities.get(k)) == str(v) for k, v in entities.items())]
 
 	def sequential_scan(self, rec_id: str, block_samples: int) -> Iterator[np.ndarray]:
-		raw = self._raws[rec_id]
+		raw = self._raw(rec_id)
 		n = int(raw.n_times)
 		for start in range(0, n, block_samples):
 			yield raw.get_data(start=start, stop=min(n, start + block_samples))
 
 	def close(self) -> None:
-		pass
+		self._cache = None
 
 
 # ---------------------------------------------------------------------------
@@ -153,39 +172,65 @@ class NeurozarrArm:
 
 
 class NeurozarrStore:
+	"""Holds only lightweight RecInfo per recording, not a live RecordingView
+	for every one, and explicitly drops each subject's opened icechunk
+	session/root before moving to the next -- Repo caches every root it opens
+	for its own lifetime (deliberate, see repo.py's _invalidate_read_cache:
+	it's what makes repeated find() calls fast), which is fine for a handful
+	of subjects but pins real memory across hundreds (measured: OOM at 32GB
+	on a 185-subject store, discovery alone, after conversion had already
+	succeeded). Reaches into Repo's cache dicts directly rather than adding a
+	bound-the-cache-size knob to the library for a harness-only need."""
+
 	def __init__(self, dest: Path):
 		from neurozarr import Repo
 
 		self._repo = Repo.open(dest)
-		self._recs: dict[str, Any] = {}
+		self._sub_of: dict[str, str] = {}
+		self._info: dict[str, RecInfo] = {}
+		self._cache: tuple[str, Any] | None = None
 		for sub_id in self._repo.subjects():
 			for rec in self._repo.subject(sub_id).recordings():
-				self._recs[rec.path] = rec
+				self._sub_of[rec.path] = sub_id
+				self._info[rec.path] = RecInfo(
+					id=rec.path, entities=dict(rec.entities), n_channels=rec.shape[0],
+					n_samples=rec.shape[-1], sfreq=float(rec.sfreq or 0.0), chunk_shape=rec.array.chunks,
+				)
+			self._drop_cached_subjects(keep=None)
+
+	def _drop_cached_subjects(self, keep: str | None) -> None:
+		self._repo._repos = {k: v for k, v in self._repo._repos.items() if k == keep}
+		self._repo._root_cache = {k: v for k, v in self._repo._root_cache.items() if k[0] == keep}
+
+	def _view(self, rec_id: str) -> Any:
+		if self._cache is not None and self._cache[0] == rec_id:
+			return self._cache[1]
+		sub_id = self._sub_of[rec_id]
+		view = next(v for v in self._repo.subject(sub_id).recordings() if v.path == rec_id)
+		self._drop_cached_subjects(keep=sub_id)
+		self._cache = (rec_id, view)
+		return view
 
 	def recordings(self) -> list[RecInfo]:
-		return [
-			RecInfo(id=path, entities=dict(rec.entities), n_channels=rec.shape[0],
-					n_samples=rec.shape[-1], sfreq=float(rec.sfreq or 0.0), chunk_shape=rec.array.chunks)
-			for path, rec in self._recs.items()
-		]
+		return list(self._info.values())
 
 	def full_read(self, rec_id: str) -> np.ndarray:
-		values, _ = self._recs[rec_id].data()
+		values, _ = self._view(rec_id).data()
 		return values
 
 	def window_read(self, rec_id: str, start: int, n: int) -> np.ndarray:
-		values, _ = self._recs[rec_id].data(start=start, stop=start + n)
+		values, _ = self._view(rec_id).data(start=start, stop=start + n)
 		return values
 
 	def channel_read(self, rec_id: str, channel: int) -> np.ndarray:
-		values, _ = self._recs[rec_id].data(picks=[channel])
+		values, _ = self._view(rec_id).data(picks=[channel])
 		return values[0]
 
 	def search(self, **entities: str) -> list[str]:
 		return [rec.path for rec in self._repo.find(**entities)]
 
 	def sequential_scan(self, rec_id: str, block_samples: int) -> Iterator[np.ndarray]:
-		rec = self._recs[rec_id]
+		rec = self._view(rec_id)
 		n = rec.shape[-1]
 		for start in range(0, n, block_samples):
 			values, _ = rec.data(start=start, stop=min(n, start + block_samples))
