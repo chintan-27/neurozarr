@@ -45,14 +45,24 @@ CODECS = {
 	"int16+lzma": ([], [LZMA()], 0, "int16"),
 	"int16+bz2": ([], [BZ2()], 0, "int16"),
 	"int16+lz4": ([], [LZ4()], 0, "int16"),
-	"int16+zstd-19+bitround-k3 (lossy)": ([], ZSTD19, 3, "int16"),
-	"int16+zstd-19+bitround-k5 (lossy)": ([], ZSTD19, 5, "int16"),
-	"int16+zstd-19+bitround-k7 (lossy)": ([], ZSTD19, 7, "int16"),
 }
 
 
-def _dir_size(path: Path) -> int:
-	return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+def _dir_size(path: Path) -> dict[str, int]:
+	"""Split stored bytes into actual chunk data vs. Icechunk's own bookkeeping
+	(manifests/snapshots/transactions/overwritten) -- summing rglob("*") alone
+	conflates the two, so a codec comparison was really comparing
+	chunk-bytes-plus-a-roughly-fixed-overhead rather than chunk bytes alone."""
+	chunk_bytes = overhead_bytes = 0
+	for f in path.rglob("*"):
+		if not f.is_file():
+			continue
+		size = f.stat().st_size
+		if "chunks" in f.relative_to(path).parts:
+			chunk_bytes += size
+		else:
+			overhead_bytes += size
+	return {"chunk_bytes": chunk_bytes, "overhead_bytes": overhead_bytes, "total_bytes": chunk_bytes + overhead_bytes}
 
 
 def run_queries(subject: Subject, sample: int) -> dict:
@@ -146,14 +156,15 @@ def main() -> None:
 	source = Path(args.source)
 	name = args.name or source.name
 	# Not tempfile.mkdtemp()'s default location: /tmp is commonly a small,
-	# RAM-backed tmpfs, and a full 14-codec sweep's converted output for even a
+	# RAM-backed tmpfs, and a full 12-codec sweep's converted output for even a
 	# modest subject can run into multiple GB -- scratch next to the repo, on
 	# real disk, instead.
 	scratch_root = Path(__file__).resolve().parent.parent / ".bench_scratch"
 	scratch_root.mkdir(exist_ok=True)
 	repo_dir = Path(tempfile.mkdtemp(dir=scratch_root))
 
-	cols = ["write_s", "commit_s", "full_run_s", "slice_ms", "table_scan_s", "aggregate_s", "rand_ms", "listing_s", "stored_MB"]
+	cols = ["write_s", "commit_s", "full_run_s", "slice_ms", "table_scan_s", "aggregate_s", "rand_ms", "listing_s",
+			"chunk_MB", "overhead_MB"]
 	print(f"dataset: {name} ({source}, reader={args.reader})")
 	print(f"{'codec':55} " + " ".join(f"{c:>12}" for c in cols))
 	for codec_name, (filters, compressors, bitround_k, dtype) in CODECS.items():
@@ -184,7 +195,8 @@ def main() -> None:
 					break
 
 			vals = [write_time, commit_time, q.get("fullRunS", 0.0), q.get("sliceMs", 0.0), q.get("tableScanS", 0.0),
-				q.get("aggregateS", 0.0), q.get("randomAccessMs", 0.0), q.get("listingS", 0.0), stored_bytes / 1e6]
+				q.get("aggregateS", 0.0), q.get("randomAccessMs", 0.0), q.get("listingS", 0.0),
+				stored_bytes["chunk_bytes"] / 1e6, stored_bytes["overhead_bytes"] / 1e6]
 			print(f"{codec_name:55} " + " ".join(f"{v:12.2f}" for v in vals))
 		except Exception as exc:
 			# One misbehaving codec (e.g. a numcodecs filter that mishandles a

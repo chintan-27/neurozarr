@@ -58,7 +58,8 @@ def _rec_id(entities: Any) -> str:
 
 # ---------------------------------------------------------------------------
 # raw: the "do nothing" control -- no conversion, mne reads the source EDFs
-# directly with preload=False, exactly as BidsReader does for discovery.
+# directly with preload=False, exactly as the auto-detected reader
+# (BidsReader for a directory, ManifestReader for a .csv) does for discovery.
 # ---------------------------------------------------------------------------
 
 class RawArm:
@@ -67,23 +68,30 @@ class RawArm:
 	def convert(self, source: Path, dest: Path) -> None:
 		# Writes nothing -- a symlink costs nothing and keeps open(dest)
 		# uniform across arms (it always reads from `dest`, never `source`).
+		# dest holds a same-named symlink rather than being the symlink
+		# itself: reader_for() picks BidsReader vs ManifestReader by the
+		# path's own suffix (a directory, or a bare extensionless `dest`,
+		# both read as "no suffix" -> BidsReader), so a manifest .csv source
+		# needs its real filename to survive the symlink for auto-detection
+		# to still work.
 		if dest.is_symlink() or dest.exists():
 			dest.unlink() if dest.is_symlink() else shutil.rmtree(dest)
-		dest.parent.mkdir(parents=True, exist_ok=True)
-		dest.symlink_to(Path(source).resolve())
+		dest.mkdir(parents=True, exist_ok=True)
+		(dest / Path(source).name).symlink_to(Path(source).resolve())
 
 	def open(self, dest: Path) -> "RawStore":
 		return RawStore(dest)
 
 
 class RawStore:
-	def __init__(self, source: Path):
-		from neurozarr.readers import BidsReader
+	def __init__(self, dest: Path):
+		from neurozarr.readers import reader_for
 		from neurozarr.items import Recording
 
+		source = next(Path(dest).iterdir())
 		self._raws: dict[str, Any] = {}
 		self._info: dict[str, RecInfo] = {}
-		for item in BidsReader(source).read():
+		for item in reader_for(source).read():
 			if not isinstance(item, Recording):
 				continue
 			rec_id = _rec_id(item.entities)
@@ -128,10 +136,16 @@ class NeurozarrArm:
 	name = "neurozarr"
 
 	def convert(self, source: Path, dest: Path) -> None:
-		from neurozarr import BidsReader, Repo
+		from neurozarr import Repo
+		from neurozarr.readers import reader_for
 
+		# A benchmark run always wants a fresh store, never a resume/append --
+		# Repo.create() refuses an existing store, which a prior run killed
+		# mid-conversion (e.g. by a timeout) can leave behind.
+		if dest.exists():
+			shutil.rmtree(dest)
 		repo = Repo.create(dest)
-		repo.ingest(BidsReader(source))
+		repo.ingest(reader_for(source))
 		repo.save("bench")
 
 	def open(self, dest: Path) -> "NeurozarrStore":
@@ -198,14 +212,20 @@ class PlainZarrArm:
 
 	def convert(self, source: Path, dest: Path) -> None:
 		import zarr
-		from neurozarr import BidsReader, CodecConfig, Writer
+		from neurozarr import CodecConfig, Writer
 		from neurozarr.items import Recording, Table
+		from neurozarr.readers import reader_for
 
 		dest = Path(dest)
+		# Same reasoning as NeurozarrArm.convert(): a killed prior run can
+		# leave some subjects converted and others not, and add_recording's
+		# default existing="error" would then raise on the ones that exist.
+		if dest.exists():
+			shutil.rmtree(dest)
 		dest.mkdir(parents=True, exist_ok=True)
 		codec = CodecConfig()
 		writers: dict[str, Writer] = {}
-		for item in BidsReader(source).read():
+		for item in reader_for(source).read():
 			if not isinstance(item, (Recording, Table)):
 				continue
 			sub_id = item.entities.sub
@@ -284,13 +304,14 @@ class Hdf5Arm:
 
 	def convert(self, source: Path, dest: Path) -> None:
 		import h5py
-		from neurozarr import BidsReader, util
+		from neurozarr import util
 		from neurozarr.items import Recording
+		from neurozarr.readers import reader_for
 
 		dest = Path(dest)
 		dest.mkdir(parents=True, exist_ok=True)
 		with h5py.File(dest / "store.h5", "w") as f:
-			for item in BidsReader(source).read():
+			for item in reader_for(source).read():
 				if not isinstance(item, Recording):
 					continue
 				rec_id = _rec_id(item.entities)
@@ -379,13 +400,14 @@ def _build_nwb_files(source: Path) -> dict[tuple[str, str], Any]:
 	from pynwb.ecephys import ElectricalSeries
 	from hdmf.backends.hdf5.h5_utils import H5DataIO
 
-	from neurozarr import BidsReader, util
+	from neurozarr import util
 	from neurozarr.items import Recording
+	from neurozarr.readers import reader_for
 
 	files: dict[tuple[str, str], Any] = {}
 	electrode_rows: dict[tuple[str, str], dict[str, int]] = {}
 
-	for item in BidsReader(source).read():
+	for item in reader_for(source).read():
 		if not isinstance(item, Recording):
 			continue
 		key = _nwb_group_key(item.entities)
