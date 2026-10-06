@@ -19,7 +19,7 @@
 # NOTE: the CHB-MIT legs below never ran. CHB-MIT is a flat EDF dump, not BIDS,
 # so a BIDS reader pointed at datasets/chbmit finds zero recordings -- the
 # "CHB-MIT" step finished in ~2 s and this script's logged "(exit N)" was
-# unreliable ($? was read after a $(date) substitution reset it). BRAVO, RNS,
+# unreliable ($? was read after a $(date) substitution reset it). BRAVO,
 # HBN and Pediatric legs are real. The CHB-MIT work was redone, with a
 # zero-recordings preflight and correct exit codes, in phase5_chbmit_redo.slurm.
 
