@@ -94,9 +94,39 @@ def _filesystem_of(path: Path) -> str | None:
 	return lines[1].split()[1] if len(lines) > 1 else None
 
 
+def _neurozarr_module() -> str | None:
+	"""Where neurozarr was actually imported from -- the git SHA above is the
+	cwd's checkout, which says nothing about a run pointed at a different one
+	via PYTHONPATH (a pre-fix comparison run needs this to be provable)."""
+	try:
+		import neurozarr
+		return str(neurozarr.__file__)
+	except ImportError:
+		return None
+
+
+def store_size(dest: Path) -> tuple[int, int]:
+	"""(apparent bytes, file count) under dest. Apparent size, not blocks:
+	`du` rounds every tiny file up to a filesystem block, which inflates
+	many-small-files stores (plain zarr, NWB-Zarr) relative to a single large
+	HDF5 file and would put a storage-layout artifact into a size comparison.
+	Symlinks aren't followed, so the raw arm's link back to the source counts
+	as ~0 -- the source's own size is the raw row."""
+	total = count = 0
+	for dirpath, _, files in os.walk(dest):
+		for name in files:
+			try:
+				total += os.lstat(os.path.join(dirpath, name)).st_size
+				count += 1
+			except OSError:
+				pass
+	return total, count
+
+
 def environment_record(store_path: Path) -> dict[str, Any]:
 	return {
 		**_git_info(),
+		"neurozarr_module": _neurozarr_module(),
 		"pip_freeze": _pip_freeze(),
 		"python_version": platform.python_version(),
 		"os": platform.platform(),
@@ -262,16 +292,36 @@ def run_workload(workload: str, store: ArmStore, target: RecInfo) -> tuple[Any, 
 # ---------------------------------------------------------------------------
 
 def run(source: Path, arm_names: list[str], reps: int, warmup: int, cache: str,
-		out: Path, dataset_name: str, scratch: Path, checksum_source: bool) -> None:
+		out: Path, dataset_name: str, scratch: Path, checksum_source: bool,
+		arms: dict[str, Any] | None = None, reuse_existing: bool = False) -> None:
+	"""arms defaults to the registered ARMS by name; pass a custom dict (e.g.
+	several Hdf5Arm instances at different chunk shapes, under names that
+	aren't in ARMS) for a one-off sweep without touching the arm registry.
+
+	reuse_existing=True skips arm.convert() entirely when scratch/arm_name
+	already exists -- for a read-only measurement (cold-cache) pointed at a
+	store a previous conversion-timing run already built, re-converting
+	would just burn hours re-measuring something not being measured here."""
+	arms = arms if arms is not None else ARMS
 	env = environment_record(scratch)
 	fingerprint = dataset_fingerprint(source) if checksum_source else {"_skipped": True}  # type: ignore[dict-item]
 
 	with out.open("a") as sink:
 		for arm_name in arm_names:
-			arm = ARMS[arm_name]
+			arm = arms[arm_name]
 			dest = scratch / arm_name
-			print(f"[{arm_name}] converting...", file=sys.stderr)
-			_, convert_s = _time(lambda: arm.convert(source, dest))
+			# 1/5/15-minute load average on the node when this arm starts: a
+			# between-run timing difference with a high load behind it is
+			# contention, not the format -- the only way to tell the two apart
+			# afterward is to have recorded it.
+			load_before = os.getloadavg()
+			if reuse_existing and dest.exists():
+				print(f"[{arm_name}] reusing existing store at {dest}, skipping convert", file=sys.stderr)
+				convert_s = 0.0
+			else:
+				print(f"[{arm_name}] converting...", file=sys.stderr)
+				_, convert_s = _time(lambda: arm.convert(source, dest))
+			store_bytes, store_files = store_size(dest)
 
 			print(f"[{arm_name}] opening...", file=sys.stderr)
 			(store, target), open_s = _time(lambda: _open_and_pick(arm, dest))
@@ -287,6 +337,10 @@ def run(source: Path, arm_names: list[str], reps: int, warmup: int, cache: str,
 				"target_chunk_shape": list(target.chunk_shape) if target.chunk_shape else None,
 				"convert_s": convert_s,
 				"open_s": open_s,
+				"store_bytes_apparent": store_bytes,
+				"store_file_count": store_files,
+				"loadavg_before_convert": list(load_before),
+				"loadavg_at_open": list(os.getloadavg()),
 				**env,
 			}
 			sink.write(json.dumps({**base_row, "workload": "_convert", "rep": 0,
@@ -410,6 +464,9 @@ def main() -> None:
 	parser.add_argument("--scratch", default=None, help="where each arm's converted store is written (default: next to --out)")
 	parser.add_argument("--no-checksum-source", action="store_true",
 						 help="skip SHA-256 fingerprinting the source (slow on 100GB+ datasets)")
+	parser.add_argument("--reuse-existing", action="store_true",
+						 help="skip conversion when scratch/<arm> already exists -- for read-only "
+							  "measurements (e.g. cold-cache) against a store an earlier run already built")
 	args = parser.parse_args()
 
 	if args.summarize:
@@ -427,7 +484,8 @@ def main() -> None:
 		parser.error(f"unknown arm(s) {unknown}; choose from {sorted(ARMS)}")
 
 	run(source, arm_names, args.reps, args.warmup, args.cache, out,
-		args.name or source.name, scratch, not args.no_checksum_source)
+		args.name or source.name, scratch, not args.no_checksum_source,
+		reuse_existing=args.reuse_existing)
 
 
 if __name__ == "__main__":

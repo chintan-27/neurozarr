@@ -345,7 +345,19 @@ class PlainZarrStore:
 # ---------------------------------------------------------------------------
 
 class Hdf5Arm:
+	"""chunk_target_bytes/max_chunk_samples let a fairness sweep try HDF5 at
+	several chunk shapes instead of judging it on one arbitrary default --
+	same knobs neurozarr's own util.chunk_shape() takes. packed=True gives
+	HDF5 the same int16+per-channel-calibration domain assumption neurozarr
+	gets by default, instead of comparing packed-vs-unpacked as if that were
+	a format difference."""
 	name = "hdf5_mat73"
+
+	def __init__(self, chunk_target_bytes: int = 8 * 1024 * 1024, max_chunk_samples: int = 65536,
+				 packed: bool = False):
+		self.chunk_target_bytes = chunk_target_bytes
+		self.max_chunk_samples = max_chunk_samples
+		self.packed = packed
 
 	def convert(self, source: Path, dest: Path) -> None:
 		import h5py
@@ -361,9 +373,24 @@ class Hdf5Arm:
 					continue
 				rec_id = _rec_id(item.entities)
 				shape = (len(item.raw.ch_names), int(item.raw.n_times))
-				chunks = util.chunk_shape(shape, np.dtype("float32").itemsize, 8 * 1024 * 1024, 65536)
+
+				scale = offset = None
+				dtype = np.dtype("float32")
+				if self.packed:
+					extras = getattr(item.raw, "_raw_extras", None)
+					if extras and "cal" in extras[0]:
+						cal = np.array(extras[0]["cal"])
+						units = np.array(extras[0]["units"])
+						offsets = np.array(extras[0]["offsets"])
+						scale, offset = cal * units, offsets * units
+						if scale.shape == (shape[0],) and offset.shape == scale.shape and np.all(scale != 0):
+							dtype = np.dtype("int16")
+						else:
+							scale = offset = None  # fall back to float32, same as neurozarr's own writer would
+
+				chunks = util.chunk_shape(shape, dtype.itemsize, self.chunk_target_bytes, self.max_chunk_samples)
 				grp = f.require_group(rec_id)
-				ds = grp.create_dataset("data", shape=shape, dtype="float32", chunks=chunks,
+				ds = grp.create_dataset("data", shape=shape, dtype=dtype, chunks=chunks,
 										 compression="gzip", compression_opts=4, shuffle=True)
 				# Stream chunk-by-chunk like neurozarr's own writer does --
 				# item.raw.get_data() with no start/stop loads the whole
@@ -372,9 +399,17 @@ class Hdf5Arm:
 				# "many subjects" shape the other OOM fix addressed).
 				for start in range(0, shape[-1], chunks[-1]):
 					stop = min(shape[-1], start + chunks[-1])
-					ds[:, start:stop] = item.raw.get_data(start=start, stop=stop).astype("float32")
+					physical = item.raw.get_data(start=start, stop=stop)
+					if scale is not None:
+						encoded = np.round((physical - offset[:, None]) / scale[:, None])
+						ds[:, start:stop] = np.clip(encoded, -32768, 32767).astype("int16")
+					else:
+						ds[:, start:stop] = physical.astype("float32")
 				ds.attrs["sfreq"] = float(item.raw.info["sfreq"])
 				ds.attrs["ch_names"] = list(item.raw.ch_names)
+				if scale is not None:
+					ds.attrs["data_scale"] = scale.tolist()
+					ds.attrs["data_offset"] = offset.tolist()
 				for key, value in item.entities.extra.items():
 					grp.attrs[key] = str(value)
 
@@ -405,14 +440,29 @@ class Hdf5Store:
 								chunk_shape=ds.chunks))
 		return out
 
+	def _decode(self, ds: Any, raw: np.ndarray, channels: "slice | int | None" = None) -> np.ndarray:
+		"""Packed (int16) datasets store codes, not physical values -- decode
+		the same way neurozarr's own reader does, so a packed-vs-float32
+		comparison is still comparing the same physical quantity."""
+		if "data_scale" not in ds.attrs:
+			return raw
+		scale = np.asarray(ds.attrs["data_scale"])[channels] if channels is not None else np.asarray(ds.attrs["data_scale"])
+		offset = np.asarray(ds.attrs["data_offset"])[channels] if channels is not None else np.asarray(ds.attrs["data_offset"])
+		if raw.ndim == 1:  # single-channel read
+			return raw.astype("float64") * scale + offset
+		return raw.astype("float64") * scale[:, None] + offset[:, None]
+
 	def full_read(self, rec_id: str) -> np.ndarray:
-		return self._recs[rec_id][:, :]
+		ds = self._recs[rec_id]
+		return self._decode(ds, ds[:, :])
 
 	def window_read(self, rec_id: str, start: int, n: int) -> np.ndarray:
-		return self._recs[rec_id][:, start:start + n]
+		ds = self._recs[rec_id]
+		return self._decode(ds, ds[:, start:start + n])
 
 	def channel_read(self, rec_id: str, channel: int) -> np.ndarray:
-		return self._recs[rec_id][channel, :]
+		ds = self._recs[rec_id]
+		return self._decode(ds, ds[channel, :], channels=channel)
 
 	def search(self, **entities: str) -> list[str]:
 		return [rid for rid, ds in self._recs.items()
@@ -422,7 +472,7 @@ class Hdf5Store:
 		ds = self._recs[rec_id]
 		n = ds.shape[-1]
 		for start in range(0, n, block_samples):
-			yield ds[:, start:min(n, start + block_samples)]
+			yield self._decode(ds, ds[:, start:min(n, start + block_samples)])
 
 	def close(self) -> None:
 		self._file.close()
@@ -441,39 +491,100 @@ def _nwb_group_key(entities: Any) -> tuple[str, str]:
 	return entities.sub, entities.ses or "ses-none"
 
 
-def _build_nwb_files(source: Path) -> dict[tuple[str, str], Any]:
-	"""One in-memory NWBFile per (subject, session), with every recording in
-	that session added as its own ElectricalSeries. Electrodes are deduped by
-	channel name within a file -- a session's different tasks/runs often
-	share the same physical channels, and NWB's electrode table is one table
-	per file, not per series."""
+class _RawChunkIterator:
+	"""Streams an mne Raw's samples to NWB chunk-by-chunk instead of loading
+	the whole recording at once -- the same eager-get_data() OOM pattern
+	already fixed for hdf5_mat73 (arms.py's own Hdf5Arm), just hit here via
+	NWB's own chunked-write primitive. A first attempt at this passed
+	mismatched chunk_shape/buffer_shape dimensionality and hit hdmf's own
+	broadcast error; this one lets GenericDataChunkIterator compute its own
+	defaults from maxshape/dtype instead of guessing shapes by hand, and is
+	round-trip-verified (see demo_nwb_streaming_check.py) before being
+	trusted against a real multi-hour conversion."""
+
+	def __new__(cls, raw: Any, **kwargs: Any) -> Any:
+		from hdmf.data_utils import GenericDataChunkIterator
+
+		class _Impl(GenericDataChunkIterator):
+			def __init__(self, raw: Any, **kw: Any) -> None:
+				self._raw = raw
+				super().__init__(**kw)
+
+			def _get_data(self, selection: tuple) -> np.ndarray:
+				time_sel, chan_sel = selection
+				start = time_sel.start or 0
+				stop = time_sel.stop if time_sel.stop is not None else int(self._raw.n_times)
+				data = self._raw.get_data(start=start, stop=stop).T.astype("float32")
+				return data[:, chan_sel]
+
+			def _get_dtype(self) -> np.dtype:
+				return np.dtype("float32")
+
+			def _get_maxshape(self) -> tuple[int, int]:
+				return (int(self._raw.n_times), len(self._raw.ch_names))
+
+		return _Impl(raw, **kwargs)
+
+
+def _build_nwb_files(source: Path, backend: str) -> Iterator[tuple[tuple[str, str], Any]]:
+	"""Yields one (key, NWBFile) per (subject, session) as soon as that
+	session's items are exhausted, instead of returning a dict of every
+	session in the dataset at once -- holding all of them (each session's own
+	real file handles, electrode tables, and chunk-iterator closures) until
+	the very end OOM-killed a real 104GB/138-subject run even though each
+	individual series streams its sample data lazily; the fix is the same
+	"process and release one at a time" shape already used for RawStore/
+	NeurozarrStore elsewhere in this harness. Relies on the source reader
+	grouping a session's items together in emission order -- true for
+	BidsReader's own sub/ses/datatype walk, which is the only reader this
+	harness points NWB arms at.
+
+	Electrodes are deduped by channel name within a file -- a session's
+	different tasks/runs often share the same physical channels, and NWB's
+	electrode table is one table per file, not per series.
+
+	backend picks the DataIO wrapper: H5DataIO and hdmf_zarr's ZarrDataIO
+	look like drop-in alternatives (same constructor shape) but aren't --
+	H5DataIO assumes its wrapped data supports direct [item] indexing once
+	hdmf-zarr's writer gets hold of it, which a chunked iterator doesn't
+	("'_Impl' object is not subscriptable", hit by actually trying this
+	against real data rather than assuming the HDF5 path's success implied
+	the Zarr path would behave the same way)."""
 	from datetime import datetime, timezone
 
 	from pynwb import NWBFile
 	from pynwb.ecephys import ElectricalSeries
-	from hdmf.backends.hdf5.h5_utils import H5DataIO
+	if backend == "hdf5":
+		from hdmf.backends.hdf5.h5_utils import H5DataIO as DataIOCls
+		dataio_kwargs: dict[str, Any] = {"compression": "gzip", "compression_opts": 4, "shuffle": True}
+	elif backend == "zarr":
+		from hdmf_zarr.utils import ZarrDataIO as DataIOCls  # type: ignore[no-redef]
+		dataio_kwargs = {"compressors": True}  # zarr's own default codec, not forced to imitate HDF5's gzip
+	else:
+		raise ValueError(f"unknown NWB backend {backend!r}")
 
 	from neurozarr import util
 	from neurozarr.items import Recording
 	from neurozarr.readers import reader_for
 
-	files: dict[tuple[str, str], Any] = {}
-	electrode_rows: dict[tuple[str, str], dict[str, int]] = {}
+	open_key: tuple[str, str] | None = None
+	nwbfile: Any = None
+	rows: dict[str, int] = {}
 
 	for item in reader_for(source).read():
 		if not isinstance(item, Recording):
 			continue
 		key = _nwb_group_key(item.entities)
-		if key not in files:
+		if key != open_key:
+			if open_key is not None:
+				yield open_key, nwbfile
 			nwbfile = NWBFile(session_description=f"{key[0]} {key[1]}", identifier="/".join(key),
 							   session_start_time=datetime.now(timezone.utc))
 			device = nwbfile.create_device(name="device")
 			nwbfile.create_electrode_group(name="group", description="all channels", location="unknown", device=device)
-			files[key] = nwbfile
-			electrode_rows[key] = {}
+			rows = {}
+			open_key = key
 
-		nwbfile = files[key]
-		rows = electrode_rows[key]
 		region_indices = []
 		for ch_name in item.raw.ch_names:
 			if ch_name not in rows:
@@ -483,15 +594,19 @@ def _build_nwb_files(source: Path) -> dict[tuple[str, str], Any]:
 			region_indices.append(rows[ch_name])
 		region = nwbfile.create_electrode_table_region(region=region_indices, description=item.entities.group_name() or "data")
 
-		data = item.raw.get_data().astype("float32").T  # NWB wants (n_samples, n_channels)
-		chunks = util.chunk_shape(data.shape[::-1], data.itemsize, 8 * 1024 * 1024, 65536)[::-1]
-		wrapped = H5DataIO(data=data, chunks=chunks, compression="gzip", compression_opts=4, shuffle=True)
+		# NWB wants (n_samples, n_channels); chunk shape computed the same way
+		# as every other arm's, then reversed to match that axis order.
+		shape = (len(item.raw.ch_names), int(item.raw.n_times))
+		chunks = util.chunk_shape(shape, np.dtype("float32").itemsize, 8 * 1024 * 1024, 65536)[::-1]
+		iterator = _RawChunkIterator(item.raw, chunk_shape=chunks)
+		wrapped = DataIOCls(data=iterator, **dataio_kwargs)
 		name = item.entities.group_name() or "data"
 		es = ElectricalSeries(name=name, data=wrapped, electrodes=region,
 							   rate=float(item.raw.info["sfreq"]), starting_time=0.0)
 		nwbfile.add_acquisition(es)
 
-	return files
+	if open_key is not None:
+		yield open_key, nwbfile
 
 
 class NwbHdf5Arm:
@@ -502,7 +617,7 @@ class NwbHdf5Arm:
 
 		dest = Path(dest)
 		dest.mkdir(parents=True, exist_ok=True)
-		for (sub_id, ses_id), nwbfile in _build_nwb_files(source).items():
+		for (sub_id, ses_id), nwbfile in _build_nwb_files(source, backend="hdf5"):
 			path = dest / f"{sub_id}_{ses_id}.nwb"
 			with NWBHDF5IO(str(path), mode="w") as io:
 				io.write(nwbfile)
@@ -520,7 +635,7 @@ class NwbZarrArm:
 
 		dest = Path(dest)
 		dest.mkdir(parents=True, exist_ok=True)
-		for (sub_id, ses_id), nwbfile in _build_nwb_files(source).items():
+		for (sub_id, ses_id), nwbfile in _build_nwb_files(source, backend="zarr"):
 			path = dest / f"{sub_id}_{ses_id}.nwb.zarr"
 			with NWBZarrIO(str(path), mode="w") as io:
 				io.write(nwbfile)
