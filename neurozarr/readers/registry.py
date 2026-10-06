@@ -71,7 +71,7 @@ def reader_for(source: str | Path, name: str | None = None, **options: Any) -> R
 	path = Path(source)
 	if path.is_dir() or not path.suffix:
 		return BidsReader(path, **options)
-	if path.suffix.lower() in (".csv", ".tsv"):
+	if path.suffix.lower() in (".csv", ".tsv", ".json"):
 		return ManifestReader(path, **options)
 
 	# path.suffix only ever sees the last dot-segment, so a plugin registered for a

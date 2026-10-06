@@ -41,7 +41,10 @@ class ManifestReader:
 	Parameters
 	----------
 	manifest : pandas.DataFrame or str or pathlib.Path
-		The table itself, or a path to a CSV of it.
+		The table itself, or a path to it: ``.json`` reads via
+		:func:`pandas.read_json` (records-oriented, e.g. ``[{"sub": ..., "path": ...,
+		"meta": {...}}, ...]`` -- ``meta`` can be a real nested object, not a JSON
+		string), anything else via :func:`pandas.read_csv`.
 	path_col, sub_col : str, default "path", "sub"
 		Columns holding the file path and the subject label. Both are required
 		unless ``row_reader`` is given.
@@ -49,6 +52,13 @@ class ManifestReader:
 		Columns holding the session label, BIDS datatype, stored name, and
 		per-row metadata. Metadata may be a dict or a JSON string. Each is
 		optional in the table; only the column *name* is configured here.
+
+	A row with no value in ``path_col`` carries no file -- it describes
+	dataset/subject/session-level metadata instead, the way ``dataset_description.json``
+	or ``participants.tsv`` does for :class:`BidsReader`. Its :class:`~neurozarr.Attrs`
+	path is built from whichever of sub/ses/datatype/name are filled in on that row
+	(blank columns are skipped; an all-blank row means dataset-wide), and ``meta_col``
+	becomes that item's attrs dict directly, not metadata merged onto a file.
 	entity_cols : list of str, optional
 		Columns to treat as BIDS entities. By default every column that isn't
 		one of the six named above becomes an entity, so a ``task`` or ``run``
@@ -85,7 +95,15 @@ class ManifestReader:
 				 row_reader: Callable[[Any], Item] | None = None):
 		self.manifest_path = None if isinstance(manifest, pd.DataFrame) else Path(manifest)
 		self.base_dir = Path.cwd() if self.manifest_path is None else self.manifest_path.resolve().parent
-		self.df = manifest if isinstance(manifest, pd.DataFrame) else pd.read_csv(manifest)
+		if isinstance(manifest, pd.DataFrame):
+			self.df = manifest
+		# Entity values are labels, not numbers: left to infer types, pandas turns
+		# a column of "01", "02" into 1, 2 and the recording lands under run-1
+		# instead of run-01 (and acq_time-style column names get parsed as dates).
+		elif Path(manifest).suffix.lower() == ".json":
+			self.df = pd.read_json(manifest, dtype=False, convert_dates=False)
+		else:
+			self.df = pd.read_csv(manifest, dtype=str)
 		self.path_col, self.sub_col, self.ses_col = path_col, sub_col, ses_col
 		self.datatype_col, self.name_col, self.meta_col = datatype_col, name_col, meta_col
 		self.entity_cols = entity_cols
@@ -108,6 +126,10 @@ class ManifestReader:
 		for _, row in self.df.iterrows():
 			if self.row_reader:
 				yield self.row_reader(row)
+				continue
+
+			if pd.isna(row.get(self.path_col)):
+				yield Attrs(self._attrs_path(row), self._parse_meta(row))
 				continue
 
 			entities = Entities(
@@ -137,6 +159,15 @@ class ManifestReader:
 			else:
 				yield ExternalFile(entities, str(name), path,
 					reader_hint=f"install or register a reader for {ext!r}", meta=meta)
+
+	def _attrs_path(self, row: Any) -> tuple[str, ...]:
+		"""A pathless row's Attrs path: whichever of sub/ses/datatype/name are
+		present, in that order -- an empty tuple means dataset-wide, matching
+		BidsReader's dataset_description.json handling."""
+		return tuple(
+			str(row[col]) for col in (self.sub_col, self.ses_col, self.datatype_col, self.name_col)
+			if col in row and pd.notna(row.get(col))
+		)
 
 	def _extra_entities(self, row: Any) -> dict[str, Any]:
 		reserved = {self.path_col, self.sub_col, self.ses_col, self.datatype_col, self.name_col, self.meta_col}

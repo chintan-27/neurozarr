@@ -38,7 +38,14 @@ def inspect_manifest(reader: "ManifestReader") -> ValidationReport:
 
 	for i, row in df.iterrows():
 		where = f"row {i}"
-		if pd.isna(row[reader.sub_col]):
+		is_attrs_row = pd.isna(row[reader.path_col])
+		if is_attrs_row:
+			try:
+				for part in reader._attrs_path(row):
+					validate_segment(part, "attribute path segment")
+			except ValidationError as exc:
+				report.add(_issue("manifest.invalid_entities", Severity.ERROR, str(exc), where))
+		elif pd.isna(row[reader.sub_col]):
 			report.add(_issue("manifest.empty_subject", Severity.ERROR, "empty subject id", where))
 		else:
 			try:
@@ -60,11 +67,9 @@ def inspect_manifest(reader: "ManifestReader") -> ValidationReport:
 		except (TypeError, ValueError, json.JSONDecodeError) as exc:
 			report.add(_issue("manifest.invalid_metadata", Severity.ERROR, str(exc), where))
 
-		path_value = row[reader.path_col]
-		if pd.isna(path_value):
-			report.add(_issue("manifest.empty_path", Severity.ERROR, "empty file path", where))
+		if is_attrs_row:
 			continue
-		path = Path(str(path_value))
+		path = Path(str(row[reader.path_col]))
 		if not path.is_absolute():
 			path = reader.base_dir / path
 		if not path.exists():
@@ -141,7 +146,7 @@ def inspect_source(source: "Reader | str | Path") -> ValidationReport:
 		# twice or exhaust a one-shot source.
 		return ValidationReport()
 	path = Path(str(source))
-	if path.suffix.lower() in TABLE_EXTS:
+	if path.suffix.lower() in TABLE_EXTS | {".json"}:
 		try:
 			reader = ManifestReader(path)
 		except (FileNotFoundError, pd.errors.ParserError, ValueError) as exc:
