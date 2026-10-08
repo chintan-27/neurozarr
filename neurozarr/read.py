@@ -150,10 +150,19 @@ class TableView:
 		Where the table sits in the store, for display and logging.
 	"""
 
-	def __init__(self, group: zarr.Group, name: str, entities: dict[str, str], path: str,
+	def __init__(self, group: "zarr.Group | Callable[[], Any]", name: str, entities: dict[str, str], path: str,
 				 _write: "WriteBack | None" = None):
-		self._group, self.name, self.entities, self.path = group, name, entities, path
+		self._node: Any = group
+		self.name, self.entities, self.path = name, entities, path
 		self._write = _write
+
+	@property
+	def _group(self) -> zarr.Group:
+		# a view may be handed a loader instead of the open group, so listing query
+		# results (paths, entities, counts) opens nothing; the group opens on first use
+		if callable(self._node):
+			self._node = self._node()
+		return cast(zarr.Group, self._node)
 
 	@property
 	def meta(self) -> dict[str, Any]:
@@ -230,9 +239,19 @@ class RecordingView:
 		``"sub-001/ses-1/ieeg/task-Rest_run-1"``.
 	"""
 
-	def __init__(self, group: zarr.Group, entities: dict, path: str, _write: "WriteBack | None" = None):
-		self._group, self.entities, self.path = group, entities, path
+	def __init__(self, group: "zarr.Group | Callable[[], zarr.Group]", entities: dict, path: str,
+				 _write: "WriteBack | None" = None):
+		self._node: Any = group
+		self.entities, self.path = entities, path
 		self._write = _write
+
+	@property
+	def _group(self) -> zarr.Group:
+		# a view may be handed a loader instead of the open group, so listing query
+		# results (paths, entities, counts) opens nothing; the group opens on first use
+		if callable(self._node):
+			self._node = self._node()
+		return cast(zarr.Group, self._node)
 
 	def set_attrs(self, attrs: dict[str, Any]) -> None:
 		"""Add or update this recording's metadata after creation.
@@ -477,10 +496,18 @@ class RecordingView:
 class ArrayView:
 	"""A lazily accessed named N-dimensional array."""
 
-	def __init__(self, array: zarr.Array, name: str, entities: dict[str, str], path: str,
+	def __init__(self, array: "zarr.Array | Callable[[], Any]", name: str, entities: dict[str, str], path: str,
 				 _write: "WriteBack | None" = None):
-		self.array, self.name, self.entities, self.path = array, name, entities, path
+		self._node: Any = array
+		self.name, self.entities, self.path = name, entities, path
 		self._write = _write
+
+	@property
+	def array(self) -> zarr.Array:
+		"""The stored array (opened on first use)."""
+		if callable(self._node):
+			self._node = self._node()
+		return cast(zarr.Array, self._node)
 
 	def set_attrs(self, attrs: dict[str, Any]) -> None:
 		"""Add or update this array's metadata after creation.
@@ -537,10 +564,19 @@ class ArrayView:
 class ExternalFileView:
 	"""A source file preserved by reference because no decoder was available."""
 
-	def __init__(self, group: zarr.Group, name: str, entities: dict[str, str], path: str,
+	def __init__(self, group: "zarr.Group | Callable[[], Any]", name: str, entities: dict[str, str], path: str,
 				 _write: "WriteBack | None" = None):
-		self._group, self.name, self.entities, self.path = group, name, entities, path
+		self._node: Any = group
+		self.name, self.entities, self.path = name, entities, path
 		self._write = _write
+
+	@property
+	def _group(self) -> zarr.Group:
+		# a view may be handed a loader instead of the open group, so listing query
+		# results (paths, entities, counts) opens nothing; the group opens on first use
+		if callable(self._node):
+			self._node = self._node()
+		return cast(zarr.Group, self._node)
 
 	def set_attrs(self, attrs: dict[str, Any]) -> None:
 		"""Add or update this external file's metadata after creation.
@@ -623,19 +659,33 @@ def views_in(root: zarr.Group, base_path: str = "",
 	writes and doesn't know about Repo."""
 	prefix = f"{base_path}/" if base_path else ""
 	for path, node in root.members(max_depth=None):
-		if (not isinstance(node, zarr.Group) or _is_table(node)
-				or node.attrs.asdict().get("_neurozarr_item_type") == "external_file"):
-			continue  # a table's own group, or an external-file reference, is yielded by its parent
-		entities = parse_entities(path.rsplit("/", 1)[-1])
-		is_recording = _is_recording(node)
-		if is_recording:
-			yield RecordingView(node, entities, prefix + path, write)
-		for name, child in node.members():
-			if is_recording and name in _RECORDING_OWN_CHILDREN:
-				continue
-			if _is_table(child):
-				yield TableView(node, name, entities, prefix + path, write)
-			elif isinstance(child, zarr.Array) and child.attrs.asdict().get("_neurozarr_item_type") == "array":
-				yield ArrayView(child, name, entities, prefix + path, write)
-			elif isinstance(child, zarr.Group) and child.attrs.asdict().get("_neurozarr_item_type") == "external_file":
-				yield ExternalFileView(child, name, entities, prefix + path, write)
+		if isinstance(node, zarr.Group):
+			yield from views_at(node, prefix + path, write)
+
+
+def owns_items(node: Any) -> bool:
+	"""Whether ``node`` is a group whose items :func:`views_at` lists -- not a table's
+	own group or an external-file reference, which belong to their parent."""
+	return (isinstance(node, zarr.Group) and not _is_table(node)
+			and node.attrs.asdict().get("_neurozarr_item_type") != "external_file")
+
+
+def views_at(node: zarr.Group, path: str,
+			 write: "WriteBack | None" = None) -> Iterator["RecordingView | TableView | ArrayView | ExternalFileView"]:
+	"""The items one group holds: the recording it is, if it is one, and the tables,
+	arrays and external files directly in it. :func:`views_in` is this for every group."""
+	if not owns_items(node):
+		return  # a table's own group, or an external-file reference, is yielded by its parent
+	entities = parse_entities(path.rsplit("/", 1)[-1])
+	is_recording = _is_recording(node)
+	if is_recording:
+		yield RecordingView(node, entities, path, write)
+	for name, child in node.members():
+		if is_recording and name in _RECORDING_OWN_CHILDREN:
+			continue
+		if _is_table(child):
+			yield TableView(node, name, entities, path, write)
+		elif isinstance(child, zarr.Array) and child.attrs.asdict().get("_neurozarr_item_type") == "array":
+			yield ArrayView(child, name, entities, path, write)
+		elif isinstance(child, zarr.Group) and child.attrs.asdict().get("_neurozarr_item_type") == "external_file":
+			yield ExternalFileView(child, name, entities, path, write)

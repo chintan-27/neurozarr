@@ -179,18 +179,28 @@ def inspect_store(target: object) -> ValidationReport:
 			f"legacy store has no schema manifest; run `neurozarr migrate` to upgrade to schema {SCHEMA_VERSION}",
 			str(target)))
 		return report
-	for sub_id in sorted(manifest.subject_snapshots):
-		if sub_id not in manifest.catalog:
-			report.add(_issue("store.missing_catalog_entry", Severity.WARNING,
-				"subject has no catalog entry; searches will scan its repository", sub_id))
-		elif not Repo._catalog_is_current(manifest, sub_id):
-			# Not corruption: the summary is simply about a version this dataset no
-			# longer publishes, so searches fall back to scanning until the next save.
-			report.add(_issue("store.stale_catalog_entry", Severity.WARNING,
-				"catalog entry describes a different snapshot than the one published; "
-				"searches will scan this repository until it is rewritten", sub_id,
-				published_snapshot=manifest.subject_snapshots[sub_id],
-				catalog_snapshot=manifest.catalog[sub_id].get("snapshot")))
+	from .index import Table, digest
+	summary = repo._summary()
+	if summary is None and manifest.subject_snapshots:
+		report.add(_issue("store.missing_index", Severity.ERROR,
+			"store has no index; queries cannot run (`neurozarr migrate` rebuilds it)", str(target)))
+	elif summary is not None:
+		indexed = set(summary.subjects)
+		for sub_id in sorted(manifest.subject_snapshots.keys() - indexed):
+			report.add(_issue("store.missing_index_entry", Severity.ERROR,
+				"subject is published but not in the index; queries will miss it", sub_id))
+		for sub_id in sorted(indexed - manifest.subject_snapshots.keys()):
+			report.add(_issue("store.stale_index_entry", Severity.ERROR,
+				"index lists a subject the dataset no longer publishes", sub_id))
+		for sub_id in sorted(indexed & manifest.subject_snapshots.keys()):
+			blob = repo._blob(sub_id)
+			if blob is None or digest(blob) != summary.digest_of(sub_id):
+				report.add(_issue("store.corrupt_index", Severity.ERROR,
+					"subject index is missing or does not match the summary's digest", sub_id))
+			elif Table.decode(blob).header.get("snapshot") != manifest.subject_snapshots[sub_id]:
+				report.add(_issue("store.stale_index", Severity.ERROR,
+					"subject index describes a different snapshot than the one published", sub_id,
+					published_snapshot=manifest.subject_snapshots[sub_id]))
 
 	for sub_id, snapshot in manifest.subject_snapshots.items():
 		if not repo._repo_exists(sub_id):
@@ -200,7 +210,7 @@ def inspect_store(target: object) -> ValidationReport:
 		try:
 			subject_repo = repo._icechunk_repo(sub_id)
 			subject_repo.lookup_snapshot(snapshot)
-			head = subject_repo.lookup_branch("main")
+			head = subject_repo.lookup_branch(repo.head if repo.head in subject_repo.list_branches() else "main")
 		except Exception as exc:
 			report.add(_issue("store.unreadable_snapshot", Severity.ERROR, str(exc), sub_id,
 				snapshot=snapshot))

@@ -8,6 +8,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A columnar index in every version, replacing the manifest's JSON `catalog` (schema 3;
+  `neurozarr migrate` upgrades a schema-2 store with one walk per subject). Per subject:
+  one stored object holding a row per item (path, kind, session, datatype, entities,
+  sfreq, n_channels, n_samples, duration, dtype, shape, chunks, codec, `meta.*`),
+  dictionary-encoded and sorted by path. Per version: a summary with a row per subject
+  (pin, index digest, item counts, min/max zone maps, value sets or Bloom filters,
+  `participant.*`). Built at commit from what changed, never by re-scanning: the writer
+  captures each item's row as it writes it (rows travel with staged work and back from
+  parallel workers), and only items changed otherwise are re-read. Indexes are cached
+  by content digest.
+- Views are lazy: a `RecordingView`/`TableView`/`ArrayView`/`ExternalFileView` from
+  `query`, `find` or `get` opens its group only when its data or metadata is read.
+- `repo.query(expression, kind=, version=, **filters)` / `neurozarr query`: an expression
+  language (`== != < <= > >= in`, `and/or/not`, `exists()`), compiled into a subject-level
+  prune over the summary and numpy masks over only the referenced columns; results give
+  `len`, `paths` and `.df` without opening anything, and lazy views when iterated.
+  `repo.get(path)` finds one item by binary search. `find`, `ls`, `describe` and
+  `subjects` now run on the index, and every `version=` takes any version name.
 - git's workflow. Changes are staged and then committed: `repo.add(source)` /
   `neurozarr add`, item-level `add_recording`/`add_table`/`add_array`, `rm`, `mv`;
   `status`, `reset` (unstage), `commit -m`. Staged changes live in a local staging area

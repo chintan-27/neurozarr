@@ -14,6 +14,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 import icechunk
 import mne  # type: ignore[import-untyped]  # mne ships no type information
+import numpy as np
 import pandas as pd
 import zarr
 
@@ -24,7 +25,9 @@ from .log import log_progress, logger, set_verbosity
 from .read import ArrayView, ExternalFileView, RecordingView, TableView, WriteBack, views_in
 from .schema import MANIFEST_ATTR, SCHEMA_VERSION, StoreManifest, utc_now
 from .storage import StorageTarget, storage_from
-from . import state, util
+from . import index as nzindex, state, util
+from .entities import parse_entities
+from .query import QueryResult, mask as query_mask, parse as parse_query, prune as prune_query
 from .codecs import CodecPlan
 from .writer import CodecConfig, ExistingPolicy, Writer, _clashes, _copy_node, copy_chunks
 
@@ -56,7 +59,7 @@ def _subject_of(item: Any) -> str | None:
 	return item.entities.sub
 
 
-def _ingest_subject(job: tuple[Any, ...]) -> tuple[str, Any]:
+def _ingest_subject(job: tuple[Any, ...]) -> tuple[str, Any, dict[str, dict[str, Any]]]:
 	"""Runs in a worker process: the ordinary serial ingest of one subject, into a
 	fork of that subject's session handed over by the parent."""
 	target, storage_options, codec, reader, sub, policy, forked, log_level, plan, branch = job
@@ -73,7 +76,7 @@ def _ingest_subject(job: tuple[Any, ...]) -> tuple[str, Any]:
 	if set(repo._writers) != {sub}:
 		raise ValueError(f"{type(reader).__name__}.for_subject({sub!r}) yielded items of other subjects: "
 						 f"{sorted(set(repo._writers) - {sub})}")
-	return sub, forked
+	return sub, forked, repo._writers[sub].captured
 
 
 def _open_writer(icechunk_repo: icechunk.Repository, codec: CodecConfig | None, label: str = "") -> Writer:
@@ -153,6 +156,7 @@ class Repo:
 		# state, so it bypasses these via _fetch_manifest/_fetch_dataset_root.
 		self._manifest_cache: dict[str | None, StoreManifest | None] = {}
 		self._root_cache: dict[tuple[str, str | None], zarr.Group] = {}
+		self._summary_cache: dict[str | None, nzindex.Summary | None] = {}
 		self._removed_subjects: set[str] = set()
 		self._failed = False
 		self._plan: CodecPlan | None = None  # the reader's codec plan, during an ingest only
@@ -218,9 +222,10 @@ class Repo:
 			self._invalidate_read_cache()
 		if self._mode != "a":
 			return
-		for repo_id, (forked, base) in self._local.staged(self._branch).items():
-			self._writers[repo_id] = Writer(forked, self._codec, repo_id, repo=self._icechunk_repo(repo_id),
-											branch=self._branch, base=base)
+		for repo_id, (forked, base, rows) in self._local.staged(self._branch).items():
+			writer = Writer(forked, self._codec, repo_id, repo=self._icechunk_repo(repo_id), branch=self._branch, base=base)
+			writer.captured = rows
+			self._writers[repo_id] = writer
 		self._removed_subjects = self._local.removed(self._branch)
 
 	def _repo_exists(self, sub_id: str) -> bool:
@@ -277,7 +282,7 @@ class Repo:
 			writer = self._writers.get(repo_id)
 			if writer is not None and writer.session.has_uncommitted_changes:
 				assert writer.base is not None
-				self._local.stage(self._branch, repo_id, writer.session, writer.base)
+				self._local.stage(self._branch, repo_id, writer.session, writer.base, writer.captured)
 		self._local.set_removed(self._branch, self._removed_subjects)
 
 	def _dispatch(self, item: Recording | Table | ExternalFile | Array,
@@ -344,12 +349,14 @@ class Repo:
 		_fetch_dataset_root directly instead of clearing around them."""
 		self._manifest_cache.clear()
 		self._root_cache.clear()
+		self._summary_cache.clear()
 
 	def _fetch_dataset_root(self, version: str | None = None) -> zarr.Group:
 		repo = self._icechunk_repo("_dataset")
 		if version is not None:
+			# any version name: branch, tag, id or unique prefix, REF~N
 			session = repo.readonly_session(tag=version) if version in repo.list_tags() \
-				else repo.readonly_session(snapshot_id=version)
+				else repo.readonly_session(snapshot_id=self.resolve(version))
 		else:
 			session = repo.readonly_session(self._branch)
 		return zarr.open_group(store=session.store, mode="r")
@@ -589,10 +596,12 @@ class Repo:
 			context = multiprocessing.get_context("spawn")
 			with ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
 				results = pool.map(_ingest_subject, jobs)
-				for sub, forked in progress(results) if progress else results:
+				for sub, forked, captured in progress(results) if progress else results:
 					previous = self._writers[sub]
-					self._writers[sub] = Writer(forked, self._codec, sub, repo=self._icechunk_repo(sub),
-												branch=self._branch, base=previous.base)
+					writer = Writer(forked, self._codec, sub, repo=self._icechunk_repo(sub),
+									branch=self._branch, base=previous.base)
+					writer.captured = {**previous.captured, **captured}
+					self._writers[sub] = writer
 		except Exception:
 			self._failed = True
 			raise
@@ -652,13 +661,27 @@ class Repo:
 			return None
 
 		touched: dict[str, str] = {}
+		indexes: dict[str, bytes | None] = {}
 		try:
 			for sub_id, writer in list(self._writers.items()):
-				if sub_id == "_dataset":
+				if sub_id == "_dataset" or not writer.session.has_uncommitted_changes:
 					continue
+				# the index is computed from the staged tree before it is committed: new
+				# rows for what changed on top of the published index, or one walk for a
+				# subject with none -- never a re-scan of the store
+				previous = self._published_index(sub_id)
+				if previous is None or previous.header["snapshot"] == writer.base:
+					pending: nzindex.Pending | None = nzindex.update_subject(
+						previous, writer.root, sub_id, _summarize(writer.session.status()), writer.captured)
+				else:
+					pending = None
 				snapshot = writer.save(message)
-				if snapshot is not None:
-					touched[sub_id] = snapshot
+				if snapshot is None:
+					continue
+				touched[sub_id] = snapshot
+				if pending is None or writer.drifted:  # someone else's commit is in it too
+					pending = nzindex.build_subject(self._root_at(sub_id, snapshot), sub_id)
+				indexes[sub_id] = pending.finish(snapshot)
 		except icechunk.ConflictError as exc:
 			self._failed = True
 			raise WriteConflictError("another writer changed the same subject; abort and retry") from exc
@@ -667,12 +690,68 @@ class Repo:
 			raise
 
 		try:
-			return self._publish_subject_snapshots(touched, message)
+			return self._publish_subject_snapshots(touched, message, indexes)
 		except Exception:
 			self._failed = True
 			raise
 
-	def _publish_subject_snapshots(self, touched: dict[str, str], message: str) -> str | None:
+	# ---- the index -------------------------------------------------------
+
+	def _root_at(self, sub_id: str, snapshot: str) -> zarr.Group:
+		session = self._icechunk_repo(sub_id).readonly_session(snapshot_id=snapshot)
+		return zarr.open_group(store=session.store, mode="r")
+
+	def _blob(self, name: str, version: str | None = None, fresh: bool = False) -> bytes | None:
+		try:
+			root = self._fetch_dataset_root(version) if fresh else self._dataset_root(version)
+			node = root[f"{nzindex.INDEX_GROUP}/{name}"]
+		except (*_NO_COMMITTED_ROOT, KeyError, icechunk.IcechunkError):
+			return None
+		return np.asarray(cast(zarr.Array, node)[...]).tobytes()
+
+	def _published_index(self, sub_id: str) -> "nzindex.Table | None":
+		"""A subject's index in the latest published version (read fresh)."""
+		blob = self._blob(sub_id, fresh=True)
+		return None if blob is None else nzindex.Table.decode(blob)
+
+	def _summary(self, version: str | None = None) -> "nzindex.Summary | None":
+		if version not in self._summary_cache:
+			blob = self._blob(nzindex.SUMMARY, version)
+			self._summary_cache[version] = None if blob is None else nzindex.Summary(nzindex.Table.decode(blob))
+		return self._summary_cache[version]
+
+	def _subject_table(self, sub_id: str, version: str | None = None) -> "nzindex.Table | None":
+		summary = self._summary(version)
+		key = summary.digest_of(sub_id) if summary is not None else None
+		if key is None:
+			return None
+		table = nzindex.CACHE.get(key)
+		if table is None:
+			blob = self._blob(sub_id, version)
+			if blob is None:
+				return None
+			table = nzindex.CACHE.put(key, nzindex.Table.decode(blob))
+		return table
+
+	def _write_index(self, writer: Writer, updates: dict[str, bytes | None]) -> None:
+		"""Write changed subject indexes and recompute the summary on top of the latest
+		published one: untouched subjects keep their entries, so a commit costs what it
+		touched, not the store size."""
+		blob = self._blob(nzindex.SUMMARY, fresh=True)
+		previous = nzindex.Summary(nzindex.Table.decode(blob)) if blob is not None else None
+		entries = {sub: entry for sub in (previous.subjects if previous else [])
+				   if (entry := previous.entry(sub)) is not None} if previous else {}
+		for sub_id, subject_blob in updates.items():
+			if subject_blob is None:
+				entries.pop(sub_id, None)
+				writer.drop(f"{nzindex.INDEX_GROUP}/{sub_id}")
+				continue
+			writer.put_blob(f"{nzindex.INDEX_GROUP}/{sub_id}", subject_blob)
+			entries[sub_id] = nzindex.stats_of(nzindex.Table.decode(subject_blob), nzindex.digest(subject_blob))
+		writer.put_blob(f"{nzindex.INDEX_GROUP}/{nzindex.SUMMARY}", nzindex.build_summary(list(entries.values())))
+
+	def _publish_subject_snapshots(self, touched: dict[str, str], message: str,
+								   indexes: dict[str, bytes | None] | None = None) -> str | None:
 		"""Publish already-committed subject snapshots as one dataset version."""
 		base = self._base_manifest or self._manifest() or StoreManifest(created_with=self._package_version())
 		# Conflict detection needs the true current state, not a memoized read
@@ -686,23 +765,16 @@ class Repo:
 					self._failed = True
 					raise WriteConflictError(f"another writer published a different snapshot for {sub_id}")
 			base = current
+		updates: dict[str, bytes | None] = {**(indexes or {}), **{sub: None for sub in self._removed_subjects}}
 		if self._removed_subjects:
-			base = replace(
-				base,
-				subject_snapshots={k: v for k, v in base.subject_snapshots.items()
-									if k not in self._removed_subjects},
-				catalog={k: v for k, v in base.catalog.items() if k not in self._removed_subjects},
-			)
+			base = replace(base, subject_snapshots={k: v for k, v in base.subject_snapshots.items()
+													 if k not in self._removed_subjects})
 		subject_snapshots = {**base.subject_snapshots, **touched}
-		catalog = dict(base.catalog)
-		for sub_id, snapshot in touched.items():
-			catalog[sub_id] = self._catalog_entry(sub_id, snapshot)
 		manifest = replace(
 			base,
 			updated_at=utc_now(),
 			created_with=self._package_version(),
 			subject_snapshots=subject_snapshots,
-			catalog=catalog,
 		)
 		dataset_writer = self._writers.get("_dataset") or self._writer_for("_dataset")
 		pending_attrs = dataset_writer.root.attrs.asdict()
@@ -714,12 +786,13 @@ class Repo:
 			key: value for key, value in pending_attrs.items()
 			if key not in (MANIFEST_ATTR, "subjects") and committed_attrs.get(key) != value
 		}
+		self._write_index(dataset_writer, updates)
 		dataset_writer.add_attrs(Attrs((), {
 			MANIFEST_ATTR: manifest.as_dict(),
 			"subjects": sorted(subject_snapshots),
 		}))
 		try:
-			dataset_snapshot = dataset_writer.save(message)
+			dataset_snapshot = dataset_writer.save(message, rebuilt=_rebuilt_at_publish)
 		except icechunk.ConflictError as exc:
 			if user_changes:
 				self._failed = True
@@ -738,24 +811,18 @@ class Repo:
 					self._failed = True
 					raise WriteConflictError(f"another writer published a different snapshot for {sub_id}") from exc
 			if self._removed_subjects:
-				current = replace(
-					current,
-					subject_snapshots={k: v for k, v in current.subject_snapshots.items()
-										if k not in self._removed_subjects},
-					catalog={k: v for k, v in current.catalog.items() if k not in self._removed_subjects},
-				)
+				current = replace(current, subject_snapshots={k: v for k, v in current.subject_snapshots.items()
+															   if k not in self._removed_subjects})
 			merged_snapshots = {**current.subject_snapshots, **touched}
-			merged_catalog = dict(current.catalog)
-			for sub_id, subject_snapshot in touched.items():
-				merged_catalog[sub_id] = self._catalog_entry(sub_id, subject_snapshot)
 			manifest = replace(current, updated_at=utc_now(), created_with=self._package_version(),
-				subject_snapshots=merged_snapshots, catalog=merged_catalog)
+				subject_snapshots=merged_snapshots)
 			dataset_writer = self._writer_for("_dataset")
+			self._write_index(dataset_writer, updates)
 			dataset_writer.add_attrs(Attrs((), {
 				MANIFEST_ATTR: manifest.as_dict(), "subjects": sorted(merged_snapshots),
 			}))
 			try:
-				dataset_snapshot = dataset_writer.save(message)
+				dataset_snapshot = dataset_writer.save(message, rebuilt=_rebuilt_at_publish)
 			except icechunk.ConflictError as retry_exc:
 				self._failed = True
 				raise WriteConflictError("dataset publication conflicted twice; abort and retry") from retry_exc
@@ -767,40 +834,6 @@ class Repo:
 		if self._local is not None:
 			self._local.clear(self._branch)
 		return dataset_snapshot
-
-	@staticmethod
-	def _catalog_is_current(manifest: StoreManifest, sub_id: str) -> bool:
-		"""Whether the catalog can be trusted to describe a subject's published snapshot.
-
-		The catalog is a cache, not a source of truth: it is only usable for the exact
-		snapshot it was read from. Both :meth:`find` and ``neurozarr doctor`` ask this
-		one question, so a reader and its integrity check cannot disagree.
-		"""
-		entry = manifest.catalog.get(sub_id)
-		if not isinstance(entry, dict):
-			return False
-		return entry.get("snapshot") == manifest.subject_snapshots.get(sub_id)
-
-	def _catalog_entry(self, sub_id: str, snapshot: str) -> dict[str, Any]:
-		repo = self._icechunk_repo(sub_id)
-		root = zarr.open_group(store=repo.readonly_session(snapshot_id=snapshot).store, mode="r")
-		views = list(views_in(root, sub_id))
-		return {
-			# The snapshot this summary was read from. A snapshot id names immutable
-			# content, so a stamped entry is a permanently true statement about that
-			# version -- which is what lets readers tell a usable entry from one
-			# describing a version the dataset no longer publishes.
-			"snapshot": snapshot,
-			"visits": sorted(name for name, node in root.members()
-							 if isinstance(node, zarr.Group) and name.startswith("ses-")),
-			"recordings": [
-				{"path": view.path, "entities": view.entities}
-				for view in views if isinstance(view, RecordingView)
-			],
-			"table_count": sum(isinstance(view, TableView) for view in views),
-			"array_count": sum(isinstance(view, ArrayView) for view in views),
-			"external_file_count": sum(isinstance(view, ExternalFileView) for view in views),
-		}
 
 	def reset(self, *subjects: str) -> None:
 		"""Unstage (``git reset``): drop staged changes, for some subjects or all.
@@ -832,32 +865,48 @@ class Repo:
 			raise
 
 	def migrate(self, dry_run: bool = False) -> dict[str, Any]:
-		"""Upgrade a readable 0.1 store to the current manifest schema in place."""
+		"""Upgrade a store to the current schema in place: a 0.1 store gets a manifest,
+		and a schema-2 store's JSON catalog is replaced by the index (one walk of each
+		subject's pinned snapshot). Sample data is never rewritten."""
 		if not self._repo_exists("_dataset"):
 			raise FileNotFoundError(f"no neurozarr store exists at {self.target}")
-		current = self._fetch_manifest()  # "already migrated?" must see true current state
-		if current is not None:
-			return {"changed": False, "schema_version": current.schema_version,
-					"subjects": sorted(current.subject_snapshots)}
+		try:
+			raw = self._fetch_dataset_root().attrs.asdict().get(MANIFEST_ATTR)
+		except _NO_COMMITTED_ROOT:
+			raw = None
+		old = cast("dict[str, Any] | None", raw)
+		if old is not None and old.get("schema_version") == SCHEMA_VERSION:
+			return {"changed": False, "schema_version": SCHEMA_VERSION,
+					"subjects": sorted(cast("dict[str, Any]", old.get("subject_snapshots", {})))}
 		if self._mode == "r" and not dry_run:
 			raise PermissionError("repository was opened read-only")
-		subjects = self._legacy_subjects()
-		snapshots = {sub_id: self._icechunk_repo(sub_id).lookup_branch("main") for sub_id in subjects}
-		result = {"changed": bool(not dry_run), "schema_version": SCHEMA_VERSION, "subjects": subjects}
+		if old is not None:  # schema 2: same pins, catalog -> index
+			snapshots = {str(k): str(v) for k, v in cast("dict[str, Any]", old.get("subject_snapshots", {})).items()}
+			manifest = replace(StoreManifest.from_dict({**old, "schema_version": SCHEMA_VERSION}),
+							   created_with=self._package_version(), updated_at=utc_now())
+		else:  # 0.1: subject repos at their main branch
+			subjects = self._legacy_subjects()
+			snapshots = {sub_id: self._icechunk_repo(sub_id).lookup_branch("main") for sub_id in subjects}
+			manifest = StoreManifest(created_with=self._package_version(), subject_snapshots=snapshots)
+		result = {"changed": bool(not dry_run), "schema_version": SCHEMA_VERSION, "subjects": sorted(snapshots)}
 		if dry_run:
 			return result
-		manifest = StoreManifest(
-			created_with=self._package_version(),
-			subject_snapshots=snapshots,
-			catalog={sub_id: self._catalog_entry(sub_id, snapshot) for sub_id, snapshot in snapshots.items()},
-		)
 		writer = _open_writer(self._icechunk_repo("_dataset"), self._codec, "_dataset")
-		writer.add_attrs(Attrs((), {MANIFEST_ATTR: manifest.as_dict(), "subjects": subjects}))
+		self._write_index(writer, {sub_id: nzindex.build_subject(self._root_at(sub_id, pin), sub_id).finish(pin)
+								   for sub_id, pin in snapshots.items()})
+		writer.add_attrs(Attrs((), {MANIFEST_ATTR: manifest.as_dict(), "subjects": sorted(snapshots)}))
 		writer.save(f"migrate neurozarr schema to {SCHEMA_VERSION}")
 		self._writers.clear()
 		self._base_manifest = manifest
 		self._invalidate_read_cache()
 		return result
+
+	@classmethod
+	def _for_migration(cls, target: StorageTarget, **storage_options: Any) -> "Repo":
+		"""Open a store that may need migrating: no schema check, writable."""
+		self = cls.__new__(cls)
+		self._init(target, None, "a", storage_options)
+		return self
 
 	def _legacy_subjects(self) -> list[str]:
 		try:
@@ -913,14 +962,17 @@ class Repo:
 				else repo.readonly_session("main")
 		return zarr.open_group(store=session.store, mode="r")
 
-	def subjects(self) -> list[str]:
-		"""List the subjects in the store.
+	def subjects(self, version: str | None = None) -> list[str]:
+		"""List the subjects in the store (at ``version``: any version name).
 
 		Returns
 		-------
 		list of str
 			Subject labels, sorted, e.g. ``["sub-001", "sub-002"]``.
 		"""
+		if version is not None:
+			pinned = self._manifest(version)
+			return sorted(pinned.subject_snapshots) if pinned else []
 		manifest = self._manifest()
 		if manifest is not None:
 			return sorted(manifest.subject_snapshots)
@@ -953,9 +1005,8 @@ class Repo:
 		The same counts ``neurozarr info`` prints, returned as one dict per
 		subject so a Python caller can build a table from them instead of
 		parsing CLI output. Opens every subject's repository to count its
-		items, so on a store with many subjects this costs one session open
-		per subject -- pass ``sub`` to :meth:`find` instead when you already
-		know which subject you care about.
+		items -- read from the index, so it opens no subject (a legacy store
+		without one is walked).
 
 		Returns
 		-------
@@ -969,6 +1020,15 @@ class Repo:
 		>>> import pandas as pd
 		>>> pd.DataFrame(repo.describe())
 		"""
+		summary = self._summary()
+		if summary is not None:  # straight from the index: no subject opened
+			table = summary.table
+			return [{"sub_id": sub,
+					 "visits": int(table.num("n_sessions")[i]),
+					 "recordings": int(table.num("count.recording")[i]),
+					 "tables": int(table.num("count.table")[i]),
+					 "arrays": int(table.num("count.array")[i]),
+					 "external_files": int(table.num("count.file")[i])} for i, sub in enumerate(summary.subjects)]
 		overview = []
 		for sub_id in self.subjects():
 			subject = self.subject(sub_id)
@@ -982,15 +1042,12 @@ class Repo:
 			})
 		return overview
 
-	def find(self, datatype: str | None = None, sub: str | None = None,
+	def find(self, datatype: str | None = None, sub: str | None = None, version: str | None = None,
 			 **entities: Any) -> Iterator[RecordingView]:
 		"""Search the whole store for recordings matching a set of BIDS entities.
 
-		Answered straight from each subject's catalog entry in the ``_dataset``
-		manifest when it's current for that subject (the common case) -- no
-		tree walk, one session opened only for a subject that actually has a
-		match. A subject whose catalog is missing or stale (older stores,
-		mid-migration) falls back to a full walk of just that subject.
+		A shorthand for :meth:`query` with ``kind="recording"`` and equality filters,
+		answered from the index.
 
 		Parameters
 		----------
@@ -998,6 +1055,8 @@ class Repo:
 			Restrict to one datatype, e.g. ``"ieeg"``.
 		sub : str, optional
 			Restrict to one subject, e.g. ``"sub-001"``.
+		version : str, optional
+			Any version name (branch, tag, id or prefix, ``REF~N``).
 		**entities
 			BIDS entities to match, e.g. ``task="Rest", run=1``. Values are
 			compared as strings, so ``run=1`` and ``run="1"`` both match.
@@ -1012,51 +1071,79 @@ class Repo:
 		>>> for rec in repo.find(task="BrainSenseStream", acq="TD"):
 		...     print(rec.path, rec.shape)
 		"""
-		candidate_subjects = [sub] if sub else self.subjects()
-		manifest = self._manifest()
-		for sub_id in candidate_subjects:
-			# The catalog is only ever trusted for a subject it can currently vouch
-			# for (see _catalog_is_current): missing, unstamped, or stamped with a
-			# snapshot this version no longer publishes all mean "unknown", so those
-			# subjects take the full-walk fallback rather than risk silently
-			# dropping a recording that's really there.
-			if manifest is not None and self._catalog_is_current(manifest, sub_id):
-				yield from self._find_in_catalog(manifest, sub_id, datatype, entities)
-				continue
-			for view in self.subject(sub_id).recordings():
-				if datatype and f"/{datatype}/" not in f"/{view.path}/":
-					continue
-				if all(str(view.entities.get(k)) == str(v) for k, v in entities.items()):
-					yield view
+		filters = {k: v for k, v in (("datatype", datatype), ("sub", sub)) if v is not None}
+		yield from self.query(kind="recording", version=version, **filters, **{k: str(v) for k, v in entities.items()})
 
-	def _find_in_catalog(self, manifest: StoreManifest, sub_id: str, datatype: str | None,
-						  entities: dict[str, Any]) -> Iterator[RecordingView]:
-		"""find()'s fast path: filter the catalog's own path+entities index and
-		only then open the subject's root -- and only if something matched.
+	def query(self, expression: str | None = None, *, kind: str | None = None, version: str | None = None,
+			  **filters: Any) -> QueryResult:
+		"""Find items by their identifiers and metadata, from the index.
 
-		No existence check against the tree before indexing into it: a current
-		catalog entry (_catalog_is_current already gated this) was built by
-		walking this exact snapshot id, and root_of resolves the subject to
-		that same snapshot id, so every path it lists is guaranteed present.
-		Checking anyway would cost one zarr existence lookup per matching
-		recording -- for a query that matches most of a subject, that check
-		alone was measured as the dominant cost after the walk itself was
-		removed. If the invariant is ever wrong, indexing raises loudly
-		instead of silently dropping a recording that is really there.
+		Parameters
+		----------
+		expression : str, optional
+			``"datatype == 'ieeg' and sfreq >= 250 and participant.age < 40"``: comparisons
+			(``== != < <= > >= in``, ``not in``), ``and`` / ``or`` / ``not``, ``exists(col)``,
+			``col("odd-name")``. Columns: ``path kind sub ses datatype prefix``, every entity
+			(``task run acq``...), ``sfreq n_channels n_samples duration_s dtype shape chunks
+			codec nbytes``, ``meta.<key>`` for each item's metadata, ``participant.<key>``.
+		kind : {"recording", "table", "array", "file"}, optional
+		version : str, optional
+			Any version name; default the current branch.
+		**filters
+			Equality, or with a suffix (``sfreq__ge=250``; ``eq ne lt le gt ge in``); ``__``
+			between words is a dot (``participant__age__lt=40``).
+
+		Returns
+		-------
+		QueryResult
+			``len()``, ``.paths`` and ``.df`` without opening anything; iterate for views.
 		"""
-		root: zarr.Group | None = None
+		summary = self._summary(version)
+		expr = parse_query(expression, **({**filters, "kind": kind} if kind else filters))
+		hits: list[tuple[str, Any, Any, dict[str, Any]]] = []
+		if summary is not None:
+			candidates = prune_query(expr, summary)
+			for i in np.nonzero(candidates)[0]:
+				sub_id = summary.subjects[i]
+				table = self._subject_table(sub_id, version)
+				if table is None:
+					continue
+				subject = summary.table.row(int(i))
+				rows = np.nonzero(query_mask(expr, table, subject))[0]
+				if rows.size:
+					hits.append((sub_id, table, rows, subject))
+		return QueryResult(hits, lambda sub_id, path, item_kind: self._view(sub_id, path, item_kind, version))
+
+	def get(self, path: str, version: str | None = None) -> Any:
+		"""One item by its path (as ``ls``, ``status`` and ``query`` print it), found by
+		binary search in its subject's index."""
+		sub_id = path.split("/", 1)[0]
+		table = self._subject_table(sub_id, version)
+		row = table.find(path) if table is not None else None
+		if row is None or table is None:
+			raise KeyError(f"no such item: {path}")
+		return self._view(sub_id, path, table.values("kind", np.array([row]))[0], version)
+
+	def _view(self, sub_id: str, path: str, kind: str, version: str | None) -> Any:
+		"""A lazy view of one indexed item: nothing opens until its data or metadata is
+		read, so walking query results to list paths and entities costs nothing."""
+		rel = path[len(sub_id) + 1:]
 		write = self._write_back()
-		for entry in manifest.catalog[sub_id].get("recordings", []):
-			path = cast(str, entry["path"])
-			if datatype and f"/{datatype}/" not in f"/{path}/":
-				continue
-			rec_entities = cast("dict[str, Any]", entry.get("entities", {}))
-			if not all(str(rec_entities.get(k)) == str(v) for k, v in entities.items()):
-				continue
-			if root is None:
-				root = self.root_of(sub_id)
-			group_path = path.split("/", 1)[1] if "/" in path else ""
-			yield RecordingView(cast("zarr.Group", root[group_path]), rec_entities, path, write)
+
+		def node(at: str) -> Any:
+			root = self.root_of(sub_id, version)
+			return root[at] if at else root
+
+		if kind == "recording":
+			return RecordingView(lambda: node(rel), parse_entities(rel.rsplit("/", 1)[-1]), path, write)
+		parent_rel, _, name = rel.rpartition("/")
+		parent_path = f"{sub_id}/{parent_rel}" if parent_rel else sub_id
+		entities = parse_entities(parent_path.rsplit("/", 1)[-1])
+		if kind == "table":
+			return TableView(lambda: node(parent_rel), name, entities, parent_path, write)
+		if kind == "array":
+			return ArrayView(lambda: node(rel), name, entities, parent_path, write)
+		return ExternalFileView(lambda: node(rel), name, entities, parent_path, write)
 
 	# ---- versioning -------------------------------------------------------
 
@@ -1128,6 +1215,8 @@ class Repo:
 			snapshot = repo.lookup_branch(name)
 		elif name in repo.list_tags():
 			snapshot = repo.lookup_tag(name)
+		elif len(name) == 20 and _known_snapshot(repo, name):
+			snapshot = name
 		else:
 			if len(name) < 6:
 				raise ValueError(f"unknown version {version!r} (a snapshot id prefix needs at least 6 characters)")
@@ -1137,6 +1226,8 @@ class Repo:
 				raise ValueError(f"unknown version {version!r}" if not matches
 								 else f"ambiguous version {version!r}: {', '.join(sorted(matches))}")
 			snapshot = matches.pop()
+		if steps == 0:
+			return snapshot
 		history = [info.id for info in repo.ancestry(snapshot_id=snapshot) if info.parent_id is not None]
 		if steps >= len(history):
 			raise ValueError(f"{version!r} goes back further than the history ({len(history) - 1} versions)")
@@ -1180,17 +1271,18 @@ class Repo:
 
 	def ls(self, path: str = "", version: str | None = None) -> list[dict[str, Any]]:
 		"""Browse a version like a directory (``git ls-tree``): subjects at the top,
-		then a subject's sessions, then a session's items."""
-		snapshot = self.resolve(version) if version else None
+		then a subject's sessions, then the items under a path -- from the index."""
 		parts = [p for p in path.strip("/").split("/") if p]
 		if not parts:
-			manifest = self._manifest(snapshot)
-			return [{"kind": "subject", "path": sub} for sub in sorted(manifest.subject_snapshots if manifest else [])]
-		subject = self.subject(parts[0])
+			return [{"kind": "subject", "path": sub} for sub in self.subjects(version)]
+		table = self._subject_table(parts[0], version)
+		if table is None:
+			raise KeyError(f"no such subject: {parts[0]}")
 		if len(parts) == 1:
-			return [{"kind": "session", "path": f"{parts[0]}/{ses}"} for ses in subject.visits(snapshot)]
+			return [{"kind": "session", "path": f"{parts[0]}/{ses}"} for ses in table.header["sessions"]]
 		prefix = "/".join(parts)
-		return [item for item in subject.visit(parts[1]).describe(snapshot) if item["path"].startswith(prefix)]
+		return [{"kind": row["kind"], "path": row["path"]} for row in table.rows()
+				if row["path"] == prefix or row["path"].startswith(prefix + "/")]
 
 	def rm(self, path: str, recursive: bool = False) -> None:
 		"""Stage removing a subject, a session or an item (``git rm``).
@@ -1329,11 +1421,11 @@ class Repo:
 		current = self._fetch_manifest()
 		assert current is not None
 		snapshots = dict(current.subject_snapshots)
-		catalog = dict(current.catalog)
+		updates: dict[str, bytes | None] = {}
 		for sub_id, pin in pins.items():
 			if pin is None:
 				snapshots.pop(sub_id, None)
-				catalog.pop(sub_id, None)
+				updates[sub_id] = None
 				continue
 			repo = self._icechunk_repo(sub_id)
 			if self._branch in repo.list_branches():
@@ -1341,12 +1433,13 @@ class Repo:
 			else:
 				repo.create_branch(self._branch, pin)
 			snapshots[sub_id] = pin
-			catalog[sub_id] = self._catalog_entry(sub_id, pin)
+			updates[sub_id] = nzindex.build_subject(self._root_at(sub_id, pin), sub_id).finish(pin)
 		manifest = replace(current, updated_at=utc_now(), created_with=self._package_version(),
-						   subject_snapshots=snapshots, catalog=catalog)
+						   subject_snapshots=snapshots)
 		writer = self._writer_for("_dataset")
+		self._write_index(writer, updates)
 		writer.add_attrs(Attrs((), {MANIFEST_ATTR: manifest.as_dict(), "subjects": sorted(snapshots)}))
-		version = writer.save(message, metadata)
+		version = writer.save(message, metadata, rebuilt=_rebuilt_at_publish)
 		assert version is not None
 		self._writers.pop("_dataset", None)
 		self._base_manifest = manifest
@@ -1622,6 +1715,20 @@ def _replay(source: zarr.Group, dest: zarr.Group, changes: Any) -> None:
 			copy_chunks(node(source, path), node(dest, path), [tuple(c) for c in coords])
 	for path in changes.updated_groups:
 		util.set_attrs(node(dest, path), node(source, path).attrs.asdict())
+
+
+def _known_snapshot(repo: icechunk.Repository, snapshot: str) -> bool:
+	try:
+		repo.lookup_snapshot(snapshot)
+		return True
+	except (icechunk.IcechunkError, ValueError):
+		return False
+
+
+def _rebuilt_at_publish(path: str) -> bool:
+	"""Dataset nodes a publish recomputes from the latest version: the root (manifest)
+	and the index. Both sides writing them is not a clash."""
+	return path in ("/", f"/{nzindex.INDEX_GROUP}") or path.startswith(f"/{nzindex.INDEX_GROUP}/")
 
 
 def _item_of(node_path: str) -> str:

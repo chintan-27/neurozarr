@@ -154,14 +154,17 @@ def _two_subjects(store, raw):
 	return store
 
 
-def test_catalog_entries_record_the_snapshot_they_describe(store, raw):
+def test_index_records_the_snapshot_it_describes(store, raw):
+	from neurozarr.index import Table
 	_two_subjects(store, raw)
-	manifest = Repo.open(store)._manifest()
+	repo = Repo.open(store)
+	manifest = repo._manifest()
 	for sub_id, snapshot in manifest.subject_snapshots.items():
-		assert manifest.catalog[sub_id]["snapshot"] == snapshot, "catalog entry is not keyed by its snapshot"
+		assert Table.decode(repo._blob(sub_id)).header["snapshot"] == snapshot, "index is not keyed by its snapshot"
+	assert repo._summary().subjects == sorted(manifest.subject_snapshots)
 
 
-def test_a_valid_catalog_still_prunes_subjects_that_cannot_match(store, raw):
+def test_find_opens_nothing_until_data_is_read(store, raw):
 	repo = Repo.init(store)
 	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="Rest")
 	repo.create_subject("sub-002").add_visit("ses-1").add_recording(raw, task="Other")
@@ -170,8 +173,11 @@ def test_a_valid_catalog_still_prunes_subjects_that_cannot_match(store, raw):
 	opened, scanned = Repo.open(store), []
 	real_root_of = opened.root_of
 	opened.root_of = lambda sub_id, version=None: (scanned.append(sub_id), real_root_of(sub_id, version))[1]
-	assert [view.entities["task"] for view in opened.find(task="Rest")] == ["Rest"]
-	assert scanned == ["sub-001"], "the catalog should have spared sub-002 from being opened"
+	found = list(opened.find(task="Rest"))
+	assert [view.entities["task"] for view in found] == ["Rest"]
+	assert scanned == [], "find() answers from the index; it opens no subject"
+	found[0].data()
+	assert scanned == ["sub-001"], "reading the match opens only its own subject"
 
 
 def test_find_does_not_walk_when_the_catalog_is_current(store, raw, monkeypatch):
@@ -196,38 +202,31 @@ def test_find_does_not_walk_when_the_catalog_is_current(store, raw, monkeypatch)
 	assert walked == [], "find() walked a subject its current catalog could already answer"
 
 
-def test_find_does_not_hide_subjects_whose_catalog_entry_is_unusable(store, raw):
-	"""Regression: find() pruned on the catalog without checking it was current, so a
-	missing, stale or unstamped entry silently dropped recordings that were really there."""
+def test_find_agrees_with_a_full_walk(store, raw):
+	"""find() answers from the index; it must never hide a recording that is really there."""
+	from neurozarr.read import RecordingView, views_in
 	_two_subjects(store, raw)
-	both = {"sub-001", "sub-002"}
-
-	drifts = {
-		"missing": lambda m: m.catalog.pop("sub-002", None),
-		"stale": lambda m: m.catalog["sub-002"].__setitem__("snapshot", "OUTDATEDSNAPSHOT0000"),
-		"unstamped": lambda m: m.catalog["sub-002"].pop("snapshot", None),
-	}
-	for label, mangle in drifts.items():
-		repo = _with_manifest(Repo.open(store), mangle)
-		found = {view.path.split("/")[0] for view in repo.find(task="Rest")}
-		assert found == both, f"{label} catalog entry hid a subject from find()"
+	repo = Repo.open(store)
+	walked = {v.path for sub in repo.subjects() for v in views_in(repo.root_of(sub), sub) if isinstance(v, RecordingView)}
+	assert {v.path for v in repo.find(task="Rest")} == walked
 
 
-def test_doctor_reports_a_stale_catalog_entry(store, raw, monkeypatch):
+def test_fsck_reports_an_index_that_does_not_match(store, raw, monkeypatch):
+	from neurozarr.index import Table, encode
 	_two_subjects(store, raw)
 	assert inspect_store(store).ok
 
-	real = Repo._manifest
+	real = Repo._blob
 
-	def patched(self, version=None):
-		manifest = real(self, version)
-		if manifest is not None and "sub-002" in manifest.catalog:
-			manifest.catalog["sub-002"]["snapshot"] = "OUTDATEDSNAPSHOT0000"
-		return manifest
+	def patched(self, name, version=None, fresh=False):
+		blob = real(self, name, version, fresh)
+		if name == "sub-002" and blob is not None:
+			table = Table.decode(blob)
+			return encode(table.rows(), {**table.header, "snapshot": "OUTDATEDSNAPSHOT0000"})
+		return blob
 
-	monkeypatch.setattr(Repo, "_manifest", patched)
-
+	monkeypatch.setattr(Repo, "_blob", patched)
 	report = inspect_store(store)
-	stale = [issue for issue in report if issue.code == "store.stale_catalog_entry"]
-	assert [issue.location for issue in stale] == ["sub-002"]
-	assert report.ok, "a stale catalog entry costs a scan; it is not a corrupt store"
+	assert [issue.location for issue in report if issue.code == "store.corrupt_index"] == ["sub-002"]
+	assert not report.ok, "an index that disagrees with the data makes queries wrong: an error"
+

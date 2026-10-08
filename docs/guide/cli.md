@@ -190,6 +190,17 @@ Deletes stored data nothing can reach any more — versions dropped by
 only objects older than `--older-than` days (default 14), so recent staged work is
 safe. Every version on a branch or tag is kept, with all the data it pins.
 
+## query
+
+```bash
+neurozarr query "datatype == 'ieeg' and sfreq >= 250"      # matching paths
+neurozarr query "participant.age < 40" --kind recording --count
+neurozarr query --where task=rest --json --columns sfreq,duration_s
+neurozarr query "exists(meta.Manufacturer)" --version v1 --csv
+```
+
+See {doc}`read` for the expression language and the columns.
+
 ## tag
 
 ```bash

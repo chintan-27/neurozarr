@@ -7,10 +7,9 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from .constraints import validate_metadata
 from .entities import Entities
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3  # 3: the catalog attr is replaced by the columnar index under _dataset/_index
 MANIFEST_ATTR = "_neurozarr"
 
 
@@ -29,7 +28,6 @@ class StoreManifest:
 	updated_at: str = field(default_factory=utc_now)
 	created_with: str = "unknown"
 	subject_snapshots: dict[str, str] = field(default_factory=dict)
-	catalog: dict[str, Any] = field(default_factory=dict)
 
 	def __post_init__(self) -> None:
 		if isinstance(self.schema_version, bool) or not isinstance(self.schema_version, int):
@@ -51,7 +49,6 @@ class StoreManifest:
 			Entities(sub_id)
 			if not isinstance(snapshot, str) or not snapshot:
 				raise ValueError(f"store manifest snapshot for {sub_id} must be a non-empty string")
-		validate_metadata(self.catalog, "store catalog")
 
 	@classmethod
 	def from_dict(cls, value: dict[str, Any]) -> "StoreManifest":
@@ -60,11 +57,8 @@ class StoreManifest:
 		if isinstance(version, bool) or not isinstance(version, int):
 			raise ValueError("store manifest has no integer schema_version")
 		snapshots = value.get("subject_snapshots", {})
-		catalog = value.get("catalog", {})
 		if not isinstance(snapshots, dict):
 			raise ValueError("store manifest subject_snapshots must be an object")
-		if not isinstance(catalog, dict):
-			raise ValueError("store manifest catalog must be an object")
 		return cls(
 			schema_version=version,
 			dataset_id=str(value.get("dataset_id", "")),
@@ -72,7 +66,6 @@ class StoreManifest:
 			updated_at=str(value.get("updated_at", "")),
 			created_with=str(value.get("created_with", "unknown")),
 			subject_snapshots={str(k): v for k, v in snapshots.items()},
-			catalog=catalog,
 		)
 
 	def as_dict(self) -> dict[str, Any]:
@@ -84,5 +77,4 @@ class StoreManifest:
 			"updated_at": self.updated_at,
 			"created_with": self.created_with,
 			"subject_snapshots": dict(sorted(self.subject_snapshots.items())),
-			"catalog": self.catalog,
 		}

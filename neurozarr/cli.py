@@ -300,6 +300,24 @@ def cmd_find(args: argparse.Namespace) -> int:
 	return 0
 
 
+def cmd_query(args: argparse.Namespace) -> int:
+	filters = dict(term.split("=", 1) for term in args.where)
+	hits = _open(args).query(args.expression, kind=args.kind, version=args.version, **filters)
+	frame = hits.df
+	if args.columns:
+		frame = frame[[c for c in ["path", *args.columns.split(",")] if c in frame.columns]]
+	if args.json:
+		print(frame.to_json(orient="records", indent=2))
+	elif args.csv:
+		print(frame.to_csv(index=False), end="")
+	elif args.count:
+		print(len(hits))
+	else:
+		for path in hits.paths:
+			print(path)
+	return 0
+
+
 def cmd_tag(args: argparse.Namespace) -> int:
 	repo = _open(args, "a" if args.name else "r")
 	if args.delete:
@@ -441,9 +459,7 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 def cmd_migrate(args: argparse.Namespace) -> int:
 	store = _store(args)
-	repo = Repo.open(store, mode="r", **_options(args.option))
-	if not args.dry_run:
-		repo._mode = "a"  # a legacy store opens read-only; migrating is the one write it allows
+	repo = Repo._for_migration(store, **_options(args.option))  # an old schema can't be opened normally
 	result = repo.migrate(dry_run=args.dry_run)
 	action = "would migrate" if args.dry_run else "migrated"
 	if not result["changed"] and not args.dry_run:
@@ -586,6 +602,15 @@ def build_parser() -> argparse.ArgumentParser:
 	p = command("gc", cmd_gc, "delete stored data nothing can reach (reports only, unless --yes)")
 	p.add_argument("--older-than", type=float, default=14, metavar="DAYS", help="only objects older than this")
 	p.add_argument("--yes", action="store_true", help="really delete")
+
+	p = command("query", cmd_query, "find items by identifiers and metadata, from the index", json_output=True)
+	p.add_argument("expression", nargs="?", help="e.g. \"datatype == 'ieeg' and sfreq >= 250 and participant.age < 40\"")
+	p.add_argument("--where", action="append", default=[], metavar="KEY=VALUE", help="equality filter (repeatable)")
+	p.add_argument("--kind", choices=["recording", "table", "array", "file"])
+	p.add_argument("--version", help="query this version (default: the current branch)")
+	p.add_argument("--columns", help="with --json/--csv: only these columns (comma-separated)")
+	p.add_argument("--csv", action="store_true", help="CSV output")
+	p.add_argument("--count", action="store_true", help="print only the number of matches")
 
 	p = command("tag", cmd_tag, "list tags, or name a version")
 	p.add_argument("name", nargs="?")

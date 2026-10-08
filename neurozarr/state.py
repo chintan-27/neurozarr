@@ -128,7 +128,8 @@ class LocalState:
 	def _index(self, branch: str) -> Path | None:
 		return self.dir / "index" / branch if self.dir else None
 
-	def stage(self, branch: str, repo_id: str, fork: Any, base: str) -> None:
+	def stage(self, branch: str, repo_id: str, fork: Any, base: str,
+			  rows: dict[str, dict[str, Any]] | None = None) -> None:
 		folder = self._index(branch)
 		if folder is None:
 			return
@@ -138,20 +139,26 @@ class LocalState:
 		tmp.write_bytes(pickle.dumps(fork))
 		tmp.replace(folder / f"{repo_id}.fork")
 		(folder / f"{repo_id}.base").write_text(base)
+		(folder / f"{repo_id}.rows.json").write_text(json.dumps(rows or {}))
 
 	def unstage(self, branch: str, repo_id: str) -> None:
 		folder = self._index(branch)
 		if folder is not None:
-			for suffix in (".fork", ".base"):
+			for suffix in (".fork", ".base", ".rows.json"):
 				(folder / f"{repo_id}{suffix}").unlink(missing_ok=True)
 
-	def staged(self, branch: str) -> dict[str, tuple[Any, str]]:
-		"""repo id -> (fork, base snapshot) for everything staged on ``branch``."""
+	def staged(self, branch: str) -> dict[str, tuple[Any, str, dict[str, dict[str, Any]]]]:
+		"""repo id -> (fork, base snapshot, index rows the writer captured) for everything
+		staged on ``branch``."""
 		folder = self._index(branch)
 		if folder is None or not folder.exists():
 			return {}
-		return {path.stem: (pickle.loads(path.read_bytes()), (folder / f"{path.stem}.base").read_text())
-				for path in sorted(folder.glob("*.fork"))}
+		out = {}
+		for path in sorted(folder.glob("*.fork")):
+			rows = folder / f"{path.stem}.rows.json"
+			out[path.stem] = (pickle.loads(path.read_bytes()), (folder / f"{path.stem}.base").read_text(),
+							  json.loads(rows.read_text()) if rows.exists() else {})
+		return out
 
 	def removed(self, branch: str) -> set[str]:
 		folder = self._index(branch)

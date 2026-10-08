@@ -315,6 +315,7 @@ neurozarr commit -m "initial import"          # record a new dataset version
 neurozarr log --oneline                       # versions, branches and tags
 neurozarr show                                # one version: subjects changed, codec plan
 neurozarr ls sub-01 && neurozarr find task=rest
+neurozarr query "sfreq >= 250 and participant.age < 40" --json   # metadata queries from the index
 neurozarr rm -r sub-03 && neurozarr commit -m "drop sub-03"
 neurozarr tag v1
 neurozarr switch -c cleanup && neurozarr rm -r sub-02 && neurozarr commit -m "drop sub-02"

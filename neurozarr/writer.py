@@ -1,5 +1,5 @@
 import itertools
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, cast
@@ -204,6 +204,10 @@ def _clashes(theirs: Any, mine: Any) -> list[str]:
 	return sorted(clashes)
 
 
+def _join(parent: str, name: str) -> str:
+	return f"{parent}/{name}" if parent else name
+
+
 class Writer:
 	"""Internal engine that places standardized items in the store's tree, which
 	is laid out by subject/session/datatype/entities following BIDS naming.
@@ -218,6 +222,10 @@ class Writer:
 		# the snapshot it was forked from, for spotting changes made since.
 		self._session = session
 		self._repo, self._branch, self._base = repo, branch, base
+		self.drifted = False  # after save(): the branch moved since this was staged
+		# index rows of the items written here, by path -- described from what is in hand,
+		# so commit needs no re-read of them (see index.update_subject)
+		self.captured: dict[str, dict[str, Any]] = {}
 		self._codec = codec or CodecConfig()
 		self._label = label
 		# set by Repo.ingest for the duration of a reader's ingest; None for the explicit API
@@ -235,6 +243,22 @@ class Writer:
 		if self.plan is not None:
 			return self.plan.compressors(item_type, dtype, chunks, sample)
 		return "auto"  # zarr's default -- passing None would mean no compression at all
+
+	def _item_path(self, rel: str) -> str:
+		return f"{self._label}/{rel}" if rel else self._label
+
+	def _capture(self, rel: str, kind: str, meta: dict[str, Any], **details: Any) -> None:
+		from .entities import parse_entities
+		from .index import make_row
+		owner = rel if kind == "recording" else rel.rpartition("/")[0]
+		path = self._item_path(rel)
+		self.captured[path] = make_row(path, kind, parse_entities(owner.rsplit("/", 1)[-1]), meta, **details)
+
+	def _forget(self, rel: str, below: bool = True) -> None:
+		"""Drop captured rows a later change made stale; commit re-reads those items."""
+		path = self._item_path(rel)
+		for key in [k for k in self.captured if k == path or (below and k.startswith(path + "/"))]:
+			del self.captured[key]
 
 	def _table_array_options(self, data: np.ndarray) -> dict[str, Any]:
 		"""Chunks and codec for one of a table's stored arrays."""
@@ -294,6 +318,8 @@ class Writer:
 		for start in range(0, shape[-1], chunks[-1]):
 			stop = min(shape[-1], start + chunks[-1])
 			array[:, start:stop] = encode_recording(item.raw, start, stop, layout, self._codec)
+		self._capture(group.path, "recording",
+					  {k: v for k, v in group.attrs.asdict().items() if k != "_neurozarr_item_type"}, node=array)
 		record_write(array.nbytes)
 		log_mem()
 		return True
@@ -325,6 +351,7 @@ class Writer:
 			return False
 		log_progress("Writing table", f"{group.path}/{item.name}", f"{len(item.df.columns)} cols, {len(item.df)} rows")
 		util.create_table(group, item.name, item.df, item.meta, array_options=self._table_array_options)
+		self._capture(_join(group.path, item.name), "table", dict(item.meta), columns=[str(c) for c in item.df.columns])
 		record_write(int(item.df.memory_usage(deep=True).sum()))
 		log_mem()
 		return True
@@ -341,6 +368,7 @@ class Writer:
 			target = group.require_group(item.path[-1])
 		log_progress("Writing attrs", "/".join(item.path) or "(dataset root)")
 		util.set_attrs(target, item.attrs)
+		self._forget("/".join(item.path), below=False)
 		log_mem()
 
 	def _resolve(self, path: tuple[str, ...]) -> tuple[zarr.Group, str]:
@@ -356,6 +384,7 @@ class Writer:
 	def delete(self, path: tuple[str, ...]) -> None:
 		group, name = self._resolve(path)
 		del group[name]
+		self._forget("/".join(path))
 		log_mem()
 
 	def rename(self, path: tuple[str, ...], new_name: str) -> None:
@@ -365,6 +394,7 @@ class Writer:
 			raise FileExistsError(f"{new_name!r} already exists at this location")
 		_copy_node(group[old_name], group, new_name)
 		del group[old_name]
+		self._forget("/".join(path))
 		log_mem()
 
 	def add_external_file(self, item: ExternalFile, existing: ExistingPolicy = ExistingPolicy.ERROR) -> bool:
@@ -380,6 +410,8 @@ class Writer:
 			"reader_hint": item.reader_hint,
 			**item.meta,
 		})
+		self._capture(_join(group.path, item.name), "file", dict(item.meta),
+					  uri=util.safe_uri(str(item.uri)), media_type=item.media_type)
 		log_mem()
 		return True
 
@@ -409,6 +441,7 @@ class Writer:
 			"coords": item.coords,
 			**item.meta,
 		})
+		self._capture(_join(group.path, item.name), "array", dict(item.meta), node=array)
 		record_write(array.nbytes)
 		log_mem()
 		return True
@@ -436,7 +469,26 @@ class Writer:
 	def base(self) -> str | None:
 		return self._base
 
-	def save(self, message: str, metadata: dict[str, Any] | None = None) -> str | None:
+	def put_blob(self, path: str, blob: bytes) -> None:
+		"""Store bytes as one single-chunk uint8 array -- one object, one read."""
+		parent, _, name = path.rpartition("/")
+		group = self.root.require_group(parent) if parent else self.root
+		data = np.frombuffer(blob, dtype=np.uint8)
+		array = group.create_array(name, shape=data.shape, chunks=data.shape or (1,), dtype=np.uint8, overwrite=True)
+		array[...] = data
+
+	def drop(self, path: str) -> None:
+		"""Delete a node if it exists."""
+		parent, _, name = path.rpartition("/")
+		try:
+			group = self.root[parent] if parent else self.root
+		except KeyError:
+			return
+		if isinstance(group, zarr.Group) and name in group:
+			del group[name]
+
+	def save(self, message: str, metadata: dict[str, Any] | None = None,
+			 rebuilt: "Callable[[str], bool] | None" = None) -> str | None:
 		"""Commit what this writer staged. Nothing staged is left alone -- icechunk
 		refuses empty commits, and touching one subject shouldn't fail on the others.
 
@@ -446,15 +498,21 @@ class Writer:
 		that is checked here first: if the branch moved and touched the same arrays
 		(the same chunks, or any node's metadata), nothing is merged.
 		"""
+		self.drifted = False
 		if not self._session.has_uncommitted_changes:
 			return None
 		if self._repo is None:  # a plain writable session (store creation, migration)
 			snapshot = self._session.commit(message, metadata)
 		else:
 			tip = self._repo.lookup_branch(self._branch)
-			if self._base is not None and tip != self._base:
+			self.drifted = self._base is not None and tip != self._base
+			if self.drifted:
+				assert self._base is not None
 				clashes = _clashes(self._repo.diff(from_snapshot_id=self._base, to_snapshot_id=tip),
 								   self._session.status())
+				# nodes the caller rebuilds from the new tip anyway (the dataset index and
+				# manifest) are not a clash
+				clashes = [c for c in clashes if not (rebuilt and rebuilt(c))]
 				if clashes:
 					raise WriteConflictError(
 						f"{self._label or 'store'}: {', '.join(clashes[:5])}{' ...' if len(clashes) > 5 else ''} "

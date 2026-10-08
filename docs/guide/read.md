@@ -49,8 +49,51 @@ subject.recordings()                          # every session of one subject
 repo.find(task="BrainSenseStream", acq="TD")  # across every subject
 ```
 
-{meth}`~neurozarr.Repo.find` opens one session per subject, so pass `sub=` when
-you already know which subject you want.
+{meth}`~neurozarr.Repo.find` answers from the store's index (below) and opens
+nothing: each view it returns opens its recording only when you read from it.
+
+## Querying the index
+
+Every version of a store carries an index of everything in it, so finding items by
+their identifiers *and* their metadata never walks the store:
+
+```python
+hits = repo.query("datatype == 'ieeg' and sfreq >= 250 and participant.age < 40")
+len(hits)                 # counted from the index -- nothing opened yet
+hits.df                   # a DataFrame: path, kind, identifiers, sfreq, n_channels,
+                          # duration_s, dtype, codec, meta.*, participant.*
+for rec in hits:          # the usual lazy views
+    data, times = rec.data(tmin=10, tmax=20)
+
+repo.query(task="rest", sfreq__ge=250, kind="recording")   # the same, as keywords
+repo.query("exists(meta.PowerLineFrequency)", version="v1")  # any version
+repo.get("sub-01/ses-1/ieeg/task-rest")                    # one item by its path
+```
+
+An expression uses `== != < <= > >= in`, `not in`, `and` / `or` / `not`,
+`exists(col)`, and `col("odd-name")` for a column whose name isn't a plain word. A
+missing value never matches a comparison (`!=` included), as in SQL. Columns:
+
+| Column | Holds |
+|---|---|
+| `path`, `kind`, `sub`, `ses`, `datatype`, `prefix` | where the item is; `kind` is `recording`, `table`, `array` or `file` |
+| `task`, `run`, `acq`, ... | every BIDS entity, as text (`run == '01'`) |
+| `sfreq`, `n_channels`, `n_samples`, `duration_s` | recordings |
+| `dtype`, `shape`, `chunks`, `codec`, `nbytes` | anything stored as an array |
+| `meta.<key>` | each scalar in the item's metadata (its JSON sidecar) |
+| `participant.<key>` | the subject's attributes (its `participants.tsv` row) |
+
+How it stays fast, borrowing from Iceberg, DuckDB and Parquet: each version holds
+one index per subject -- a columnar table with a row per item, dictionary-encoded,
+sorted by path, stored as a single object -- and one summary with a row per subject
+holding min/max of every numeric column and which values each categorical column
+takes (a Bloom filter when there are many). A query first rules out every subject
+the summary says can't match, then filters the remaining indexes with numpy, and
+opens nothing at all -- a result's data is read only when you ask for it. The index
+is updated at each commit from what changed: the writer describes each item as it
+writes it, so committing re-reads only items changed some other way (metadata
+edits, renames). It is always exactly the version it belongs to, and is cached by
+its content digest.
 
 ## Reading the values
 
