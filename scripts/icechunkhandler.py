@@ -5,5 +5,5 @@ from neurozarr import BidsReader, Repo
 HOME_DIR = Path("./")
 
 repo = Repo(HOME_DIR / "zarr")
-repo.ingest(BidsReader(HOME_DIR / "BIDS"))
-repo.save("Convert BIDS dataset to zarr")
+repo.add(BidsReader(HOME_DIR / "BIDS"))
+repo.commit("Convert BIDS dataset to zarr")

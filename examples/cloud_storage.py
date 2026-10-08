@@ -1,6 +1,6 @@
 """Write a store to object storage instead of local disk.
 
-Nothing about the data API changes -- only the target passed to Repo.create/open.
+Nothing about the data API changes -- only the target passed to Repo.init/open.
 
     python examples/cloud_storage.py
 """
@@ -12,9 +12,9 @@ from neurozarr import BidsReader, Repo
 
 def to_s3():
 	# credentials come from the environment / instance role by default
-	repo = Repo.create("s3://my-bucket/studies/dbs", region="us-east-1")
-	repo.ingest(BidsReader("./BIDS"))
-	repo.save("convert to s3")
+	repo = Repo.init("s3://my-bucket/studies/dbs", region="us-east-1")
+	repo.add(BidsReader("./BIDS"))
+	repo.commit("convert to s3")
 	return repo
 
 
@@ -41,7 +41,7 @@ def with_explicit_credentials():
 
 def in_memory():
 	"""No storage at all -- useful in tests and scratch work."""
-	repo = Repo.create("memory://scratch")
+	repo = Repo.init("memory://scratch")
 	print("in-memory store ready:", repo.target)
 	return repo
 

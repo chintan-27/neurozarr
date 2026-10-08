@@ -29,7 +29,6 @@ import pandas as pd
 
 from neurozarr import Repo
 from neurozarr.log import logger as neurozarr_logger, set_verbosity
-from neurozarr.parallel import convert_parallel
 from neurozarr.readers import BidsReader, ManifestReader
 
 print = functools.partial(print, flush=True)  # correct interleaving with neurozarr's own log lines below
@@ -67,7 +66,7 @@ def step1_explicit() -> None:
 	edf = sorted((ses_dir / "ieeg").glob("*task-ChronicLFP_run-2_ieeg.edf"))[0]
 	therapy_tsv = sorted((ses_dir / "beh").glob("*task-TherapyHistory_beh.tsv"))[0]
 
-	repo = Repo.create(str(dest), verbose=True)
+	repo = Repo.init(str(dest), verbose=True)
 	subject = repo.create_subject(SUBJECT, attrs={"note": "added via explicit construction for the demo"})
 	visit = subject.add_visit(ses_dir.name)
 
@@ -75,11 +74,11 @@ def step1_explicit() -> None:
 	raw = mne.io.read_raw_edf(edf, preload=False, verbose=False)
 	visit.add_recording(raw, task="ChronicLFP", run=2)
 
-	print(f"\n-- reading {therapy_tsv.name} with pandas ourselves, then handing it to add_behavioral_table --")
+	print(f"\n-- reading {therapy_tsv.name} with pandas ourselves, then handing it to add_table --")
 	therapy_df = pd.read_csv(therapy_tsv, sep="\t")
-	visit.add_behavioral_table(therapy_df, task="TherapyHistory")
+	visit.add_table(therapy_df, task="TherapyHistory")
 
-	snapshot = repo.save("built sub-004 explicitly")
+	snapshot = repo.commit("built sub-004 explicitly")
 	print(f"\ndone -- {dest} now holds 1 recording + 1 table, snapshot {snapshot}")
 
 	readback = Repo.open(str(dest)).subject(SUBJECT).visit(ses_dir.name)
@@ -92,9 +91,9 @@ def step2_bids_reader() -> None:
 	shutil.rmtree(dest, ignore_errors=True)
 
 	t0 = time.perf_counter()
-	repo = Repo.create(str(dest), verbose=True)
-	repo.ingest(BidsReader(str(SOURCE), subjects=[SUBJECT]))
-	snapshot = repo.save("converted sub-004 with BidsReader")
+	repo = Repo.init(str(dest), verbose=True)
+	repo.add(BidsReader(str(SOURCE), subjects=[SUBJECT]))
+	snapshot = repo.commit("converted sub-004 with BidsReader")
 	elapsed = time.perf_counter() - t0
 
 	readback = Repo.open(str(dest)).subject(SUBJECT)
@@ -125,9 +124,9 @@ def step3_manifest_reader() -> None:
 	])
 	print("manifest:\n", manifest.to_string(index=False))
 
-	repo = Repo.create(str(dest), verbose=True)
-	repo.ingest(ManifestReader(manifest))
-	snapshot = repo.save("converted 2 files with ManifestReader")
+	repo = Repo.init(str(dest), verbose=True)
+	repo.add(ManifestReader(manifest))
+	snapshot = repo.commit("converted 2 files with ManifestReader")
 
 	readback = Repo.open(str(dest)).subject(SUBJECT)
 	visit = readback.visit(readback.visits()[0])
@@ -155,7 +154,10 @@ def step4_bulk_and_benchmark() -> None:
 
 	source_mb = sum(dir_size_mb(SOURCE / s) for s in subjects)
 	t0 = time.perf_counter()
-	counts = convert_parallel(str(staging), str(dest), workers=len(subjects), verbose=True)
+	repo = Repo.init(str(dest), verbose=True)
+	repo.add(str(staging), workers=len(subjects))
+	repo.commit("convert")
+	counts = {sub: len(Repo.open(str(dest)).subject(sub).recordings()) for sub in subjects}
 	elapsed = time.perf_counter() - t0
 	store_mb = dir_size_mb(dest)
 	total_recordings = sum(counts.values())

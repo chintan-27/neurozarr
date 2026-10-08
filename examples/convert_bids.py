@@ -12,9 +12,9 @@ from neurozarr import BidsReader, Repo, set_verbosity
 def main(source="./BIDS", dest="./study.zarr"):
 	set_verbosity(logging.INFO)
 
-	repo = Repo.create(dest)
-	repo.ingest(BidsReader(source))
-	repo.save(f"convert {source}")
+	repo = Repo.init(dest)
+	repo.add(BidsReader(source))
+	repo.commit(f"convert {source}")
 	repo.tag("v1")
 
 	print(f"{dest}: {len(repo.subjects())} subjects -> {', '.join(repo.subjects())}")

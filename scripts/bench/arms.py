@@ -159,13 +159,13 @@ class NeurozarrArm:
 		from neurozarr.readers import reader_for
 
 		# A benchmark run always wants a fresh store, never a resume/append --
-		# Repo.create() refuses an existing store, which a prior run killed
+		# Repo.init() refuses an existing store, which a prior run killed
 		# mid-conversion (e.g. by a timeout) can leave behind.
 		if dest.exists():
 			shutil.rmtree(dest)
-		repo = Repo.create(dest)
-		repo.ingest(reader_for(source))
-		repo.save("bench")
+		repo = Repo.init(dest)
+		repo.add(reader_for(source))
+		repo.commit("bench")
 
 	def open(self, dest: Path) -> "NeurozarrStore":
 		return NeurozarrStore(dest)

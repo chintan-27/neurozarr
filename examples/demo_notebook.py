@@ -100,7 +100,7 @@ def _(mo):
 
     **The type of thing being stored** is always exactly one of five fixed
     box types -- `Recording`, `Table`, `Array`, `ExternalFile`, or `Attrs`
-    (metadata with no data of its own). `add_recording`/`add_behavioral_table`
+    (metadata with no data of its own). `add_recording`/`add_table`
     don't invent anything new: they build a `Recording`/`Table` out of what
     you hand them and pass it to the one piece of code that actually writes
     to storage. `raw` below is a plain `mne.io.Raw` -- neurozarr never sees
@@ -122,9 +122,9 @@ def _(Path, SOURCE, SUBJECT):
 
 @app.cell
 def _(Repo, dest, shutil):
-    # Repo.create makes a brand new store -- one call, nothing written yet.
+    # Repo.init makes a brand new store -- one call, nothing written yet.
     shutil.rmtree(dest, ignore_errors=True)
-    repo = Repo.create(str(dest), verbose=True)
+    repo = Repo.init(str(dest), verbose=True)
     return (repo,)
 
 
@@ -189,7 +189,7 @@ def _(raw, recording_entities, visit):
 @app.cell
 def _(pd, tsv):
     # Same idea for the table: plain pandas.read_csv. Again, the real
-    # DataFrame about to be handed to add_behavioral_table -- not a
+    # DataFrame about to be handed to add_table -- not a
     # description of its shape.
     therapy_df = pd.read_csv(tsv, sep="\t")
     therapy_df
@@ -198,7 +198,7 @@ def _(pd, tsv):
 
 @app.cell
 def _(therapy_df):
-    # Same idea -- a plain pandas type until add_behavioral_table wraps it
+    # Same idea -- a plain pandas type until add_table wraps it
     # into a Table.
     type(therapy_df)
     return
@@ -213,9 +213,9 @@ def _(SUBJECT, visit):
 
 @app.cell
 def _(table_entities, therapy_df, visit):
-    # Column dtypes survive the round trip through add_behavioral_table.
+    # Column dtypes survive the round trip through add_table.
     # existing="replace" for the same reason as add_recording above.
-    visit.add_behavioral_table(therapy_df, **table_entities, existing="replace")
+    visit.add_table(therapy_df, **table_entities, existing="replace")
     table_added = True
     return (table_added,)
 
@@ -225,7 +225,7 @@ def _(recording_added, repo, table_added):
     # Nothing is committed until save() -- this is the one real Icechunk
     # commit for everything added above.
     assert recording_added and table_added
-    snapshot = repo.save("built sub-004 explicitly")
+    snapshot = repo.commit("built sub-004 explicitly")
     snapshot
     return (snapshot,)
 
@@ -234,7 +234,7 @@ def _(recording_added, repo, table_added):
 def _(SUBJECT, repo, snapshot):
     # How it actually sits in storage now -- queried straight off the real
     # zarr tree (zarr.Group.tree()), not a hand-written description of it.
-    # The two recording/table facades from add_recording/add_behavioral_table
+    # The two recording/table facades from add_recording/add_table
     # are visible here as real nested groups and arrays: "data" packed as
     # int16 (decision 5), the events table mne's own annotations produced
     # automatically, and the behavioral table's columns bundled into shared
@@ -432,7 +432,7 @@ def _(Path):
 @app.cell
 def _(Repo, bids_dest, shutil):
     shutil.rmtree(bids_dest, ignore_errors=True)
-    bids_repo = Repo.create(str(bids_dest), verbose=True)
+    bids_repo = Repo.init(str(bids_dest), verbose=True)
     return (bids_repo,)
 
 
@@ -441,14 +441,14 @@ def _(BidsReader, SOURCE, SUBJECT, bids_repo, time):
     # One call: BidsReader walks every session/datatype/sidecar for this
     # subject and streams it all through ingest.
     bids_t0 = time.perf_counter()
-    bids_repo.ingest(BidsReader(str(SOURCE), subjects=[SUBJECT]))
+    bids_repo.add(BidsReader(str(SOURCE), subjects=[SUBJECT]))
     bids_ingest_seconds = time.perf_counter() - bids_t0
     return (bids_ingest_seconds,)
 
 
 @app.cell
 def _(bids_ingest_seconds, bids_repo):
-    bids_snapshot = bids_repo.save("converted sub-004 with BidsReader")
+    bids_snapshot = bids_repo.commit("converted sub-004 with BidsReader")
     bids_snapshot, round(bids_ingest_seconds, 1)
     return (bids_snapshot,)
 
@@ -523,14 +523,14 @@ def _(Path):
 @app.cell
 def _(Repo, manifest_dest, shutil):
     shutil.rmtree(manifest_dest, ignore_errors=True)
-    manifest_repo = Repo.create(str(manifest_dest), verbose=True)
+    manifest_repo = Repo.init(str(manifest_dest), verbose=True)
     return (manifest_repo,)
 
 
 @app.cell
 def _(ManifestReader, manifest, manifest_repo):
-    manifest_repo.ingest(ManifestReader(manifest))
-    manifest_snapshot = manifest_repo.save("converted 2 files with ManifestReader")
+    manifest_repo.add(ManifestReader(manifest))
+    manifest_snapshot = manifest_repo.commit("converted 2 files with ManifestReader")
     manifest_snapshot
     return (manifest_snapshot,)
 
@@ -555,7 +555,7 @@ def _(mo):
     Not every dataset splits into visits. `sub-004` here does, so this part
     uses a small synthetic recording instead -- the point is the shape of
     the call, not the data. `Subject` has the same `add_recording` /
-    `add_behavioral_table` / `add_array` / `add_derivative` methods `Visit`
+    `add_table` / `add_array` / `add_derivative` methods `Visit`
     has (they come from the same shared code internally) -- no `add_visit()`
     call at all, and the resulting path carries no `ses-` segment.
     """)
@@ -574,7 +574,7 @@ def _(mne, np):
 def _(Path, Repo, shutil):
     sessionless_dest = Path("zarr/demo_sessionless.zarr")
     shutil.rmtree(sessionless_dest, ignore_errors=True)
-    sessionless_repo = Repo.create(str(sessionless_dest), verbose=True)
+    sessionless_repo = Repo.init(str(sessionless_dest), verbose=True)
     sessionless_subject = sessionless_repo.create_subject("sub-001")
     return sessionless_dest, sessionless_repo, sessionless_subject
 
@@ -589,7 +589,7 @@ def _(sessionless_raw, sessionless_subject):
 
 @app.cell
 def _(sessionless_repo):
-    sessionless_snapshot = sessionless_repo.save("session-less recording")
+    sessionless_snapshot = sessionless_repo.commit("session-less recording")
     sessionless_snapshot
     return (sessionless_snapshot,)
 
@@ -642,10 +642,10 @@ def _(mne, np):
 @app.cell
 def _(Repo, chunk_demo_raw):
     # Default CodecConfig.
-    chunk_default_repo = Repo.create("memory://demo_chunk_default", verbose=True)
+    chunk_default_repo = Repo.init("memory://demo_chunk_default", verbose=True)
     chunk_default_repo.create_subject("sub-001").add_visit("ses-1").add_recording(
         chunk_demo_raw, task="Rest", existing="replace")
-    chunk_default_repo.save("default chunking")
+    chunk_default_repo.commit("default chunking")
     chunk_default_rec = chunk_default_repo.subject("sub-001").visit("ses-1").recording(task="Rest")
     chunk_default_rec.array.chunks
     return (chunk_default_rec,)
@@ -655,14 +655,14 @@ def _(Repo, chunk_demo_raw):
 def _(CodecConfig, Repo, chunk_demo_raw):
     # Same recording, a smaller target size and a lower sample cap -- real
     # values, not a description of what would happen.
-    chunk_custom_repo = Repo.create(
+    chunk_custom_repo = Repo.init(
         "memory://demo_chunk_custom",
         codec=CodecConfig(chunk_target_bytes=1 * 1024 * 1024, max_chunk_samples=16384),
         verbose=True,
     )
     chunk_custom_repo.create_subject("sub-001").add_visit("ses-1").add_recording(
         chunk_demo_raw, task="Rest", existing="replace")
-    chunk_custom_repo.save("custom chunking")
+    chunk_custom_repo.commit("custom chunking")
     chunk_custom_rec = chunk_custom_repo.subject("sub-001").visit("ses-1").recording(task="Rest")
     chunk_custom_rec.array.chunks
     return

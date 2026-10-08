@@ -172,14 +172,14 @@ def main() -> None:
 		# each codec gets its own fresh base_path instead.
 		codec_dir = repo_dir / codec_name
 		try:
-			repo = Repo.create(codec_dir, codec=CodecConfig(filters, compressors, bitround_k, dtype))
+			repo = Repo.init(codec_dir, codec=CodecConfig(filters, compressors, bitround_k, dtype))
 
 			t0 = time.perf_counter()
-			repo.ingest(_build_reader(args))
+			repo.add(_build_reader(args))
 			write_time = time.perf_counter() - t0
 
 			t0 = time.perf_counter()
-			repo.save(f"convert with {codec_name}")
+			repo.commit(f"convert with {codec_name}")
 			commit_time = time.perf_counter() - t0
 
 			stored_bytes = _dir_size(codec_dir)

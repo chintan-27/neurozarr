@@ -7,7 +7,7 @@ Rather than race a real SIGKILL against an in-flight write (flaky, and the
 outcome it would show is identical to this), the "crash" is simulated
 deterministically: write some items, then stop without finalizing -- for
 plain Zarr that means never writing a completion marker (there isn't one to
-write), for Icechunk it means never calling repo.save(). That's the same
+write), for Icechunk it means never calling repo.commit(). That's the same
 state a real crash at that exact point would leave; this way it's
 reproducible instead of timing-dependent.
 
@@ -81,12 +81,12 @@ def icechunk_crash(dest: Path) -> dict:
 	Icechunk session that never calls save()."""
 	if dest.exists():
 		shutil.rmtree(dest)
-	repo = Repo.create(dest)
+	repo = Repo.init(dest)
 	repo.create_subject("sub-01")
 	visit = repo.subject("sub-01").add_visit("ses-1")
 	for i in range(2):
 		visit.add_recording(_synthetic_raw(i), existing=ExistingPolicy.REPLACE, task=f"rec{i}")
-	repo.save("first two recordings, committed")
+	repo.commit("first two recordings, committed")
 
 	# Now start a second session: write rec-2 (mid-write equivalent -- the
 	# writer always writes the whole array per add_recording(), so "mid-write"
@@ -94,7 +94,7 @@ def icechunk_crash(dest: Path) -> dict:
 	# point under test is the save() boundary, not array-level chunking) and
 	# deliberately never call save() -- this IS the crash.
 	visit.add_recording(_synthetic_raw(2), existing=ExistingPolicy.REPLACE, task="rec2")
-	# no repo.save() -- simulated crash, this session's changes are abandoned
+	# no repo.commit() -- simulated crash, this session's changes are abandoned
 
 	# A FRESH, independent Repo instance -- a reader with no knowledge of the
 	# crashed process, exactly like a reader coming along after a real crash.

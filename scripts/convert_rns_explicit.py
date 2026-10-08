@@ -1,5 +1,5 @@
 """Convert RNS_Epilepsy-iBIDS by hand -- Repo/Subject/Visit calls you write
-yourself, walking the real directory tree, instead of `repo.ingest(BidsReader(...))`.
+yourself, walking the real directory tree, instead of `repo.add(BidsReader(...))`.
 
 	python scripts/convert_rns_explicit.py datasets/rns .bench_scratch/rns_explicit --subjects sub-01
 
@@ -78,7 +78,7 @@ def main() -> None:
 	existing = ExistingPolicy(args.existing)
 	wanted = set(args.subjects.split(",")) if args.subjects else None
 
-	repo = Repo.create(args.dest)
+	repo = Repo.init(args.dest)
 	t0 = time.perf_counter()
 	total_recordings = 0
 
@@ -99,7 +99,7 @@ def main() -> None:
 			total_recordings += n
 			print(f"  {ses_id}: {n} recording(s)")
 
-	repo.save("explicit RNS conversion")
+	repo.commit("explicit RNS conversion")
 	print(f"\n{total_recordings} recordings, {len(repo.subjects())} subject(s), "
 		  f"{time.perf_counter() - t0:.1f}s -> {args.dest}")
 

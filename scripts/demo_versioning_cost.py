@@ -42,9 +42,9 @@ def main() -> None:
 
 	sub_id = args.source.name
 	from neurozarr.readers import BidsReader
-	repo = Repo.create(args.dest)
-	repo.ingest(BidsReader(args.source.parent, subjects=[sub_id]))
-	repo.save("initial conversion")
+	repo = Repo.init(args.dest)
+	repo.add(BidsReader(args.source.parent, subjects=[sub_id]))
+	repo.commit("initial conversion")
 
 	subject = repo.subject(sub_id)
 	recordings = subject.recordings()
@@ -58,7 +58,7 @@ def main() -> None:
 	baseline_data, _ = target.data()
 	baseline_mean = baseline_data.mean(axis=-1)
 
-	before_history = repo.history(sub_id)
+	before_history = repo.log(sub_id)
 	pre_correction_snapshot = before_history[0][0]
 
 	# Re-read the same source file, preload it, nudge one real sample, and
@@ -78,10 +78,10 @@ def main() -> None:
 
 	visit = subject.visit(ses_id) if ses_id else subject
 	visit.add_recording(raw, existing=ExistingPolicy.REPLACE, **entities)
-	repo.save("correct one sample")
+	repo.commit("correct one sample")
 
 	after_bytes = _dir_size(args.dest)
-	after_history = repo.history(sub_id)
+	after_history = repo.log(sub_id)
 	post_correction_snapshot = after_history[0][0]
 
 	# Pinned read: the OLD snapshot id must still return the OLD value.

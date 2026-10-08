@@ -37,7 +37,7 @@ def main(store="./study.zarr"):
 	print(f"\nrecordings with task=BrainSenseStream: {len(matches)}")
 
 	print("\nhistory:")
-	for snapshot_id, message, when in repo.history(sub_id):
+	for snapshot_id, message, when in repo.log(sub_id):
 		print(f"  {str(snapshot_id)[:12]}  {when:%Y-%m-%d %H:%M}  {message}")
 	print("tags:", repo.tags(sub_id) or "(none)")
 

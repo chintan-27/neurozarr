@@ -42,9 +42,9 @@ def main():
 	manifest = make_example_files()
 	print(manifest.to_string(index=False), "\n")
 
-	repo = Repo.create("./manifest_study.zarr")
-	repo.ingest(ManifestReader(manifest))
-	repo.save("convert from manifest")
+	repo = Repo.init("./manifest_study.zarr")
+	repo.add(ManifestReader(manifest))
+	repo.commit("convert from manifest")
 
 	visit = repo.subject("sub-001").visit("ses-1")
 	print("recordings:", [r.path for r in visit.recordings()])
