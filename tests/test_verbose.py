@@ -18,11 +18,11 @@ def _reset_verbosity():
 
 def test_verbose_true_logs_writes_and_commits(store, raw, table, caplog):
 	with caplog.at_level(logging.INFO, logger="neurozarr"):
-		repo = Repo.create(store, verbose=True)
+		repo = Repo.init(store, verbose=True)
 		visit = repo.create_subject("sub-001").add_visit("ses-1")
 		visit.add_recording(raw, task="Stream", run=1)
-		visit.add_behavioral_table(table, task="Log")
-		repo.save("test data")
+		visit.add_table(table, task="Log")
+		repo.commit("test data")
 
 	messages = "\n".join(caplog.messages)
 	assert "Writing recording" in messages
@@ -33,8 +33,8 @@ def test_verbose_true_logs_writes_and_commits(store, raw, table, caplog):
 
 def test_verbose_false_by_default_stays_quiet(store, raw, caplog):
 	logger.setLevel(logging.WARNING)  # undo any earlier verbose=True test in this session
-	repo = Repo.create(store)
+	repo = Repo.init(store)
 	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="Stream", run=1)
-	repo.save("test data")
+	repo.commit("test data")
 
 	assert caplog.records == []

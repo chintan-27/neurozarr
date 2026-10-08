@@ -15,21 +15,38 @@ Creating and filling a store:
 .. autosummary::
 
    neurozarr.Repo
-   neurozarr.Repo.create
+   neurozarr.Repo.init
    neurozarr.Repo.open
-   neurozarr.Repo.create_subject
-   neurozarr.Repo.ingest
-   neurozarr.Repo.save
+   neurozarr.Repo.add
+   neurozarr.Repo.status
+   neurozarr.Repo.reset
+   neurozarr.Repo.commit
    neurozarr.Repo.transaction
-   neurozarr.Repo.abort
+   neurozarr.Repo.rm
+   neurozarr.Repo.mv
+   neurozarr.Repo.create_subject
+   neurozarr.Repo.log
+   neurozarr.Repo.show
+   neurozarr.Repo.resolve
+   neurozarr.Repo.ls
+   neurozarr.Repo.find
+   neurozarr.Repo.tag
+   neurozarr.Repo.tags
+   neurozarr.Repo.head
+   neurozarr.Repo.branches
+   neurozarr.Repo.branch
+   neurozarr.Repo.switch
+   neurozarr.Repo.delete_branch
+   neurozarr.Repo.diff
+   neurozarr.Repo.revert
+   neurozarr.Repo.reset_hard
+   neurozarr.Repo.merge
+   neurozarr.Repo.clone
+   neurozarr.Repo.gc
    neurozarr.Repo.migrate
    neurozarr.Repo.subjects
    neurozarr.Repo.subject
    neurozarr.Repo.describe
-   neurozarr.Repo.find
-   neurozarr.Repo.history
-   neurozarr.Repo.tag
-   neurozarr.Repo.tags
    neurozarr.Subject.add_visit
    neurozarr.Subject.visits
    neurozarr.Subject.visit
@@ -38,13 +55,12 @@ Creating and filling a store:
    neurozarr.Subject.arrays
    neurozarr.Subject.external_files
    neurozarr.Subject.add_recording
-   neurozarr.Subject.add_behavioral_table
+   neurozarr.Subject.add_table
    neurozarr.Subject.add_derivative
    neurozarr.Subject.add_array
    neurozarr.Visit.add_recording
-   neurozarr.Visit.add_behavioral_table
+   neurozarr.Visit.add_table
    neurozarr.Visit.add_derivative
-   neurozarr.Visit.add
    neurozarr.Visit.add_array
    neurozarr.Visit.recording
    neurozarr.Visit.describe
@@ -131,12 +147,6 @@ When something is wrong:
    neurozarr.ValidationReport
    neurozarr.ValidationIssue
    neurozarr.Severity
-
-Parallel conversion (narrative guide: :doc:`guide/performance`):
-
-.. autosummary::
-
-   neurozarr.parallel.convert_parallel
 
 Validation, verification, and storage:
 
@@ -240,11 +250,6 @@ Writing
 
 .. autoclass:: neurozarr.ExistingPolicy
    :members:
-
-Parallel conversion
--------------------
-
-.. autofunction:: neurozarr.parallel.convert_parallel
 
 Storage, validation, and verification
 --------------------------------------

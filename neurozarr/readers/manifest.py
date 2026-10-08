@@ -1,3 +1,4 @@
+import copy
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -12,6 +13,7 @@ from ..errors import ValidationError
 from ..items import Attrs, ExternalFile, Item, Recording, Table
 from ..log import log_progress
 from .bids import MNE_READABLE_EXTS
+from ..codecs import CodecPlan, check_plan_options, plan_codecs
 from .formats import UnclaimedPolicy, decode_embed, decoder_for
 from ..util import source_provenance
 
@@ -38,6 +40,13 @@ class ManifestReader:
 	mne. A file in any other format is recorded as a reference to its path
 	rather than failing the run.
 
+	A row with no value in ``path_col`` carries no file -- it describes
+	dataset/subject/session-level metadata instead, the way ``dataset_description.json``
+	or ``participants.tsv`` does for :class:`BidsReader`. Its :class:`~neurozarr.Attrs`
+	path is built from whichever of sub/ses/datatype/name are filled in on that row
+	(blank columns are skipped; an all-blank row means dataset-wide), and ``meta_col``
+	becomes that item's attrs dict directly, not metadata merged onto a file.
+
 	Parameters
 	----------
 	manifest : pandas.DataFrame or str or pathlib.Path
@@ -53,12 +62,6 @@ class ManifestReader:
 		per-row metadata. Metadata may be a dict or a JSON string. Each is
 		optional in the table; only the column *name* is configured here.
 
-	A row with no value in ``path_col`` carries no file -- it describes
-	dataset/subject/session-level metadata instead, the way ``dataset_description.json``
-	or ``participants.tsv`` does for :class:`BidsReader`. Its :class:`~neurozarr.Attrs`
-	path is built from whichever of sub/ses/datatype/name are filled in on that row
-	(blank columns are skipped; an all-blank row means dataset-wide), and ``meta_col``
-	becomes that item's attrs dict directly, not metadata merged onto a file.
 	entity_cols : list of str, optional
 		Columns to treat as BIDS entities. By default every column that isn't
 		one of the six named above becomes an entity, so a ``task`` or ``run``
@@ -73,6 +76,17 @@ class ManifestReader:
 	row_reader : callable, optional
 		Called with each row, returning the item to store. Bypasses all
 		column handling above, for sources that need custom logic.
+	optimize : {"balanced", "speed", "size"}, default "balanced"
+		How :meth:`codec_plan` trades size against speed: Blosc lz4 (fastest),
+		zstd level 5, or zstd level 9 (smallest), each with the shuffle mode that
+		probing finds best for the data.
+	probe_level : {0, 1, 2, 3, 4}, default 2
+		How finely :meth:`codec_plan` groups data, one codec decision per: 0,
+		nothing (zarr's default); 1, item type; 2, item type x stored dtype; 3,
+		item type x stored dtype x chunk shape; 4, each array, probed as it is
+		written. See :mod:`neurozarr.codecs`.
+	probe_files : int, default 8
+		Arrays probed per group, from files spread across subjects.
 
 	Raises
 	------
@@ -82,8 +96,8 @@ class ManifestReader:
 
 	Examples
 	--------
-	>>> repo.ingest(ManifestReader("manifest.csv"))
-	>>> repo.ingest(ManifestReader(df, sub_col="subject", path_col="filepath"))
+	>>> repo.add(ManifestReader("manifest.csv"))
+	>>> repo.add(ManifestReader(df, sub_col="subject", path_col="filepath"))
 	"""
 
 	def __init__(self, manifest: "pd.DataFrame | str | Path", *, path_col: str = "path",
@@ -92,7 +106,8 @@ class ManifestReader:
 				 entity_cols: list[str] | None = None,
 				 checksum: bool = False,
 				 unclaimed: UnclaimedPolicy | str = UnclaimedPolicy.REFERENCE,
-				 row_reader: Callable[[Any], Item] | None = None):
+				 row_reader: Callable[[Any], Item] | None = None, optimize: str = "balanced",
+				 probe_level: int = 2, probe_files: int = 8):
 		self.manifest_path = None if isinstance(manifest, pd.DataFrame) else Path(manifest)
 		self.base_dir = Path.cwd() if self.manifest_path is None else self.manifest_path.resolve().parent
 		if isinstance(manifest, pd.DataFrame):
@@ -110,6 +125,8 @@ class ManifestReader:
 		self.checksum = checksum
 		self.unclaimed = UnclaimedPolicy(unclaimed)
 		self.row_reader = row_reader
+		check_plan_options(optimize, probe_level)
+		self.optimize, self.probe_level, self.probe_files = optimize, probe_level, probe_files
 
 		if row_reader is None:  # a row_reader handles its own columns
 			missing = [c for c in (sub_col, path_col) if c not in self.df.columns]
@@ -119,6 +136,25 @@ class ManifestReader:
 					f"(has: {', '.join(map(str, self.df.columns))}). "
 					"Pass sub_col=/path_col= if your columns are named differently."
 				)
+
+	def codec_plan(self, layout: Any = None) -> "CodecPlan":
+		"""Probe a few files and decide each kind of data's codec; see :mod:`neurozarr.codecs`."""
+		return plan_codecs(self, layout, self.optimize, self.probe_level, self.probe_files)
+
+	def subjects(self) -> list[str] | None:
+		"""The subjects named in the table, so :meth:`Repo.add` can split the work.
+		``None`` with a ``row_reader``, whose items can't be known without reading."""
+		if self.row_reader is not None or self.sub_col not in self.df.columns:
+			return None
+		return sorted({str(v) for v in self.df[self.sub_col].dropna()})
+
+	def for_subject(self, sub: str | None) -> "ManifestReader":
+		"""This reader limited to one subject's rows; ``None`` keeps the rows with no
+		subject, which are dataset-level metadata."""
+		column = self.df[self.sub_col]
+		limited = copy.copy(self)
+		limited.df = self.df[column.isna()] if sub is None else self.df[column.astype(str) == sub]
+		return limited
 
 	def read(self) -> Iterator[Item]:
 		log_progress("Reading manifest", str(self.manifest_path) if self.manifest_path else "(inline DataFrame)",

@@ -8,11 +8,11 @@ def test_reopening_does_not_wipe_existing_data(store, raw):
 	so reopening a store to add data silently erased everything already in it."""
 	first = Repo(store)
 	first.create_subject("sub-001", attrs={"age": 63}).add_visit("ses-1").add_recording(raw, task="First")
-	first.save("first")
+	first.commit("first")
 
 	second = Repo(store)  # reopen the SAME subject and add another visit
 	second.create_subject("sub-001").add_visit("ses-2").add_recording(raw, task="Second")
-	second.save("second")
+	second.commit("second")
 
 	subject = Repo(store).subject("sub-001")
 	assert subject.visits() == ["ses-1", "ses-2"], "reopening wiped an existing session"
@@ -27,18 +27,18 @@ def test_reconverting_the_same_source_is_idempotent(store, raw):
 		repo = Repo(store)
 		repo.create_subject("sub-001").add_visit("ses-1").add_recording(
 			raw, task="X", run=1, existing="replace")
-		repo.save(message)
+		repo.commit(message)
 
 	subject = Repo(store).subject("sub-001")
 	assert len(subject.recordings()) == 1, "re-ingest duplicated the recording"
-	assert [m for _, m, _ in Repo(store).history("sub-001")][:2] == ["second pass", "first pass"]
+	assert [m for _, m, _ in Repo(store).log("sub-001")][:2] == ["second pass", "first pass"]
 
 
 def test_each_subject_is_an_independent_repo(store, raw):
 	repo = Repo(store)
 	for sub_id in ("sub-001", "sub-002"):
 		repo.create_subject(sub_id).add_visit("ses-1").add_recording(raw, task="X")
-	repo.save("two subjects")
+	repo.commit("two subjects")
 
 	# each subject's tree starts at its own sessions -- no redundant sub-XXX level
 	root = Repo(store).subject("sub-002").root()
@@ -51,7 +51,7 @@ def test_dataset_level_attrs_go_to_their_own_repo(store):
 	repo = Repo(store)
 	repo._route_attrs(Attrs((), {"Name": "My Study"}))
 	repo._route_attrs(Attrs(("sub-001",), {"age": 40}))
-	repo.save("attrs")
+	repo.commit("attrs")
 
 	assert repo._icechunk_repo("_dataset") is not None
 	assert Repo(store).subject("sub-001").attrs == {"age": 40}
@@ -61,13 +61,13 @@ def test_set_attrs_merges_at_every_level_after_creation(store):
 	repo = Repo(store)
 	subject = repo.create_subject("sub-001", attrs={"age": 40})
 	subject.add_visit("ses-1", attrs={"device": "A"})
-	repo.save("first")
+	repo.commit("first")
 
 	repo = Repo(store)
 	repo.set_attrs({"Name": "My Study"})
 	repo.subject("sub-001").set_attrs({"handedness": "right"})
 	repo.subject("sub-001").visit("ses-1").set_attrs({"technician": "B"})
-	repo.save("attrs added later")
+	repo.commit("attrs added later")
 
 	reopened = Repo(store)
 	assert reopened.subject("sub-001").attrs == {"age": 40, "handedness": "right"}
@@ -84,11 +84,11 @@ def test_set_attrs_on_recording_table_array_and_external_file_views(store, raw):
 	repo = Repo(store)
 	visit = repo.create_subject("sub-001").add_visit("ses-1")
 	visit.add_recording(raw, task="Rest")
-	visit.add_behavioral_table(pd.DataFrame({"x": [1, 2]}), task="Impedance")
+	visit.add_table(pd.DataFrame({"x": [1, 2]}), task="Impedance")
 	visit.add_array("arr", np.zeros((2, 2)), ("x", "y"), datatype="ieeg", task="Rest2")
 	repo._writer_for("sub-001").add_external_file(
 		ExternalFile(Entities("sub-001", "ses-1", "ieeg", {"task": "Rest3"}), "sidecar", "somewhere.mystery"))
-	repo.save("initial")
+	repo.commit("initial")
 
 	repo = Repo(store)
 	visit = repo.subject("sub-001").visit("ses-1")
@@ -96,7 +96,7 @@ def test_set_attrs_on_recording_table_array_and_external_file_views(store, raw):
 	visit.tables()[0].set_attrs({"note": "checked"})
 	visit.arrays()[0].set_attrs({"note": "checked"})
 	visit.external_files()[0].set_attrs({"note": "checked"})
-	repo.save("annotated")
+	repo.commit("annotated")
 
 	visit = Repo(store).subject("sub-001").visit("ses-1")
 	assert visit.recordings()[0].meta["note"] == "checked"
@@ -111,7 +111,7 @@ def test_view_set_attrs_needs_a_writable_repo(store, raw):
 	must fail clearly rather than silently doing nothing."""
 	repo = Repo(store)
 	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="Rest")
-	repo.save("initial")
+	repo.commit("initial")
 
 	from neurozarr.read import RecordingView
 	bare = RecordingView(repo.root_of("sub-001")["ses-1"]["ieeg"]["task-Rest"], {}, "sub-001/ses-1/ieeg/task-Rest")
@@ -122,7 +122,7 @@ def test_view_set_attrs_needs_a_writable_repo(store, raw):
 
 def test_history_and_tags(written):
 	repo = Repo(written)
-	history = repo.history("sub-001")
+	history = repo.log("sub-001")
 	assert any(message == "test data" for _, message, _ in history)
 
 	repo.tag("v1")
@@ -136,8 +136,8 @@ def test_describe_summarizes_without_printing(store, raw, table):
 	repo = Repo(store)
 	visit = repo.create_subject("sub-001", attrs={"age": 63}).add_visit("ses-1")
 	visit.add_recording(raw, task="Rest", run=1)
-	visit.add_behavioral_table(table, task="Log")
-	repo.save("test data")
+	visit.add_table(table, task="Log")
+	repo.commit("test data")
 
 	overview = Repo(store).describe()
 	assert overview == [{
@@ -153,14 +153,14 @@ def test_describe_summarizes_without_printing(store, raw, table):
 
 
 def test_subject_add_recording_is_session_less(store, raw, table):
-	"""Subject has the same add_recording/add_behavioral_table/add_array/
+	"""Subject has the same add_recording/add_table/add_array/
 	add_derivative methods as Visit, session-less: no add_visit() call, and
 	the resulting path carries no ses- segment at all."""
 	repo = Repo(store)
 	subject = repo.create_subject("sub-001")
 	subject.add_recording(raw, task="Rest")
-	subject.add_behavioral_table(table, task="Log")
-	repo.save("session-less data")
+	subject.add_table(table, task="Log")
+	repo.commit("session-less data")
 
 	readback = Repo(store).subject("sub-001")
 	assert readback.visits() == []

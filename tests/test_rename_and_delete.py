@@ -15,11 +15,11 @@ def _populated_repo(store, raw):
 	repo = Repo(store)
 	visit = repo.create_subject("sub-001", attrs={"age": 40}).add_visit("ses-1", attrs={"device": "A"})
 	visit.add_recording(raw, task="Rest")
-	visit.add_behavioral_table(pd.DataFrame({"x": [1, 2]}), task="Impedance")
+	visit.add_table(pd.DataFrame({"x": [1, 2]}), task="Impedance")
 	visit.add_array("arr", np.arange(4.0).reshape(2, 2), ("x", "y"), datatype="ieeg", task="Rest2")
 	repo._writer_for("sub-001").add_external_file(
 		ExternalFile(Entities("sub-001", "ses-1", "ieeg", {"task": "Rest3"}), "sidecar", "somewhere.mystery"))
-	repo.save("initial")
+	repo.commit("initial")
 	return repo
 
 
@@ -29,7 +29,7 @@ def test_rename_visit_keeps_everything_under_it(store, raw):
 	repo = Repo(store)
 	subject = repo.subject("sub-001")
 	subject.rename_visit("ses-1", "ses-2")
-	repo.save("renamed session")
+	repo.commit("renamed session")
 
 	subject = Repo(store).subject("sub-001")
 	assert subject.visits() == ["ses-2"]
@@ -44,7 +44,7 @@ def test_rename_visit_keeps_everything_under_it(store, raw):
 def test_rename_visit_rejects_an_existing_target(store, raw):
 	repo = _populated_repo(store, raw)
 	repo.subject("sub-001").add_visit("ses-2")
-	repo.save("second visit")
+	repo.commit("second visit")
 
 	repo = Repo(store)
 	with pytest.raises(FileExistsError):
@@ -56,7 +56,7 @@ def test_delete_visit_removes_it(store, raw):
 
 	repo = Repo(store)
 	repo.subject("sub-001").delete_visit("ses-1")
-	repo.save("deleted session")
+	repo.commit("deleted session")
 
 	assert Repo(store).subject("sub-001").visits() == []
 
@@ -70,7 +70,7 @@ def test_rename_and_delete_on_every_item_view(store, raw):
 	visit.tables()[0].rename("renamed-table")
 	visit.arrays()[0].rename("renamed-array")
 	visit.external_files()[0].rename("renamed-file")
-	repo.save("renamed items")
+	repo.commit("renamed items")
 
 	visit = Repo(store).subject("sub-001").visit("ses-1")
 	assert visit.recordings()[0].path.endswith("renamed-recording")
@@ -86,7 +86,7 @@ def test_rename_and_delete_on_every_item_view(store, raw):
 	visit.tables()[0].delete()
 	visit.arrays()[0].delete()
 	visit.external_files()[0].delete()
-	repo.save("deleted items")
+	repo.commit("deleted items")
 
 	visit = Repo(store).subject("sub-001").visit("ses-1")
 	assert visit.recordings() == []
@@ -100,7 +100,7 @@ def test_view_rename_and_delete_need_a_writable_repo(store, raw):
 	direct views_in() caller outside repo.py still gets) must fail clearly."""
 	repo = Repo(store)
 	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="Rest")
-	repo.save("initial")
+	repo.commit("initial")
 
 	from neurozarr.read import RecordingView
 	bare = RecordingView(repo.root_of("sub-001")["ses-1"]["ieeg"]["task-Rest"], {}, "sub-001/ses-1/ieeg/task-Rest")
@@ -115,7 +115,7 @@ def test_delete_subject_removes_it_from_the_dataset_index(store, raw):
 	physical erase -- the subject's own repository and history are untouched."""
 	repo = _populated_repo(store, raw)
 	repo.delete_subject("sub-001")
-	repo.save("removed subject")
+	repo.commit("removed subject")
 
 	reopened = Repo(store)
 	assert reopened.subjects() == []
@@ -134,7 +134,7 @@ def test_delete_subject_removes_it_from_the_dataset_index(store, raw):
 def test_delete_subject_rejects_an_unknown_subject(store):
 	repo = Repo(store)
 	repo.create_subject("sub-001")
-	repo.save("initial")
+	repo.commit("initial")
 
 	with pytest.raises(KeyError):
 		Repo(store).delete_subject("sub-002")
@@ -149,7 +149,7 @@ def test_save_publishes_a_subject_deletion_with_no_other_writes(store, raw):
 
 	repo = Repo(store)
 	repo.delete_subject("sub-001")
-	snapshot = repo.save("delete only")
+	snapshot = repo.commit("delete only")
 
 	assert snapshot is not None
 	assert Repo(store).subjects() == []

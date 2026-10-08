@@ -11,6 +11,7 @@ from ..errors import UnsupportedFormatError
 from ..items import Reader
 from .bids import BidsReader
 from .manifest import ManifestReader
+from .smart import SmartReader
 
 ReaderFactory = Callable[..., Reader]
 _REGISTERED: dict[str, tuple[ReaderFactory, frozenset[str]]] = {}
@@ -23,7 +24,7 @@ def register_reader(name: str, factory: ReaderFactory, *, extensions: tuple[str,
 	the ``neurozarr.readers`` package entry-point group. A factory may publish an
 	``extensions`` attribute to participate in automatic file selection.
 	"""
-	if not name or name in ("bids", "manifest"):
+	if not name or name in ("bids", "manifest", "smart"):
 		raise ValueError(f"reader name {name!r} is reserved or empty")
 	if not callable(factory):
 		raise TypeError("reader factory must be callable")
@@ -36,7 +37,7 @@ def register_reader(name: str, factory: ReaderFactory, *, extensions: tuple[str,
 def available_readers() -> list[str]:
 	"""List built-in, registered, and installed entry-point reader names."""
 	installed = [entry.name for entry in entry_points(group="neurozarr.readers")]
-	return sorted({"bids", "manifest", *_REGISTERED, *installed})
+	return sorted({"bids", "manifest", "smart", *_REGISTERED, *installed})
 
 
 def _factory(name: str) -> ReaderFactory:
@@ -44,6 +45,8 @@ def _factory(name: str) -> ReaderFactory:
 		return BidsReader
 	if name == "manifest":
 		return ManifestReader
+	if name == "smart":
+		return SmartReader
 	if name in _REGISTERED:
 		return _REGISTERED[name][0]
 	matching = [entry for entry in entry_points(group="neurozarr.readers") if entry.name == name]

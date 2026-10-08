@@ -26,7 +26,7 @@ def bids_source(tmp_path):
 def test_skip_existing_leaves_stored_data_alone(store, raw):
 	repo = Repo(store)
 	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="X")
-	repo.save("first")
+	repo.commit("first")
 	before, _ = Repo(store).subject("sub-001").visit("ses-1").recording(task="X").data()
 
 	# a second pass whose "source" has different values for the same entities
@@ -40,7 +40,7 @@ def test_skip_existing_leaves_stored_data_alone(store, raw):
 			yield Recording(Entities("sub-001", "ses-1", "ieeg", {"task": "X"}), other, {})
 
 	repo = Repo(store)
-	repo.ingest(OneRecording(), skip_existing=True)
+	repo.add(OneRecording(), existing="skip")
 	after, _ = Repo(store).subject("sub-001").visit("ses-1").recording(task="X").data()
 	assert np.array_equal(before, after), "skip_existing overwrote existing data"
 
@@ -48,13 +48,13 @@ def test_skip_existing_leaves_stored_data_alone(store, raw):
 def test_without_skip_existing_the_data_is_replaced(store, raw):
 	repo = Repo(store)
 	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="X")
-	repo.save("first")
+	repo.commit("first")
 
 	louder = mne.io.RawArray(raw.get_data() * 2, raw.info.copy(), verbose=False)
 	repo = Repo(store)
 	repo.create_subject("sub-001").add_visit("ses-1").add_recording(
 		louder, task="X", existing="replace")
-	repo.save("second")
+	repo.commit("second")
 
 	after, _ = Repo(store).subject("sub-001").visit("ses-1").recording(task="X").data()
 	assert np.abs(after).max() > np.abs(raw.get_data()).max()
@@ -65,7 +65,7 @@ def test_derivatives_are_namespaced(store, raw):
 	visit = repo.create_subject("sub-001").add_visit("ses-1")
 	visit.add_recording(raw, task="Stream", run=1)
 	visit.add_derivative("my-filter", raw, task="Stream", run=1)
-	repo.save("with a derivative")
+	repo.commit("with a derivative")
 
 	paths = sorted(r.path for r in Repo(store).subject("sub-001").recordings())
 	assert paths == [
@@ -78,8 +78,8 @@ def test_derivatives_are_namespaced(store, raw):
 
 def test_verify_passes_for_a_faithful_conversion(bids_source, store):
 	repo = Repo(store)
-	repo.ingest(BidsReader(bids_source))
-	repo.save("converted")
+	repo.add(BidsReader(bids_source))
+	repo.commit("converted")
 	assert verify(bids_source, store) == []
 
 
@@ -87,8 +87,8 @@ def test_verify_reports_a_differing_table_value(bids_source, store):
 	"""Row count alone wouldn't catch this -- verify() used to compare tables
 	by len() only, so a value that changed after conversion went unnoticed."""
 	repo = Repo(store)
-	repo.ingest(BidsReader(bids_source))
-	repo.save("converted")
+	repo.add(BidsReader(bids_source))
+	repo.commit("converted")
 
 	events_path = bids_source / "sub-001" / "ses-1" / "ieeg" / "sub-001_ses-1_task-rest_run-1_events.tsv"
 	pd.DataFrame({"onset": [0.5], "duration": [999.0]}).to_csv(events_path, sep="\t", index=False)
@@ -101,8 +101,8 @@ def test_verify_reports_a_differing_dataset_attrs(bids_source, store):
 	"""verify() used to skip Attrs items entirely -- dataset_description.json
 	diverging from what was stored went unnoticed."""
 	repo = Repo(store)
-	repo.ingest(BidsReader(bids_source))
-	repo.save("converted")
+	repo.add(BidsReader(bids_source))
+	repo.commit("converted")
 
 	(bids_source / "dataset_description.json").write_text(
 		json.dumps({"Name": "Renamed", "BIDSVersion": "1.10.0"}))
@@ -112,9 +112,9 @@ def test_verify_reports_a_differing_dataset_attrs(bids_source, store):
 
 
 def test_verify_reports_missing_data(bids_source, store):
-	repo = Repo.create(store)
+	repo = Repo.init(store)
 	repo.create_subject("sub-001").add_visit("ses-1")  # nothing actually ingested
-	repo.save("empty")
+	repo.commit("empty")
 	problems = verify(bids_source, store)
 	assert any("missing from store" in p for p in problems)
 
@@ -122,7 +122,7 @@ def test_verify_reports_missing_data(bids_source, store):
 def test_export_writes_a_bids_folder(store, raw, tmp_path):
 	repo = Repo(store)
 	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="Stream", run=1)
-	repo.save("for export")
+	repo.commit("for export")
 
 	dest = export_bids(store, tmp_path / "exported")
 	assert (dest / "dataset_description.json").exists()

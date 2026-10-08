@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
+from zarr.codecs import GzipCodec, ZstdCodec
 
-from neurozarr import Repo
+from neurozarr import CodecConfig, Repo
 
 
 def test_recording_data_roundtrips(written, raw):
@@ -22,12 +23,38 @@ def test_int16_calibration_path_roundtrips(store, raw_calibrated):
 	tolerance."""
 	repo = Repo(store)
 	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw_calibrated, task="Stream")
-	repo.save("calibrated")
+	repo.commit("calibrated")
 
 	rec = Repo(store).subject("sub-001").visit("ses-1").recording(task="Stream")
 	values, _ = rec.data()
 	assert rec.array.dtype == np.dtype("int16")
 	assert np.array_equal(values, raw_calibrated.get_data())
+
+
+def _compressors(store):
+	rec = Repo(store).subject("sub-001").visit("ses-1").recording(task="Stream")
+	return rec, list(rec.array.compressors)
+
+
+def test_explicit_api_uses_zarrs_default_codec_unless_told(store, raw, raw_calibrated):
+	"""The explicit API never probes: CodecConfig.compressors if set, else zarr's default."""
+	repo = Repo(store)
+	visit = repo.create_subject("sub-001").add_visit("ses-1")
+	visit.add_recording(raw, task="Stream")
+	visit.add_recording(raw_calibrated, task="Calibrated")
+	repo.commit("explicit")
+	for task, source in (("Stream", raw), ("Calibrated", raw_calibrated)):
+		rec = Repo(store).subject("sub-001").visit("ses-1").recording(task=task)
+		assert list(rec.array.compressors) == [ZstdCodec(level=0)]  # zarr's "auto"
+		assert np.abs(rec.data()[0] - source.get_data()).max() < 1e-9
+
+
+def test_explicit_compressors_are_used_as_given(tmp_path, raw):
+	repo = Repo.init(tmp_path / "s", codec=CodecConfig(compressors=[GzipCodec(level=4)]))
+	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="Stream")
+	repo.commit("custom")
+	_, compressors = _compressors(tmp_path / "s")
+	assert compressors == [GzipCodec(level=4)]
 
 
 def test_recording_rebuilds_mne_raw(written, raw):
@@ -45,7 +72,7 @@ def test_raw_without_sfreq_raises_clearly(store):
 	repo = Repo(store)
 	group = repo._writer_for("sub-001").root.require_group("ses-1/ieeg/task-X")
 	group.create_array("data", data=np.zeros((2, 10)))
-	repo.save("no sfreq")
+	repo.commit("no sfreq")
 
 	rec = RecordingView(Repo(store).subject("sub-001").root()["ses-1/ieeg/task-X"], {}, "task-X")
 	with pytest.raises(ValueError, match="sampling frequency"):
@@ -77,7 +104,7 @@ def test_chunking_allows_partial_reads(store, raw):
 		mne.create_info(["a", "b"], sfreq=250.0, ch_types="eeg"), verbose=False)
 	repo = Repo(store)
 	repo.create_subject("sub-001").add_visit("ses-1").add_recording(long_raw, task="Long")
-	repo.save("long")
+	repo.commit("long")
 
 	rec = Repo(store).subject("sub-001").visit("ses-1").recording(task="Long")
 	assert rec.array.chunks[-1] < rec.shape[-1], "whole recording is one chunk"
@@ -102,7 +129,7 @@ def test_annotations_survive_the_round_trip(store):
 										description=["stim_on", "artifact"]), verbose=False)
 	repo = Repo(store)
 	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="X")
-	repo.save("annotated")
+	repo.commit("annotated")
 
 	rec = Repo(store).subject("sub-001").visit("ses-1").recording(task="X")
 	events = rec.events()
@@ -146,7 +173,7 @@ def test_bids_events_sidecar_wins_over_annotations_written_first(store):
 							 "trial_type": ["stim_on", "stim_off"]})
 	entities = Entities("sub-001", "ses-1", "ieeg", {"task": "X"})
 	repo._writer_for("sub-001").add_table(Table(entities, "events", sidecar, {}), ExistingPolicy.ERROR)
-	repo.save("recording then sidecar")
+	repo.commit("recording then sidecar")
 
 	events = Repo(store).subject("sub-001").visit("ses-1").recording(task="X").events()
 	assert events["trial_type"].tolist() == ["stim_on", "stim_off"]

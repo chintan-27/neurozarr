@@ -114,19 +114,19 @@ def test_reader_for_matches_a_compound_extension(tmp_path):
 
 
 def test_duplicate_write_errors_unless_policy_is_explicit(store, raw):
-	repo = Repo.create(store)
+	repo = Repo.init(store)
 	visit = repo.create_subject("sub-001").add_visit("ses-1")
 	visit.add_recording(raw, task="X")
-	repo.save("first")
+	repo.commit("first")
 
 	repo = Repo.open(store, mode="a")
 	with pytest.raises(WriteConflictError):
 		repo.subject("sub-001").visit("ses-1").add_recording(raw, task="X")
 	with pytest.raises(RuntimeError, match="failed transaction"):
-		repo.save("must not commit partial work")
-	repo.abort()
+		repo.commit("must not commit partial work")
+	repo.reset()
 
 	repo = Repo.open(store, mode="a")
 	repo.subject("sub-001").visit("ses-1").add_recording(
 		raw, task="X", existing=ExistingPolicy.REPLACE)
-	assert repo.save("replace") is not None
+	assert repo.commit("replace") is not None

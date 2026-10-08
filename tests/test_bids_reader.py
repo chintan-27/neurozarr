@@ -27,8 +27,8 @@ def tiny_bids(tmp_path):
 
 def test_reads_dataset_and_subject_levels(tiny_bids, store):
 	repo = Repo(store)
-	repo.ingest(BidsReader(tiny_bids))
-	repo.save("tiny")
+	repo.add(BidsReader(tiny_bids))
+	repo.commit("tiny")
 
 	subject = Repo(store).subject("sub-001")
 	assert subject.attrs["age"] == 63          # participants.tsv row landed on the subject
@@ -38,8 +38,8 @@ def test_reads_dataset_and_subject_levels(tiny_bids, store):
 def test_sidecar_is_inherited_from_a_parent_directory(tiny_bids, store):
 	(tiny_bids / "events.json").write_text(json.dumps({"duration": {"Units": "s"}}))
 	repo = Repo(store)
-	repo.ingest(BidsReader(tiny_bids))
-	repo.save("tiny")
+	repo.add(BidsReader(tiny_bids))
+	repo.commit("tiny")
 
 	tables = Repo(store).subject("sub-001").visit("ses-1").tables()
 	events = [t for t in tables if t.name == "events"]
@@ -55,8 +55,8 @@ def test_session_less_dataset_is_handled(tmp_path, store):
 	pd.DataFrame({"x": [1]}).to_csv(root / "sub-001" / "beh" / "sub-001_task-t_beh.tsv", sep="\t", index=False)
 
 	repo = Repo(store)
-	repo.ingest(BidsReader(root))
-	repo.save("no sessions")
+	repo.add(BidsReader(root))
+	repo.commit("no sessions")
 
 	root_group = Repo(store).subject("sub-001").root()
 	assert "beh" in root_group          # datatype sits directly under the subject
@@ -82,11 +82,11 @@ def test_include_derivatives_flag(tiny_bids, store):
 		deriv_beh / "sub-001_ses-1_task-summary_beh.tsv", sep="\t", index=False)
 
 	with_derivatives = Repo(store)
-	with_derivatives.ingest(BidsReader(tiny_bids))
-	with_derivatives.save("with derivatives")
+	with_derivatives.add(BidsReader(tiny_bids))
+	with_derivatives.commit("with derivatives")
 	assert any("derivatives" in t.path for t in Repo(store).subject("sub-001").tables())
 
 	without_derivatives = Repo(f"{store}-no-derivatives")
-	without_derivatives.ingest(BidsReader(tiny_bids, include_derivatives=False))
-	without_derivatives.save("without derivatives")
+	without_derivatives.add(BidsReader(tiny_bids, include_derivatives=False))
+	without_derivatives.commit("without derivatives")
 	assert not any("derivatives" in t.path for t in without_derivatives.subject("sub-001").tables())

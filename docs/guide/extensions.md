@@ -31,11 +31,11 @@ items.
 ## Reader registration
 
 Writing a {class}`~neurozarr.Reader` (see {doc}`ingest`) is enough to use it —
-`repo.ingest(MyReader(...))` works with no registration at all. Register a
+`repo.add(MyReader(...))` works with no registration at all. Register a
 reader only when you also want one of:
 
 - **Automatic selection** by file extension, so {func}`~neurozarr.reader_for`
-  or `neurozarr convert` can pick it without importing your class.
+  or `neurozarr add` can pick it without importing your class.
 - **Distribution** as an installable package, so other projects discover it
   without any of your source code.
 
@@ -70,7 +70,7 @@ given. It is used only for automatic selection — call
 {func}`~neurozarr.open_reader` with the name, or construct the class
 directly, to use a registered reader without it. If more than one registered
 reader claims the same file, `reader_for` raises rather than guessing; pass
-`name=` to choose explicitly (`neurozarr convert --reader nifti` does the
+`name=` to choose explicitly (`neurozarr add --reader nifti` does the
 same from the command line).
 
 ### Distributing a reader as a plugin
@@ -102,7 +102,7 @@ registration's own `extensions=` argument then simply confirms it.
 
 Either way, a registered or installed reader never receives a Zarr or
 Icechunk writer — only {class}`~neurozarr.Writer` does, reached through
-`repo.ingest()`.
+`repo.add()`.
 
 ## Format decoders
 

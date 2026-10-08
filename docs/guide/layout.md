@@ -71,7 +71,7 @@ study.zarr/
 Splitting by subject means one participant can be copied, shared or versioned
 without moving the whole study, and it means subjects can be written
 concurrently without coordinating, which is what makes
-{func}`~neurozarr.parallel.convert_parallel` straightforward.
+{meth}`Repo.add(..., workers=N) <neurozarr.Repo.ingest>` straightforward.
 
 The trade-off is that anything spanning subjects — {meth}`~neurozarr.Repo.find`,
 {meth}`~neurozarr.Repo.tag`, {meth}`~neurozarr.Repo.subjects` — has to visit every

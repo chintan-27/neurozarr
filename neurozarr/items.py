@@ -145,7 +145,7 @@ Item = Recording | Table | Attrs | ExternalFile | Array
 
 
 class Reader(Protocol):
-	"""Anything Repo.ingest() can consume: an object whose read() yields
+	"""Anything Repo.add() can consume: an object whose read() yields
 	Recording/Table/Attrs items in any order, lazily or eagerly. See BidsReader
 	and ManifestReader for two implementations."""
 

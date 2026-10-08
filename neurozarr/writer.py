@@ -1,20 +1,36 @@
+import itertools
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
 import icechunk
 import mne  # type: ignore[import-untyped]  # mne ships no type information
 import numpy as np
 import pandas as pd
 import zarr
-from zarr.codecs import ZstdCodec
 
 from . import util
+from .codecs import CodecPlan
 from .constraints import validate_segment
 from .entities import Entities
 from .errors import ValidationError, WriteConflictError
 from .items import Array, Attrs, ExternalFile, Item, Recording, Table
 from .log import log_mem, log_progress, record_write
+
+
+def copy_chunks(source: zarr.Array, dest: zarr.Array,
+				chunks: "Iterable[tuple[int, ...]] | None" = None) -> None:
+	"""Copy an array's values chunk by chunk -- all chunks, or the given chunk
+	coordinates -- so a large array is never held in memory whole."""
+	if source.ndim == 0:
+		dest[...] = source[...]
+		return
+	grid = [range(-(-dim // size)) for dim, size in zip(source.shape, source.chunks)]
+	for coords in chunks if chunks is not None else itertools.product(*grid):
+		region = tuple(slice(c * size, min((c + 1) * size, dim))
+					   for c, size, dim in zip(coords, source.chunks, source.shape))
+		dest[region] = source[region]
 
 
 def _copy_node(source: zarr.Group | zarr.Array, dest_parent: zarr.Group, dest_name: str) -> None:
@@ -23,13 +39,16 @@ def _copy_node(source: zarr.Group | zarr.Array, dest_parent: zarr.Group, dest_na
 	(Repository.rearrange_session().move()), but that session type commits
 	independently of a writable_session and has its own lifecycle -- adopting
 	it means rename()/delete() would need their own commit path, breaking the
-	"not committed until Repo.save()" contract every other write follows.
+	"not committed until Repo.commit()" contract every other write follows.
 	ponytail: copy-then-delete is O(size) instead of O(1); move to
 	rearrange_session if a rename-heavy workload ever makes that cost matter."""
 	if isinstance(source, zarr.Array):
+		# carry the codec over: left out, zarr would re-encode with its default
 		dest_array = dest_parent.create_array(dest_name, shape=source.shape, dtype=source.dtype,
-											   chunks=source.chunks, overwrite=True)
-		dest_array[:] = source[:]
+											   chunks=source.chunks, filters=source.filters,
+											   compressors=source.compressors, serializer=source.serializer or "auto",
+											   overwrite=True)
+		copy_chunks(source, dest_array)
 		util.set_attrs(dest_array, source.attrs.asdict())
 		return
 	dest_group = dest_parent.create_group(dest_name, overwrite=True)
@@ -47,6 +66,67 @@ class ExistingPolicy(StrEnum):
 
 
 @dataclass
+class RecordingLayout:
+	"""How a recording's samples are stored: dtype, and the per-channel int16
+	calibration when there is one."""
+	dtype: np.dtype
+	scale: np.ndarray | None
+	offset: np.ndarray | None
+	note: str
+
+
+def recording_layout(raw: "mne.io.BaseRaw", codec: "CodecConfig") -> RecordingLayout:
+	"""The storage layout the writer uses for ``raw`` -- shared with codec probing,
+	so a probe compresses exactly the bytes that will be written."""
+	if codec.dtype == "float16":
+		return RecordingLayout(np.dtype("float16"), None, None,
+							   "data is physical value in the channel's native unit, rounded to float16")
+	extras = getattr(raw, "_raw_extras", None)
+	if extras and "cal" in extras[0]:
+		scale = np.array(extras[0]["cal"]) * np.array(extras[0]["units"])
+		offset = np.array(extras[0]["offsets"]) * np.array(extras[0]["units"])
+		if scale.shape != (len(raw.ch_names),) or offset.shape != scale.shape or np.any(scale == 0):
+			raise ValidationError("recording calibration must contain one non-zero scale and offset per channel")
+		return RecordingLayout(np.dtype("int16"), scale, offset,
+							   "physical value = data * data_scale + data_offset (per channel)")
+	# ponytail: no EDF-style per-channel calibration available (non-EDF reader) -- store
+	# losslessly as float32 rather than guessing a scale/offset.
+	return RecordingLayout(np.dtype("float32"), None, None,
+						   "data is physical value in the channel's native unit (float32, no calibration metadata available)")
+
+
+def encode_recording(raw: "mne.io.BaseRaw", start: int, stop: int, layout: RecordingLayout,
+					 codec: "CodecConfig") -> np.ndarray:
+	"""Samples ``start:stop`` of ``raw`` as stored."""
+	physical = raw.get_data(start=start, stop=stop)
+	if layout.dtype != np.dtype("int16"):
+		return physical.astype(layout.dtype)
+	assert layout.scale is not None and layout.offset is not None
+	encoded = np.round((physical - layout.offset[:, None]) / layout.scale[:, None])
+	if not np.isfinite(encoded).all() or encoded.min() < -32768 or encoded.max() > 32767:
+		raise ValidationError("recording samples cannot be represented by their int16 calibration; use dtype='float16'")
+	data = encoded.astype(np.int16)
+	if codec.bitround_k:
+		step = 1 << codec.bitround_k
+		data = np.clip(np.round(data.astype(np.int32) / step) * step, -32768, 32767).astype(np.int16)
+	return data
+
+
+def recording_chunks(raw: "mne.io.BaseRaw", layout: RecordingLayout, codec: "CodecConfig") -> tuple[int, ...]:
+	shape = (len(raw.ch_names), int(raw.n_times))
+	return util.chunk_shape(shape, layout.dtype.itemsize, codec.chunk_target_bytes, codec.max_chunk_samples)
+
+
+def middle_chunk(raw: "mne.io.BaseRaw", codec: "CodecConfig") -> np.ndarray:
+	"""One real chunk from the middle of the recording, as stored -- the probe input.
+	The middle, because the start is often a settling transient."""
+	layout = recording_layout(raw, codec)
+	width = recording_chunks(raw, layout, codec)[-1]
+	start = max(0, (int(raw.n_times) - width) // 2)
+	return encode_recording(raw, start, min(int(raw.n_times), start + width), layout, codec)
+
+
+@dataclass
 class CodecConfig:
 	"""How sample data is packed and compressed. Pass one to :class:`Repo`.
 
@@ -55,7 +135,11 @@ class CodecConfig:
 	filters : list, optional
 		Zarr filter codecs applied before compression. Empty by default.
 	compressors : list, optional
-		Zarr compression codecs. Defaults to zstd at level 19.
+		Zarr compression codecs for everything added through the explicit API
+		(``visit.add_recording`` and friends). Left unset, those use zarr's default.
+		Data ingested from a reader uses the reader's codec plan instead (see
+		:meth:`Repo.add`) -- unless this is set, in which case it overrides the
+		plan, with a warning.
 	bitround_k : int, default 0
 		Drop this many low bits from each sample before compressing. Lossy, but
 		compresses better. 0 disables it.
@@ -74,11 +158,11 @@ class CodecConfig:
 
 	Examples
 	--------
-	>>> repo = Repo.create("./study.zarr", codec=CodecConfig(dtype="float16"))
+	>>> repo = Repo.init("./study.zarr", codec=CodecConfig(dtype="float16"))
 	"""
 
 	filters: list[Any] = field(default_factory=list)
-	compressors: list[Any] = field(default_factory=lambda: [ZstdCodec(level=19)])
+	compressors: list[Any] | None = None
 	bitround_k: int = 0
 	dtype: str = "int16"
 	chunk_target_bytes: int = 8 * 1024 * 1024
@@ -100,18 +184,64 @@ class CodecConfig:
 			raise ValidationError("max_chunk_samples must be positive")
 
 
+def _clashes(theirs: Any, mine: Any) -> list[str]:
+	"""Paths both sides changed: the same chunk of an array, or any node whose
+	metadata either side created, deleted, moved or updated. Both sides creating the
+	same group is not a clash -- adding items under one new session creates its
+	folders on each side -- but changing that group's metadata on both still is."""
+	def nodes(diff: Any) -> set[str]:
+		return {*diff.new_arrays, *diff.deleted_arrays, *diff.deleted_groups,
+				*diff.updated_arrays, *diff.updated_groups, *(p for move in diff.moved_nodes for p in move)}
+	def chunks(diff: Any) -> dict[str, set[tuple[int, ...]]]:
+		return {path: {tuple(c) for c in coords} for path, coords in diff.updated_chunks.items()}
+	their_nodes, my_nodes = nodes(theirs), nodes(mine)
+	# a group one side created where the other created, deleted or wrote under it as an array
+	their_nodes |= set(theirs.new_groups) & (my_nodes | set(mine.new_arrays))
+	my_nodes |= set(mine.new_groups) & (their_nodes | set(theirs.new_arrays))
+	their_chunks, my_chunks = chunks(theirs), chunks(mine)
+	clashes = their_nodes & (my_nodes | set(my_chunks)) | my_nodes & set(their_chunks)
+	clashes |= {path for path in their_chunks.keys() & my_chunks.keys() if their_chunks[path] & my_chunks[path]}
+	return sorted(clashes)
+
+
 class Writer:
 	"""Internal engine that places standardized items in the store's tree, which
 	is laid out by subject/session/datatype/entities following BIDS naming.
 	Not user-facing directly -- use Repo/Subject/Visit, which own a Writer."""
 
-	def __init__(self, session: icechunk.Session, codec: CodecConfig | None = None, label: str = ""):
+	def __init__(self, session: "icechunk.Session | icechunk.ForkSession", codec: CodecConfig | None = None,
+				 label: str = "", repo: icechunk.Repository | None = None, branch: str = "main",
+				 base: str | None = None):
+		# Staged writes go into a ForkSession: picklable, so it can sit in the index
+		# between processes (and travel to a parallel worker), and committed by
+		# merging it into a fresh session at the branch tip -- see commit(). `base` is
+		# the snapshot it was forked from, for spotting changes made since.
 		self._session = session
+		self._repo, self._branch, self._base = repo, branch, base
 		self._codec = codec or CodecConfig()
 		self._label = label
+		# set by Repo.ingest for the duration of a reader's ingest; None for the explicit API
+		self.plan: CodecPlan | None = None
 		# mode="a" (create if missing), never "w" -- "w" means "overwrite if exists",
 		# which silently wipes a store you reopened to add more data to.
 		self.root = zarr.open_group(store=session.store, mode="a")
+
+	def _compressors(self, item_type: str, dtype: np.dtype, chunks: tuple[int, ...],
+					 sample: Any = None) -> Any:
+		"""The codec for one array: CodecConfig.compressors if set (explicit API, or a pin
+		that overrides a reader's plan), else the reader's plan, else zarr's default."""
+		if self._codec.compressors is not None:
+			return self._codec.compressors
+		if self.plan is not None:
+			return self.plan.compressors(item_type, dtype, chunks, sample)
+		return "auto"  # zarr's default -- passing None would mean no compression at all
+
+	def _table_array_options(self, data: np.ndarray) -> dict[str, Any]:
+		"""Chunks and codec for one of a table's stored arrays."""
+		chunks = util.chunk_shape(data.shape, data.dtype.itemsize, self._codec.chunk_target_bytes,
+								  self._codec.max_chunk_samples)
+		return {"chunks": chunks, "compressors": self._compressors(
+			"Table", data.dtype, chunks, sample=lambda: data[tuple(slice(0, c) for c in chunks)])}
 
 	def _group_for(self, prefix: tuple[str, ...], entities: Entities) -> zarr.Group:
 		# a Writer always scopes to one subject's own repo, so the leading
@@ -146,62 +276,24 @@ class Writer:
 		attrs.setdefault("ch_names", list(item.raw.ch_names))
 		self._add_annotations(group, item.raw)
 
-		storage_dtype: Any
-		scale: np.ndarray | None = None
-		offset: np.ndarray | None = None
-		if self._codec.dtype == "float16":
-			storage_dtype = np.dtype("float16")
-			attrs["data_note"] = "data is physical value in the channel's native unit, rounded to float16"
-		else:
-			extras = getattr(item.raw, "_raw_extras", None)
-			if extras and "cal" in extras[0]:
-				cal = np.array(extras[0]["cal"])
-				units = np.array(extras[0]["units"])
-				offsets = np.array(extras[0]["offsets"])
-				scale = cal * units
-				offset = offsets * units
-				if scale.shape != (len(item.raw.ch_names),) or offset.shape != scale.shape or np.any(scale == 0):
-					raise ValidationError("recording calibration must contain one non-zero scale and offset per channel")
-				storage_dtype = np.dtype("int16")
-				attrs["data_scale"] = scale.tolist()
-				attrs["data_offset"] = offset.tolist()
-				attrs["data_note"] = "physical value = data * data_scale + data_offset (per channel)"
-			else:
-				# ponytail: no EDF-style per-channel calibration available (non-EDF reader) -- store
-				# losslessly as float32 rather than guessing a scale/offset.
-				storage_dtype = np.dtype("float32")
-				attrs["data_note"] = "data is physical value in the channel's native unit (float32, no calibration metadata available)"
-
+		layout = recording_layout(item.raw, self._codec)
+		if layout.scale is not None and layout.offset is not None:
+			attrs["data_scale"] = layout.scale.tolist()
+			attrs["data_offset"] = layout.offset.tolist()
+		attrs["data_note"] = layout.note
 		shape = (len(item.raw.ch_names), int(item.raw.n_times))
-		chunks = util.chunk_shape(shape, storage_dtype.itemsize,
-								  self._codec.chunk_target_bytes, self._codec.max_chunk_samples)
+		chunks = recording_chunks(item.raw, layout, self._codec)
+		compressors = self._compressors("Recording", layout.dtype, chunks,
+										sample=lambda: middle_chunk(item.raw, self._codec))
 		util.set_attrs(group, attrs)
 		array = group.create_array(
-			"data",
-			shape=shape,
-			dtype=storage_dtype,
-			chunks=chunks,
-			filters=self._codec.filters,
-			compressors=self._codec.compressors,
+			"data", shape=shape, dtype=layout.dtype, chunks=chunks,
+			filters=self._codec.filters, compressors=compressors,
 			overwrite=True,  # re-converting a source into an existing store replaces it
 		)
 		for start in range(0, shape[-1], chunks[-1]):
 			stop = min(shape[-1], start + chunks[-1])
-			physical = item.raw.get_data(start=start, stop=stop)
-			if storage_dtype == np.dtype("int16"):
-				assert scale is not None and offset is not None
-				encoded = np.round((physical - offset[:, None]) / scale[:, None])
-				if not np.isfinite(encoded).all() or encoded.min() < -32768 or encoded.max() > 32767:
-					raise ValidationError(
-					"recording samples cannot be represented by their int16 calibration; use dtype='float16'"
-				)
-				data = encoded.astype(np.int16)
-				if self._codec.bitround_k:
-					step = 1 << self._codec.bitround_k
-					data = np.clip(np.round(data.astype(np.int32) / step) * step, -32768, 32767).astype(np.int16)
-			else:
-				data = physical.astype(storage_dtype)
-			array[:, start:stop] = data
+			array[:, start:stop] = encode_recording(item.raw, start, stop, layout, self._codec)
 		record_write(array.nbytes)
 		log_mem()
 		return True
@@ -217,7 +309,7 @@ class Writer:
 			"onset": annotations.onset,
 			"duration": annotations.duration,
 			"trial_type": [str(d) for d in annotations.description],
-		}), {"source": "mne.Raw.annotations"})
+		}), {"source": "mne.Raw.annotations"}, array_options=self._table_array_options)
 
 	def add_table(self, item: Table, existing: ExistingPolicy = ExistingPolicy.ERROR) -> bool:
 		group = self._group_for(item.prefix, item.entities)
@@ -232,7 +324,7 @@ class Writer:
 		if not self._should_write(group, item.name, existing):
 			return False
 		log_progress("Writing table", f"{group.path}/{item.name}", f"{len(item.df.columns)} cols, {len(item.df)} rows")
-		util.create_table(group, item.name, item.df, item.meta)
+		util.create_table(group, item.name, item.df, item.meta, array_options=self._table_array_options)
 		record_write(int(item.df.memory_usage(deep=True).sum()))
 		log_mem()
 		return True
@@ -300,7 +392,13 @@ class Writer:
 		dtype = np.dtype(item.data.dtype)
 		chunks = util.chunk_shape(shape, dtype.itemsize,
 								  self._codec.chunk_target_bytes, self._codec.max_chunk_samples)
-		array = group.create_array(item.name, shape=shape, dtype=dtype, chunks=chunks, overwrite=True)
+		def sample() -> np.ndarray:
+			start = max(0, (shape[-1] - chunks[-1]) // 2)
+			return np.asarray(item.data[(slice(None),) * (len(shape) - 1) + (slice(start, start + chunks[-1]),)])
+		array = group.create_array(item.name, shape=shape, dtype=dtype, chunks=chunks, overwrite=True,
+								   compressors=self._compressors(
+									   "File" if item.meta.get("_neurozarr_decoder") == "binary" else "Array",
+									   dtype, chunks, sample=sample))
 		for start in range(0, shape[-1], chunks[-1]):
 			stop = min(shape[-1], start + chunks[-1])
 			selection = (slice(None),) * (len(shape) - 1) + (slice(start, stop),)
@@ -330,13 +428,40 @@ class Writer:
 		else:
 			raise TypeError(f"unknown item type {type(item)!r}")
 
-	def save(self, message: str) -> str | None:
-		"""Commit this subject's session. A session with nothing new in it is left
-		alone -- icechunk refuses empty commits, and reopening a store to touch one
-		subject shouldn't fail because the others had no changes."""
+	@property
+	def session(self) -> "icechunk.Session | icechunk.ForkSession":
+		return self._session
+
+	@property
+	def base(self) -> str | None:
+		return self._base
+
+	def save(self, message: str, metadata: dict[str, Any] | None = None) -> str | None:
+		"""Commit what this writer staged. Nothing staged is left alone -- icechunk
+		refuses empty commits, and touching one subject shouldn't fail on the others.
+
+		A fork is merged into a fresh session at the branch tip. Icechunk's merge
+		would silently let the staged change win over anything committed since the
+		fork was taken (measured: a concurrent write to the same array vanished), so
+		that is checked here first: if the branch moved and touched the same arrays
+		(the same chunks, or any node's metadata), nothing is merged.
+		"""
 		if not self._session.has_uncommitted_changes:
 			return None
-		snapshot = self._session.commit(message)
+		if self._repo is None:  # a plain writable session (store creation, migration)
+			snapshot = self._session.commit(message, metadata)
+		else:
+			tip = self._repo.lookup_branch(self._branch)
+			if self._base is not None and tip != self._base:
+				clashes = _clashes(self._repo.diff(from_snapshot_id=self._base, to_snapshot_id=tip),
+								   self._session.status())
+				if clashes:
+					raise WriteConflictError(
+						f"{self._label or 'store'}: {', '.join(clashes[:5])}{' ...' if len(clashes) > 5 else ''} "
+						f"changed on {self._branch!r} since this was staged; reset it and add it again")
+			session = self._repo.writable_session(self._branch)
+			session.merge(cast(icechunk.ForkSession, self._session))
+			snapshot = session.commit(message, metadata)
 		log_progress("Committed", self._label or "store", f"snapshot {snapshot}")
 		log_mem()
 		return snapshot

@@ -4,12 +4,12 @@ Point :class:`Repo` at a destination, add data, and save::
 
     from neurozarr import Repo
 
-    repo = Repo.create("./study.zarr")
+    repo = Repo.init("./study.zarr")
     visit = repo.create_subject("sub-001").add_visit("ses-1")
     visit.add_recording(raw, task="Rest", run=1)
-    repo.save("first recording")
+    repo.commit("first recording")
 
-To fill a store in bulk instead, hand :meth:`Repo.ingest` a reader:
+To fill a store in bulk instead, hand :meth:`Repo.add` a reader:
 :class:`ManifestReader` for files described in a table, :class:`BidsReader`
 for data already in BIDS form, or one of your own implementing
 :class:`Reader`.
@@ -27,7 +27,7 @@ from .entities import Entities
 from .diagnostics import Severity, ValidationIssue, ValidationReport
 from .errors import (
 	NeurozarrError, SchemaVersionError, StoreIntegrityError, UnsupportedFormatError,
-	ValidationError, WriteConflictError,
+	ValidationError, WriteConflictError, MergeConflictError,
 )
 from .items import Array, Attrs, ExternalFile, Reader, Recording, Table
 from .log import set_verbosity
@@ -65,6 +65,6 @@ __all__ = [
 	"StorageFactory", "StorageTarget", "storage_from", "set_verbosity",
 	"Severity", "ValidationIssue", "ValidationReport", "inspect_source", "inspect_store", "validate_source",
 	"NeurozarrError", "ValidationError", "SchemaVersionError", "StoreIntegrityError",
-	"WriteConflictError", "UnsupportedFormatError",
+	"WriteConflictError", "MergeConflictError", "UnsupportedFormatError",
 	"verify", "export_bids",
 ]

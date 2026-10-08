@@ -156,8 +156,8 @@ def test_manifest_ingests_into_a_store(store, tsv_file):
 	df = pd.DataFrame([{"sub": "sub-001", "ses": "ses-1", "datatype": "beh",
 						"task": "Log", "path": str(tsv_file)}])
 	repo = Repo(store)
-	repo.ingest(ManifestReader(df))
-	repo.save("from manifest")
+	repo.add(ManifestReader(df))
+	repo.commit("from manifest")
 
 	tables = Repo(store).subject("sub-001").visit("ses-1").tables()
 	assert len(tables) == 1

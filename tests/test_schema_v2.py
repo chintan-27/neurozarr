@@ -12,9 +12,9 @@ from neurozarr.writer import Writer
 
 
 def test_save_publishes_global_manifest_and_returns_version(store, raw):
-	repo = Repo.create(store)
+	repo = Repo.init(store)
 	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="X")
-	version = repo.save("first")
+	version = repo.commit("first")
 	assert version
 
 	opened = Repo.open(store)
@@ -25,19 +25,19 @@ def test_save_publishes_global_manifest_and_returns_version(store, raw):
 
 
 def test_global_tag_pins_each_subject_snapshot(store, raw):
-	repo = Repo.create(store)
+	repo = Repo.init(store)
 	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="First")
-	repo.save("first")
+	repo.commit("first")
 	repo.tag("v1")
 
 	repo = Repo.open(store, mode="a")
 	repo.subject("sub-001").add_visit("ses-2").add_recording(raw, task="Second")
-	repo.save("second")
+	repo.commit("second")
 	assert Repo.open(store).subject("sub-001").visits(version="v1") == ["ses-1"]
 
 
 def test_transaction_discards_changes_on_error(store, raw):
-	repo = Repo.create(store)
+	repo = Repo.init(store)
 	try:
 		with repo.transaction("must not commit"):
 			repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="X")
@@ -48,7 +48,7 @@ def test_transaction_discards_changes_on_error(store, raw):
 
 
 def test_typed_nullable_table_and_nd_array_round_trip(store):
-	repo = Repo.create(store)
+	repo = Repo.init(store)
 	visit = repo.create_subject("sub-001").add_visit("ses-1")
 	table = pd.DataFrame({
 		"count": pd.Series([1, None], dtype="Int64"),
@@ -59,10 +59,10 @@ def test_typed_nullable_table_and_nd_array_round_trip(store):
 		"when": pd.Series(pd.to_datetime(["2024-01-01T12:00:00Z", None]).tz_convert("America/New_York")),
 		"elapsed": pd.Series(pd.to_timedelta([1, None], unit="s")),
 	})
-	visit.add_behavioral_table(table, task="Log")
+	visit.add_table(table, task="Log")
 	visit.add_array("power", np.arange(6).reshape(2, 3), ("channel", "frequency"),
 		datatype="eeg", coords={"frequency": [1, 2, 3]}, task="Spectrum")
-	repo.save("generalized")
+	repo.commit("generalized")
 
 	visit = Repo.open(store).subject("sub-001").visit("ses-1")
 	result = visit.tables()[0].df()
@@ -75,35 +75,35 @@ def test_typed_nullable_table_and_nd_array_round_trip(store):
 
 
 def test_array_named_data_is_not_misclassified_as_a_recording(store):
-	repo = Repo.create(store)
+	repo = Repo.init(store)
 	visit = repo.create_subject("sub-001").add_visit("ses-1")
 	visit.add_array("data", np.arange(3), ("sample",), datatype="anat", task="Vector")
-	repo.save("array")
+	repo.commit("array")
 	visit = Repo.open(store).subject("sub-001").visit("ses-1")
 	assert len(visit.arrays()) == 1
 	assert visit.recordings() == []
 
 
 def test_explicit_creation_materializes_empty_subject_and_visit(store):
-	repo = Repo.create(store)
+	repo = Repo.init(store)
 	repo.create_subject("sub-001").add_visit("ses-1")
-	repo.save("empty subject")
+	repo.commit("empty subject")
 	assert Repo.open(store).subject("sub-001").visits() == ["ses-1"]
 
 
 def test_doctor_accepts_a_current_store(store):
-	Repo.create(store)
+	Repo.init(store)
 	assert inspect_store(store).ok
 
 
 def test_disjoint_subject_writers_merge_at_publication(store, raw):
-	Repo.create(store)
+	Repo.init(store)
 	left = Repo.open(store, mode="a")
 	right = Repo.open(store, mode="a")
 	left.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="L")
 	right.create_subject("sub-002").add_visit("ses-1").add_recording(raw, task="R")
-	left.save("left")
-	right.save("right")
+	left.commit("left")
+	right.commit("right")
 	assert Repo.open(store).subjects() == ["sub-001", "sub-002"]
 
 
@@ -147,10 +147,10 @@ def _with_manifest(repo, mangle):
 
 
 def _two_subjects(store, raw):
-	repo = Repo.create(store)
+	repo = Repo.init(store)
 	for sub_id in ("sub-001", "sub-002"):
 		repo.create_subject(sub_id).add_visit("ses-1").add_recording(raw, task="Rest", run=1)
-	repo.save("two subjects")
+	repo.commit("two subjects")
 	return store
 
 
@@ -162,10 +162,10 @@ def test_catalog_entries_record_the_snapshot_they_describe(store, raw):
 
 
 def test_a_valid_catalog_still_prunes_subjects_that_cannot_match(store, raw):
-	repo = Repo.create(store)
+	repo = Repo.init(store)
 	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="Rest")
 	repo.create_subject("sub-002").add_visit("ses-1").add_recording(raw, task="Other")
-	repo.save("two tasks")
+	repo.commit("two tasks")
 
 	opened, scanned = Repo.open(store), []
 	real_root_of = opened.root_of
@@ -182,9 +182,9 @@ def test_find_does_not_walk_when_the_catalog_is_current(store, raw, monkeypatch)
 	assertion here would be flaky by construction."""
 	from neurozarr import Subject
 
-	repo = Repo.create(store)
+	repo = Repo.init(store)
 	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="Rest")
-	repo.save("one subject")
+	repo.commit("one subject")
 
 	walked: list[str] = []
 	real_recordings = Subject.recordings

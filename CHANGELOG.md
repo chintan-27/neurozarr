@@ -8,7 +8,57 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `verbose=True` on `Repo.create`/`Repo.open` and `convert_parallel`: logs one
+- git's workflow. Changes are staged and then committed: `repo.add(source)` /
+  `neurozarr add`, item-level `add_recording`/`add_table`/`add_array`, `rm`, `mv`;
+  `status`, `reset` (unstage), `commit -m`. Staged changes live in a local staging area
+  (git's index) shared by Python and the CLI, so they survive between processes: each
+  touched repository is staged as a pickled Icechunk fork (chunks are written at `add`,
+  as git writes objects), under `$XDG_STATE_HOME/neurozarr/`, per user and per store.
+  `commit` refuses, and publishes nothing, if the branch moved since staging and touched
+  the same chunks or node metadata (Icechunk's own merge would silently drop the other
+  change); changes to different data both land.
+- Inspection: `log` (with `--oneline`, refs, `--json`), `show` (message, subjects
+  changed, codec plan), `ls` (subjects / sessions / items, at any version), `find`
+  (`KEY=VALUE` terms), `tag NAME [VERSION]`, `tag -d`. Versions resolve like git: a
+  branch, a tag, an id or unique prefix, `REF~N` (`Repo.resolve`).
+- Branches and undo: `branch`/`branches`/`delete_branch` (CLI `branch [-d|-D]`),
+  `switch [-c]`, `repo.head`; `diff` (staged, VERSION vs now, A vs B; per subject items
+  and chunks rewritten; `--stat`, `--json`, `--exit-code`); `revert` (a new version
+  re-pinning the subjects a version changed, refused if they changed again since; no
+  data copied); `reset_hard` (CLI `reset --hard VERSION --yes`). Branches are pointers
+  in `_dataset`; subject repositories get the branch on their first write there.
+- `merge` (fast-forward; otherwise per subject against the common ancestor: one-sided
+  changes taken without copying, two-sided non-overlapping changes combined item by
+  item, overlapping ones a `MergeConflictError` settled with `ours=`/`theirs=`; the
+  merged tip is recorded in commit metadata so later merges find the right ancestor),
+  `clone` (full for local paths; `shallow`/`--depth 1` copies one version anywhere), and
+  `gc` (dry run by default; keeps every version on a branch or tag and all data it pins
+  -- subject snapshots only a dataset version reaches get a ref first -- and only
+  deletes objects older than the cutoff).
+- Stores are found like git repositories: `-C STORE`, then `$NEUROZARR_STORE`, then the
+  store the current directory is in. Named remotes (`neurozarr remote add NAME URL -o
+  key=value`) save a URI with its storage options; any command takes `-C NAME`.
+- `Repo.add(..., workers=N)` (CLI `add -j N`): parallel staging for any reader with
+  `subjects()`/`for_subject()` (`BidsReader`, `ManifestReader`, `SmartReader`). Each
+  worker writes into its subject's staged fork; a failing subject stages nothing usable
+  and nothing is published. In-memory stores and readers without those methods run
+  serially.
+- `SmartReader` (beta; `neurozarr add /siteA /siteB`): list the folders
+  the data is in, in any layout, and it works out the rest.
+  - Structure: BIDS, folder-per-subject and flat layouts, alone or mixed; reads
+    `dataset_description.json`, `participants.tsv`/`.json`, `*_sessions.tsv`, same-named
+    JSON sidecars (merged into the recording) and `<recording>_*.tsv`/`.json` sidecars.
+  - Content: opens each file's header; unreadable files are listed instead of failing
+    the run, byte-identical copies are ingested once, the header's patient id names the
+    subject when the path only gives a filename prefix, and runs are numbered by the
+    file's own number, then recording date, then path order.
+  - Formats: everything mne opens, plus `.mat` (v5 and v7.3), `.npy`, `.npz`, HDF5 and
+    NWB (signal, sampling rate and channel names found in the file), and files with no
+    extension, recognized by their first bytes.
+  - Asks when unsure: defaulted datatypes, filename-prefix subjects and missing sampling
+    rates are grouped into `reader.questions`; answers are path-glob overrides
+    (`answers=`), which the CLI asks for on a terminal and saves to `--answers`.
+- `verbose=True` on `Repo.init`/`Repo.open`: logs one
   line per item as it's written -- what it is, its size, live + peak
   `tracemalloc`-tracked memory (real Python-level allocations, not raw
   process RSS, which is dominated by one-time import cost and allocator
@@ -17,7 +67,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   line per commit and per reader/subject-repo step. Shorthand for
   `neurozarr.set_verbosity(logging.INFO)`, which is what starts the
   `tracemalloc` tracking; the package stays quiet by default, as a library
-  should. `convert_parallel` applies it inside each worker process, since a
+  should. Parallel `add` applies it inside each worker process, since a
   fresh spawned interpreter doesn't inherit the caller's logging setup.
 - `Repo.describe()` and `Visit.describe()`: a store's or one session's
   contents summarized as data (a list of dicts, sorted by path) instead of
@@ -33,9 +83,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `derivatives/` folder entirely. Previously read unconditionally whenever
   present; that remains the default.
 
-- Explicit `Repo.create`, `Repo.open`, and transactional write APIs.
+- Explicit `Repo.init`, `Repo.open`, and transactional write APIs.
 - A schema-v2 dataset manifest that atomically pins exact subject snapshots,
-  plus `doctor` and explicit metadata-only migration commands.
+  plus `fsck` and explicit metadata-only migration commands.
 - Structured validation reports and a public neurozarr exception hierarchy.
 - Safe duplicate policies, external-file references, typed nullable tables,
   N-dimensional arrays, source provenance, and reader plugin registration.
@@ -62,7 +112,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ExternalFileView`, and `Subject.rename_visit`/`delete_visit`. zarr has no
   move primitive; icechunk does (`Repository.rearrange_session().move()`), but
   it commits independently of a `writable_session`, which conflicts with the
-  "not committed until `Repo.save()`" contract every other write here follows
+  "not committed until `Repo.commit()`" contract every other write here follows
   -- so for now a rename copies the item to its new key and deletes the old
   one, all within the same subject repository. (Thanks to @ianhi for the
   correction -- see [#1](https://github.com/chintan-27/neurozarr/issues/1).)
@@ -138,6 +188,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Storage URIs reject embedded credentials; custom cloud storage now uses a
   per-repository factory instead of one aliased `Storage` object.
 - Existing item paths fail by default; replacement or skipping must be explicit.
+- Codecs are now chosen by the reader, once per ingest, instead of being fixed at
+  zstd level 19. A reader's `codec_plan()` probes a few real files (one real middle
+  chunk each, encoded exactly as stored) with no, byte and bit shuffle and keeps the
+  smallest per group; every writer, serial or parallel, applies that plan, and it is
+  recorded in the dataset metadata as `codec_plan`. Reader options: `optimize`
+  (`speed` = Blosc lz4, `balanced` = Blosc zstd-5, the default, `size` = Blosc
+  zstd-9), `probe_level` (one decision per: 0 nothing / zarr default, 1 item type,
+  2 item type x stored dtype, the default, 3 + chunk shape, 4 each array) and
+  `probe_files`; CLI `--optimize`, `--probe-level`, `--probe-files`. Strings get zstd
+  and embedded files are never probed. Measured on BRAVO, CHB-MIT, RNS, Pediatric
+  iEEG and HBN EEG: the shuffle mode is what matters and differs by dataset; level 2
+  is within 0.1-2.3% of probing every recording, and planning took 1-61 s (opening
+  the sampled files), about 1% of a large ingest. Blosc is a core Zarr v3 codec, so
+  stores stay readable outside zarr-python; existing stores read as before.
+- The explicit API (`visit.add_recording` and friends) never probes: it uses
+  `CodecConfig(compressors=...)` if set, else zarr's default. Setting it also
+  overrides a reader's plan during `ingest`, with a warning.
+- Tables, generic arrays and embedded files get codecs too (previously always
+  zarr's default), and table arrays are chunked like other arrays.
+
+### Fixed
+
+- `rename` kept the data but re-encoded the arrays with zarr's default codec; it now
+  copies each array's filters, compressors and serializer.
+
+### Changed (renamed outright; nothing was published under the old names)
+
+- Python: `Repo.create` -> `Repo.init`, `ingest` -> `add` (also takes a path, with the
+  reader picked as the CLI does), `save` -> `commit`, `abort` -> `reset`, `history` ->
+  `log`, `add_behavioral_table` -> `add_table` (with `datatype=`); `add_recording` gains
+  `datatype=`; the generic `visit.add(datatype, payload)` is removed.
+- CLI: `convert SRC DEST` -> `init` + `add` + `commit`; `info` -> `ls`/`show`; `history`
+  -> `log`; `doctor` -> `fsck`; `verify`, `export` and `migrate` use the discovered store.
+
+### Removed
+
+- `neurozarr.parallel.convert_parallel` and the `neurozarr.parallel` module: use
+  `repo.add(source, workers=N)`.
 
 ### Deprecated
 

@@ -27,11 +27,11 @@ from neurozarr import Repo
 
 raw = mne.io.read_raw_fif("messy/patient1/patient1_20220908_stream_raw.fif", verbose=False)
 
-repo = Repo.create("./demo.zarr")
+repo = Repo.init("./demo.zarr")
 subject = repo.create_subject("sub-001", attrs={"diagnosis": "PD"})
 visit = subject.add_visit("ses-20220908")
 visit.add_recording(raw, task="Stream")
-repo.save("first recording")
+repo.commit("first recording")
 ```
 
 Load the file with `mne.io.read_raw_fif`, or the `mne.io.read_raw_*` function
@@ -121,16 +121,16 @@ not make `ok` false.
 ```python
 from neurozarr import Repo, ManifestReader
 
-repo = Repo.create("./study.zarr")
-repo.ingest(ManifestReader("manifest.csv"))
-version = repo.save("first conversion")
+repo = Repo.init("./study.zarr")
+repo.add(ManifestReader("manifest.csv"))
+version = repo.commit("first conversion")
 ```
 
 {meth}`~neurozarr.Repo.create` makes a new store and fails if one already
 exists, so a typo in the path cannot silently create a second store. Use
 {meth}`~neurozarr.Repo.open` for a store that already exists.
 
-`save()` writes nothing until it is called, and returns the new version's id.
+`commit()` writes nothing until it is called, and returns the new version's id.
 
 ## 5. Read it back
 
@@ -178,9 +178,9 @@ log.df()
 Replace the local path with a bucket URI:
 
 ```python
-repo = Repo.create("s3://my-bucket/study", region="us-east-1")
-repo.ingest(ManifestReader("manifest.csv"))
-repo.save("first conversion")
+repo = Repo.init("s3://my-bucket/study", region="us-east-1")
+repo.add(ManifestReader("manifest.csv"))
+repo.commit("first conversion")
 
 repo = Repo.open("s3://my-bucket/study", region="us-east-1")
 rec = repo.subject("sub-001").visit("ses-20220908").recording(task="Stream")
@@ -203,8 +203,8 @@ before converting the rest. Adding more later is routine:
 from neurozarr import Repo, ManifestReader
 
 repo = Repo.open("./study.zarr", mode="a")
-repo.ingest(ManifestReader("manifest.csv"), existing="skip")
-repo.save("added the rest")
+repo.add(ManifestReader("manifest.csv"), existing="skip")
+repo.commit("added the rest")
 ```
 
 `existing="skip"` writes only what the store does not already hold. Without
@@ -217,8 +217,10 @@ Each step above has a command-line equivalent:
 
 ```bash
 neurozarr validate manifest.csv        # step 3
-neurozarr convert manifest.csv study.zarr
-neurozarr info study.zarr
+neurozarr init study.zarr
+neurozarr -C study.zarr add manifest.csv
+neurozarr -C study.zarr commit -m "first import"
+neurozarr -C study.zarr ls
 ```
 
 The Python API is primary and does more; the CLI covers common conversions

@@ -29,9 +29,9 @@ different mechanisms, described after the table.
 ```python
 from neurozarr import Repo, ManifestReader
 
-repo = Repo.create("./study.zarr")
-repo.ingest(ManifestReader("manifest.csv"))
-repo.save("initial conversion")
+repo = Repo.init("./study.zarr")
+repo.add(ManifestReader("manifest.csv"))
+repo.commit("initial conversion")
 ```
 
 Six column names are reserved — `sub`, `ses`, `datatype`, `name`, `meta` and
@@ -98,22 +98,22 @@ When you are building a dataset programmatically, or only have a few
 recordings, skip the readers entirely:
 
 ```python
-repo = Repo.create("./study.zarr")
+repo = Repo.init("./study.zarr")
 
 subject = repo.create_subject("sub-001", attrs={"age": 63, "diagnosis": "PD"})
 visit = subject.add_visit("ses-20220908", attrs={"device": "Percept PC"})
 
 visit.add_recording(my_mne_raw, task="Stream", run=1)
-visit.add_behavioral_table(my_dataframe, task="TherapyHistory")
+visit.add_table(my_dataframe, task="TherapyHistory")
 
-repo.save("added sub-001")
+repo.commit("added sub-001")
 ```
 
 Keyword arguments are entities, and decide where each item lands.
 
 For a dataset with no sessions at all, skip {meth}`~neurozarr.Subject.add_visit`
 entirely — {class}`~neurozarr.Subject` has the same
-{meth}`~neurozarr.Visit.add_recording`/{meth}`~neurozarr.Visit.add_behavioral_table`/
+{meth}`~neurozarr.Visit.add_recording`/{meth}`~neurozarr.Visit.add_table`/
 {meth}`~neurozarr.Visit.add_array`/{meth}`~neurozarr.Visit.add_derivative`
 methods {class}`~neurozarr.Visit` does — both share one internal
 implementation, differing only in whether a session segment goes in the path:
@@ -157,10 +157,10 @@ class MyLabReader:
             raw = mne.io.read_raw(path, preload=False, verbose=False)
             yield Recording(entities, raw, meta={"device": row.device})
 
-repo.ingest(MyLabReader("sessions.csv", "./raw"))
+repo.add(MyLabReader("sessions.csv", "./raw"))
 ```
 
-`read()` can be a generator, as above, so nothing is loaded until `ingest()`
+`read()` can be a generator, as above, so nothing is loaded until `add()`
 asks for it — memory use stays flat regardless of how large the source is.
 
 Since {class}`~neurozarr.Writer` is the only thing that touches Zarr, a reader
@@ -179,7 +179,7 @@ directly:
 ```python
 from neurozarr import BidsReader
 
-repo.ingest(BidsReader("./my_bids_dataset"))
+repo.add(BidsReader("./my_bids_dataset"))
 ```
 
 It handles any valid dataset generically: subjects and sessions are discovered
@@ -197,7 +197,7 @@ filed under its own `derivatives/<pipeline>/` prefix. Pass
 `include_derivatives=False` to convert only the dataset's raw data:
 
 ```python
-repo.ingest(BidsReader("./my_bids_dataset", include_derivatives=False))
+repo.add(BidsReader("./my_bids_dataset", include_derivatives=False))
 ```
 
 ## Existing paths
@@ -206,6 +206,6 @@ Writes fail when the same entity path already exists. Make replacement intent
 explicit:
 
 ```python
-repo.ingest(reader, existing="skip")       # incremental import
-repo.ingest(reader, existing="replace")    # deliberate rewrite
+repo.add(reader, existing="skip")       # incremental import
+repo.add(reader, existing="replace")    # deliberate rewrite
 ```

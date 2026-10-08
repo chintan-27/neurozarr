@@ -6,7 +6,7 @@ constructor, neither can silently turn a misspelled input path into a new empty
 store.
 
 ```python
-repo = Repo.create("./study.zarr")
+repo = Repo.init("./study.zarr")
 repo = Repo.open("./study.zarr", mode="a")
 ```
 
@@ -14,7 +14,7 @@ repo = Repo.open("./study.zarr", mode="a")
 
 Every subject is committed independently. Neurozarr then commits `_dataset`
 with a manifest mapping each subject to its exact Icechunk snapshot. The
-dataset-manifest snapshot returned by `save()` is therefore a consistent global
+dataset-manifest snapshot returned by `commit()` is therefore a consistent global
 version. If publication is interrupted, earlier readers continue to use the
 previous manifest.
 
@@ -36,7 +36,7 @@ compatibility wrapper. Unsafe path segments, invalid metadata, and malformed
 supported data fail; unsupported formats become explicit `ExternalFile`
 references with warnings.
 
-Run `neurozarr doctor STORE` after an interrupted job. It detects missing
+Run `neurozarr fsck` after an interrupted job. It detects missing
 snapshots and subject commits not yet published by the dataset manifest.
 
 The manifest also carries a catalog: a per-subject summary of visits and
@@ -44,7 +44,7 @@ recordings, so listing and searching a store does not have to open every
 subject repository. It is only a cache, and each entry records the snapshot it
 was read from. An entry that does not describe the snapshot the dataset
 currently publishes is never used to answer a query — {meth}`neurozarr.Repo.find`
-falls back to scanning that subject, and `doctor` reports it as
+falls back to scanning that subject, and `fsck` reports it as
 `store.stale_catalog_entry`. The result is slower, never wrong.
 
 Stores written by 0.1 remain readable. Preview and apply the metadata-only

@@ -1,3 +1,4 @@
+import copy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Iterator
@@ -10,6 +11,7 @@ from ..errors import ValidationError
 from ..items import Attrs, ExternalFile, Item, Recording, Table
 from ..log import log_progress
 from ..util import clean_nan, load_json, source_provenance
+from ..codecs import CodecPlan, check_plan_options, plan_codecs
 from .formats import UnclaimedPolicy, decode_embed, decoder_for
 
 # Formats mne.io.read_raw() auto-dispatches on, covering eeg/ieeg/meg/nirs data
@@ -71,26 +73,54 @@ class BidsReader:
 		dataset has one — read unconditionally by default, the same as any
 		other datatype directory, filtered by ``subjects`` the same way.
 		Pass ``False`` to convert only the dataset's raw data.
+	optimize : {"balanced", "speed", "size"}, default "balanced"
+		How :meth:`codec_plan` trades size against speed: Blosc lz4 (fastest),
+		zstd level 5, or zstd level 9 (smallest), each with the shuffle mode that
+		probing finds best for the data.
+	probe_level : {0, 1, 2, 3, 4}, default 2
+		How finely :meth:`codec_plan` groups data, one codec decision per: 0,
+		nothing (zarr's default); 1, item type; 2, item type x stored dtype; 3,
+		item type x stored dtype x chunk shape; 4, each array, probed as it is
+		written. See :mod:`neurozarr.codecs`.
+	probe_files : int, default 8
+		Arrays probed per group, from files spread across subjects.
 
 	Examples
 	--------
-	>>> repo.ingest(BidsReader("./my_bids_dataset"))
-	>>> repo.ingest(BidsReader("./my_bids_dataset", include_derivatives=False))
+	>>> repo.add(BidsReader("./my_bids_dataset"))
+	>>> repo.add(BidsReader("./my_bids_dataset", include_derivatives=False))
 	"""
 
 	def __init__(self, root_dir: str | Path, subjects: list[str] | None = None,
 				 checksum: bool = False, unclaimed: UnclaimedPolicy | str = UnclaimedPolicy.REFERENCE,
-				 include_derivatives: bool = True):
+				 include_derivatives: bool = True, optimize: str = "balanced", probe_level: int = 2,
+				 probe_files: int = 8):
 		# Dataset-level metadata is yielded whatever `subjects` says, so parallel
 		# workers each converting one subject still agree on it.
 		self.root_dir = Path(root_dir)
-		self.subjects = None if subjects is None else set(subjects)
+		self._only = None if subjects is None else set(subjects)
 		self.checksum = checksum
 		self.unclaimed = UnclaimedPolicy(unclaimed)
 		self.include_derivatives = include_derivatives
+		check_plan_options(optimize, probe_level)
+		self.optimize, self.probe_level, self.probe_files = optimize, probe_level, probe_files
+
+	def codec_plan(self, layout: Any = None) -> "CodecPlan":
+		"""Probe a few files and decide each kind of data's codec; see :mod:`neurozarr.codecs`."""
+		return plan_codecs(self, layout, self.optimize, self.probe_level, self.probe_files)
+
+	def subjects(self) -> list[str]:
+		"""The subjects this reader reads, so :meth:`Repo.add` can split the work."""
+		return [d.name for d in sorted(self.root_dir.glob("sub-*")) if d.is_dir() and self._wanted(d.name)]
+
+	def for_subject(self, sub: str | None) -> "BidsReader":
+		"""This reader limited to one subject; ``None`` reads only dataset-level metadata."""
+		limited = copy.copy(self)
+		limited._only = set() if sub is None else {sub}
+		return limited
 
 	def _wanted(self, sub: str) -> bool:
-		return self.subjects is None or sub in self.subjects
+		return self._only is None or sub in self._only
 
 	def read(self) -> Iterator[Item]:
 		log_progress("Reading BIDS dataset", str(self.root_dir))

@@ -1,4 +1,5 @@
 import itertools
+import json
 
 import mne
 import numpy as np
@@ -8,6 +9,15 @@ import pytest
 from neurozarr import Repo
 
 _counter = itertools.count()
+
+
+@pytest.fixture(autouse=True)
+def _local_state(tmp_path_factory, monkeypatch):
+	"""HEAD, the index and remotes live under XDG dirs -- keep each test's private."""
+	home = tmp_path_factory.mktemp("xdg")
+	monkeypatch.setenv("XDG_STATE_HOME", str(home / "state"))
+	monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+	monkeypatch.delenv("NEUROZARR_STORE", raising=False)
 
 
 @pytest.fixture
@@ -56,6 +66,28 @@ def written(store, raw, table):
 	repo = Repo(store)
 	visit = repo.create_subject("sub-001", attrs={"age": 63}).add_visit("ses-1", attrs={"device": "Percept"})
 	visit.add_recording(raw, task="Stream", run=1)
-	visit.add_behavioral_table(table, task="Log")
-	repo.save("test data")
+	visit.add_table(table, task="Log")
+	repo.commit("test data")
 	return store
+
+
+TINY_SUBJECTS = ("sub-01", "sub-02", "sub-03")
+
+
+@pytest.fixture
+def tiny_bids(tmp_path):
+	"""A three-subject BIDS folder on disk: one FIF recording plus an events
+	sidecar per subject, dataset_description.json and participants.tsv."""
+	root = tmp_path / "bids"
+	root.mkdir()
+	(root / "dataset_description.json").write_text(json.dumps({"Name": "tiny", "BIDSVersion": "1.9"}))
+	(root / "participants.tsv").write_text(
+		"participant_id\tage\n" + "".join(f"{s}\t{30 + i}\n" for i, s in enumerate(TINY_SUBJECTS)))
+	for i, sub in enumerate(TINY_SUBJECTS):
+		folder = root / sub / "ses-1" / "eeg"
+		folder.mkdir(parents=True)
+		data = np.random.default_rng(i).standard_normal((3, 400)) * 1e-5
+		raw = mne.io.RawArray(data, mne.create_info(["a", "b", "c"], 200.0, "eeg"), verbose=False)
+		raw.save(folder / f"{sub}_ses-1_task-rest_eeg.fif", verbose=False)
+		(folder / f"{sub}_ses-1_task-rest_events.tsv").write_text("onset\tduration\ttrial_type\n1\t0\tgo\n")
+	return root

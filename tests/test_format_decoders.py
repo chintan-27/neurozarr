@@ -56,9 +56,9 @@ def test_manifest_reader_embeds_binary_when_asked(tmp_path):
 	manifest_path = tmp_path / "manifest.csv"
 	manifest.to_csv(manifest_path, index=False)
 
-	repo = Repo.create("memory://embed-test")
-	repo.ingest(ManifestReader(manifest_path, unclaimed="embed"))
-	repo.save("embedded")
+	repo = Repo.init("memory://embed-test")
+	repo.add(ManifestReader(manifest_path, unclaimed="embed"))
+	repo.commit("embedded")
 
 	array = Repo.open("memory://embed-test").subject("sub-001").visit("ses-1").arrays()[0]
 	assert bytes(array.data()) == b"raw bytes nobody has a decoder for"
@@ -76,9 +76,9 @@ def test_manifest_reader_default_unclaimed_is_still_a_reference(tmp_path):
 	manifest_path = tmp_path / "manifest.csv"
 	manifest.to_csv(manifest_path, index=False)
 
-	repo = Repo.create("memory://reference-test")
-	repo.ingest(ManifestReader(manifest_path))
-	repo.save("referenced")
+	repo = Repo.init("memory://reference-test")
+	repo.add(ManifestReader(manifest_path))
+	repo.commit("referenced")
 
 	visit = Repo.open("memory://reference-test").subject("sub-001").visit("ses-1")
 	assert visit.arrays() == []
@@ -91,12 +91,12 @@ def test_views_in_surfaces_a_sibling_item_next_to_a_recording(store, raw):
 	entities as the recording (e.g. an unsupported-format sidecar file next to
 	a BIDS recording under the same task) was silently invisible outside
 	RecordingView's own channels()/events() facade."""
-	repo = Repo.create(store)
+	repo = Repo.init(store)
 	visit = repo.create_subject("sub-001").add_visit("ses-1")
 	visit.add_recording(raw, task="Rest")
 	sidecar = ExternalFile(Entities("sub-001", "ses-1", "ieeg", {"task": "Rest"}), "sidecar", "somewhere.mystery")
 	repo._writer_for("sub-001").add_external_file(sidecar)
-	repo.save("recording plus a sibling reference")
+	repo.commit("recording plus a sibling reference")
 
 	visit = Repo.open(store).subject("sub-001").visit("ses-1")
 	assert len(visit.recordings()) == 1, "the recording itself must still be found"
@@ -112,9 +112,9 @@ def test_views_in_does_not_double_list_events_as_a_top_level_table(store):
 	raw = mne.io.RawArray(np.zeros((1, 100)), info, verbose=False)
 	raw.set_annotations(mne.Annotations(onset=[0.1], duration=[0.0], description=["stim"]))
 
-	repo = Repo.create(store)
+	repo = Repo.init(store)
 	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw, task="X")
-	repo.save("with events")
+	repo.commit("with events")
 
 	visit = Repo.open(store).subject("sub-001").visit("ses-1")
 	assert visit.recordings()[0].events()["trial_type"].tolist() == ["stim"]
@@ -132,9 +132,9 @@ def test_bids_reader_compound_extension_suffix_is_not_mangled(tmp_path, store):
 	(tmp_path / "bids" / "dataset_description.json").write_text(json.dumps({"Name": "x"}))
 	(anat / "sub-001_ses-1_T1w.nii.gz").write_bytes(b"not a real nifti, just checking the filename parsing")
 
-	repo = Repo.create(store)
-	repo.ingest(BidsReader(tmp_path / "bids", unclaimed="embed"))
-	repo.save("imaging")
+	repo = Repo.init(store)
+	repo.add(BidsReader(tmp_path / "bids", unclaimed="embed"))
+	repo.commit("imaging")
 
 	array = Repo.open(store).subject("sub-001").visit("ses-1").arrays()[0]
 	assert array.name == "T1w"
@@ -151,9 +151,9 @@ def test_nifti_decoder_reads_real_image_data(tmp_path, store):
 
 	assert ".nii.gz" in registered_formats(), "NIfTI decoder should auto-register when nibabel is installed"
 
-	repo = Repo.create(store)
-	repo.ingest(BidsReader(tmp_path / "bids"))
-	repo.save("imaging")
+	repo = Repo.init(store)
+	repo.add(BidsReader(tmp_path / "bids"))
+	repo.commit("imaging")
 
 	array = Repo.open(store).subject("sub-001").visit("ses-1").arrays()[0]
 	assert array.name == "T1w"

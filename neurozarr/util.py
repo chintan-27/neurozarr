@@ -3,6 +3,7 @@ import json
 import hashlib
 import math
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -103,9 +104,8 @@ def _column_arrays(df: pd.DataFrame) -> list[dict[str, Any]]:
 	return columns
 
 
-def create_table(group: zarr.Group, name: str, df: pd.DataFrame,
-				 extra_attrs: dict[str, Any] | None = None) -> None:
-	"""Store a DataFrame with a lossless logical dtype schema.
+def table_arrays(df: pd.DataFrame) -> tuple[list[tuple[str, np.ndarray]], list[dict[str, Any] | None]]:
+	"""The arrays a table is stored as, and its column schema.
 
 	Columns that share a physical dtype and nullability are packed into one
 	shared 2D array instead of each getting its own -- icechunk has a real
@@ -115,7 +115,6 @@ def create_table(group: zarr.Group, name: str, df: pd.DataFrame,
 	if anything, it was packed alongside, so this changes nothing about what
 	comes back on read.
 	"""
-	table = group.create_group(name, overwrite=True)
 	columns = _column_arrays(df)
 
 	groups: dict[tuple[str, bool], list[int]] = {}
@@ -159,14 +158,25 @@ def create_table(group: zarr.Group, name: str, df: pd.DataFrame,
 			entry["categories"] = c["categories"]
 			entry["ordered"] = c["ordered"]
 		schema[i] = entry
+	return writes, schema
 
+
+def create_table(group: zarr.Group, name: str, df: pd.DataFrame,
+				 extra_attrs: dict[str, Any] | None = None,
+				 array_options: Callable[[np.ndarray], dict[str, Any]] | None = None) -> None:
+	"""Store a DataFrame with a lossless logical dtype schema (see :func:`table_arrays`).
+	``array_options`` gives each stored array its ``create_array`` options (chunks,
+	codec) from its data; zarr's defaults without it."""
+	table = group.create_group(name, overwrite=True)
+	writes, schema = table_arrays(df)
 	if writes:
 		# ponytail: relies on zarr's private _async_group/_sync (the same thing
 		# Group.create_array calls internally) since zarr has no public bulk-create
 		# API; switch to one if zarr ever adds it.
 		async def _create_all() -> None:
 			await asyncio.gather(*(
-				table._async_group.create_array(array_name, data=data) for array_name, data in writes
+				table._async_group.create_array(array_name, data=data, **(array_options(data) if array_options else {}))
+				for array_name, data in writes
 			))
 		table._sync(_create_all())
 

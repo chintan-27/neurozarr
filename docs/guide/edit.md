@@ -18,7 +18,7 @@ repo.subject("sub-001").visit("ses-1").set_attrs({"technician": "AB"})  # one se
 rec = repo.subject("sub-001").visit("ses-1").recording(task="Rest")
 rec.set_attrs({"note": "checked"})                                      # one recording
 
-repo.save("annotated")
+repo.commit("annotated")
 ```
 
 The same method exists on {class}`~neurozarr.TableView`,
@@ -34,11 +34,11 @@ types, and {meth}`~neurozarr.RecordingView.delete` work the same way:
 ```python
 rec = repo.subject("sub-001").visit("ses-1").recording(task="Rest")
 rec.rename("renamed-rec")
-repo.save("renamed recording")
+repo.commit("renamed recording")
 
 repo = Repo.open("./study.zarr", mode="a")
 repo.subject("sub-001").visit("ses-1").recordings()[0].delete()
-repo.save("deleted recording")
+repo.commit("deleted recording")
 ```
 
 Neither zarr nor Icechunk has a move operation, so a rename copies the item
@@ -46,7 +46,7 @@ to its new key and deletes the old one — cheap within one subject's own
 repository, but not instant for a very large recording. Once you've called
 `rename()` or `delete()`, stop using that view: it still points at the old
 location and now reads stale data. Get a fresh one from `recordings()`,
-`tables()`, and so on after the next `save()`.
+`tables()`, and so on after the next `commit()`.
 
 ## Renaming and deleting a session
 
@@ -56,10 +56,10 @@ recordings, tables, everything under it:
 
 ```python
 repo.subject("sub-001").rename_visit("ses-1", "ses-2")
-repo.save("renamed session")
+repo.commit("renamed session")
 
 repo.subject("sub-001").delete_visit("ses-2")
-repo.save("deleted session")
+repo.commit("deleted session")
 ```
 
 A session is just a group inside its subject's own repository, so this is
@@ -75,7 +75,7 @@ repository or its version history:
 
 ```python
 repo.delete_subject("sub-001")
-repo.save("removed subject")
+repo.commit("removed subject")
 ```
 
 This is deliberately a soft removal, consistent with everything else here
