@@ -182,9 +182,12 @@ def _cmp_mask(table: Table, column: str, op: str, value: Any) -> np.ndarray:
 	present = codes >= 0
 	texts = [_text(v) for v in values]
 	if op in ("==", "!=", "in", "not in"):
-		lookup = {t: i for i, t in enumerate(dictionary)}
-		wanted = np.array([lookup[t] for t in texts if t in lookup], dtype=np.int32)
-		hit = np.isin(codes, wanted)
+		lookup = table.lookup(column)
+		wanted = [lookup[t] for t in texts if t in lookup]
+		if len(wanted) == 1:
+			hit = codes == wanted[0]
+		else:
+			hit = np.isin(codes, np.array(wanted, dtype=np.int32))
 		return present & (hit if op in ("==", "in") else ~hit)
 	# ordering on text: the dictionary is sorted, so codes order as the values do
 	cut = texts[0]
@@ -216,8 +219,7 @@ def mask(expr: Expr | None, table: Table, subject: dict[str, Any] | None = None)
 	if isinstance(expr, Not):
 		return ~mask(expr.part, table, subject)
 	if subject is not None and expr.column.startswith("participant."):
-		scalar = Table.decode(_one_row(expr.column, subject.get(expr.column)))
-		return np.full(n, bool(mask(expr, scalar)[0]))
+		return np.full(n, _scalar_match(expr, subject.get(expr.column)))
 	if isinstance(expr, Exists):
 		if table.kind_of(expr.column) == "num":
 			return ~np.isnan(table.num(expr.column))
@@ -225,9 +227,31 @@ def mask(expr: Expr | None, table: Table, subject: dict[str, Any] | None = None)
 	return _cmp_mask(table, expr.column, expr.op, expr.value)
 
 
-def _one_row(column: str, value: Any) -> bytes:
-	from .index import encode
-	return encode([{"path": "", **({} if value is None else {column: value})}])
+def _scalar_match(expr: "Cmp | Exists", value: Any) -> bool:
+	"""One subject-level value against a comparison, with the same rules as the columns:
+	missing never matches; numbers compare as numbers when both sides are; else as text."""
+	if isinstance(expr, Exists):
+		return value is not None
+	if value is None:
+		return False
+	targets = expr.value if expr.op in ("in", "not in") else (expr.value,)
+	mine, theirs = _num_value(value), [_num_value(t) for t in targets]
+	if mine is not None and all(t is not None for t in theirs):
+		left: Any = mine
+		rights: list[Any] = theirs
+	else:
+		left, rights = _text(value), [_text(t) for t in targets]
+	if expr.op in ("in", "not in"):
+		return (left in rights) == (expr.op == "in")
+	right = rights[0]
+	return {"==": left == right, "!=": left != right, "<": left < right, "<=": left <= right,
+			">": left > right, ">=": left >= right}[expr.op]
+
+
+def subject_values(summary: Summary, i: int, columns: set[str]) -> dict[str, Any]:
+	"""The subject-level (``participant.*``) values of summary row ``i`` that are needed."""
+	row = np.array([i])
+	return {c: summary.table.values(c, row)[0] for c in columns if c.startswith("participant.")}
 
 
 # ---- subject pruning -----------------------------------------------------------------

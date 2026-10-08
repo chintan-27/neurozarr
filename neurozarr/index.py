@@ -182,7 +182,7 @@ class Table:
 
 	header: dict[str, Any]
 	_body: memoryview
-	_cache: dict[str, Any] = field(default_factory=dict)
+	_cache: dict[Any, Any] = field(default_factory=dict)
 
 	@classmethod
 	def decode(cls, blob: bytes) -> "Table":
@@ -205,9 +205,15 @@ class Table:
 		return ["path", *self.header["columns"]]
 
 	def _array(self, entry: dict[str, Any]) -> np.ndarray:
+		key = entry["offset"]  # decoded once per table: blobs are immutable
+		cached = self._cache.get(key)
+		if cached is not None:
+			return cast(np.ndarray, cached)
 		dtype = np.dtype(entry["dtype"])
 		count = int(np.prod(entry["shape"])) if entry["shape"] else 1
-		return np.frombuffer(self._body, dtype=dtype, count=count, offset=entry["offset"]).reshape(entry["shape"])
+		array = np.frombuffer(self._body, dtype=dtype, count=count, offset=entry["offset"]).reshape(entry["shape"])
+		self._cache[key] = array
+		return array
 
 	def buffer(self, name: str) -> np.ndarray:
 		return self._array(self.header["buffers"][name])
@@ -236,7 +242,16 @@ class Table:
 			dictionary = sorted({t for t in texts if t is not None})
 			lookup = {t: i for i, t in enumerate(dictionary)}
 			return np.array([-1 if t is None else lookup[t] for t in texts], dtype=np.int32), dictionary
-		return self._array(entry), list(entry["values"])
+		return self._array(entry), entry["values"]
+
+	def lookup(self, name: str) -> dict[str, int]:
+		"""value -> code of a categorical column, built once per table."""
+		key = ("lookup", name)
+		cached = self._cache.get(key)
+		if cached is None:
+			cached = {value: i for i, value in enumerate(self.codes(name)[1])}
+			self._cache[key] = cached
+		return cast("dict[str, int]", cached)
 
 	def values(self, name: str, rows: np.ndarray | None = None) -> list[Any]:
 		"""Decoded values of a column (for the selected rows): floats, strings or None."""

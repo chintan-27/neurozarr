@@ -27,7 +27,7 @@ from .schema import MANIFEST_ATTR, SCHEMA_VERSION, StoreManifest, utc_now
 from .storage import StorageTarget, storage_from
 from . import index as nzindex, state, util
 from .entities import parse_entities
-from .query import QueryResult, mask as query_mask, parse as parse_query, prune as prune_query
+from .query import QueryResult, mask as query_mask, parse as parse_query, prune as prune_query, subject_values
 from .codecs import CodecPlan
 from .writer import CodecConfig, ExistingPolicy, Writer, _clashes, _copy_node, copy_chunks
 
@@ -1156,6 +1156,8 @@ class Repo:
 		summary = self._summary(version)
 		expr = parse_query(expression, **({**filters, "kind": kind} if kind else filters))
 		staged = self._staged_tables() if include_staged and version is None else {}
+		participant_columns = [c for c in (summary.table.columns if summary else []) if c.startswith("participant.")]
+		wanted = set(participant_columns)  # the result's df carries them all
 		gone = self._removed_subjects if include_staged and version is None else set()
 		hits: list[tuple[str, Any, Any, dict[str, Any]]] = []
 		tables: dict[str, tuple[Any, dict[str, Any]]] = {}
@@ -1167,7 +1169,7 @@ class Repo:
 					continue
 				table = self._subject_table(sub_id, version)
 				if table is not None:
-					tables[sub_id] = (table, summary.table.row(summary.table.find(sub_id) or 0))
+					tables[sub_id] = (table, subject_values(summary, summary.table.find(sub_id) or 0, wanted))
 		for sub_id, table in staged.items():  # the delta: evaluated whatever the summary says
 			if sub_id not in gone:
 				tables[sub_id] = (table, {f"participant.{k}": v for k, v in table.header["attrs"].items()})
