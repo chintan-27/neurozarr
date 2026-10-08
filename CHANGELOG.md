@@ -18,6 +18,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   captures each item's row as it writes it (rows travel with staged work and back from
   parallel workers), and only items changed otherwise are re-read. Indexes are cached
   by content digest.
+- `repo.refresh()` (catch up with newer versions: one tip read, then only changed
+  subject indexes refetched), `repo.watch(interval)` (yield new versions as they land),
+  `query(include_staged=True)` (this Repo's staged changes as commit would record them),
+  a digest-keyed disk cache for remote stores, and concurrent index fetches.
 - Views are lazy: a `RecordingView`/`TableView`/`ArrayView`/`ExternalFileView` from
   `query`, `find` or `get` opens its group only when its data or metadata is read.
 - `repo.query(expression, kind=, version=, **filters)` / `neurozarr query`: an expression

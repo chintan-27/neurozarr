@@ -10,7 +10,7 @@ import re
 import shutil
 import multiprocessing
 import warnings
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 import icechunk
 import mne  # type: ignore[import-untyped]  # mne ships no type information
@@ -157,6 +157,10 @@ class Repo:
 		self._manifest_cache: dict[str | None, StoreManifest | None] = {}
 		self._root_cache: dict[tuple[str, str | None], zarr.Group] = {}
 		self._summary_cache: dict[str | None, nzindex.Summary | None] = {}
+		self._seen_tip: str | None = None  # the branch tip the cached reads came from
+		# indexes are immutable per digest, so a local disk copy never goes stale; worth
+		# it only when the store is remote
+		self.index_cache = not state.is_local(target)
 		self._removed_subjects: set[str] = set()
 		self._failed = False
 		self._plan: CodecPlan | None = None  # the reader's codec plan, during an ingest only
@@ -716,6 +720,8 @@ class Repo:
 
 	def _summary(self, version: str | None = None) -> "nzindex.Summary | None":
 		if version not in self._summary_cache:
+			if version is None and self._seen_tip is None and self._manifest() is not None:
+				self._seen_tip = self._icechunk_repo("_dataset").lookup_branch(self._branch)
 			blob = self._blob(nzindex.SUMMARY, version)
 			self._summary_cache[version] = None if blob is None else nzindex.Summary(nzindex.Table.decode(blob))
 		return self._summary_cache[version]
@@ -727,11 +733,56 @@ class Repo:
 			return None
 		table = nzindex.CACHE.get(key)
 		if table is None:
-			blob = self._blob(sub_id, version)
+			blob = nzindex.disk_get(key) if self.index_cache else None
 			if blob is None:
-				return None
+				blob = self._blob(sub_id, version)
+				if blob is None:
+					return None
+				if self.index_cache:
+					nzindex.disk_put(key, blob)
 			table = nzindex.CACHE.put(key, nzindex.Table.decode(blob))
 		return table
+
+	def _prefetch(self, subjects: list[str], version: str | None) -> None:
+		"""Fetch the indexes of these subjects that aren't cached, concurrently: on object
+		storage each is one request, and their latencies overlap instead of adding up."""
+		summary = self._summary(version)
+		if summary is None:
+			return
+		missing = [s for s in subjects if (key := summary.digest_of(s)) is not None and nzindex.CACHE.get(key) is None]
+		if len(missing) < 2:
+			return
+		self._dataset_root(version)  # open once, before the threads share it
+		with ThreadPoolExecutor(max_workers=min(16, len(missing))) as pool:
+			list(pool.map(lambda sub_id: self._subject_table(sub_id, version), missing))
+
+	def refresh(self) -> bool:
+		"""Catch up with versions committed since this Repo last read: one small read (the
+		branch tip); if it moved, the next query reads the new summary, and only subjects
+		whose index changed are fetched again (the rest are cached by digest).
+
+		Returns
+		-------
+		bool
+			Whether there was anything new.
+		"""
+		tip = self._icechunk_repo("_dataset").lookup_branch(self._branch)
+		if tip == self._seen_tip:
+			return False
+		self._seen_tip = tip
+		self._invalidate_read_cache()
+		return True
+
+	def watch(self, interval: float = 2.0, timeout: float | None = None) -> Iterator[str]:
+		"""Yield each new version of the current branch as it is committed, polling the
+		tip every ``interval`` seconds (``refresh()``); stops after ``timeout`` seconds."""
+		import time
+		self.refresh()
+		started = time.monotonic()
+		while timeout is None or time.monotonic() - started < timeout:
+			time.sleep(interval)
+			if self.refresh():
+				yield cast(str, self._seen_tip)
 
 	def _write_index(self, writer: Writer, updates: dict[str, bytes | None]) -> None:
 		"""Write changed subject indexes and recompute the summary on top of the latest
@@ -1071,11 +1122,12 @@ class Repo:
 		>>> for rec in repo.find(task="BrainSenseStream", acq="TD"):
 		...     print(rec.path, rec.shape)
 		"""
-		filters = {k: v for k, v in (("datatype", datatype), ("sub", sub)) if v is not None}
-		yield from self.query(kind="recording", version=version, **filters, **{k: str(v) for k, v in entities.items()})
+		filters: dict[str, Any] = {k: v for k, v in (("datatype", datatype), ("sub", sub)) if v is not None}
+		filters.update({k: str(v) for k, v in entities.items()})
+		yield from self.query(kind="recording", version=version, **filters)
 
 	def query(self, expression: str | None = None, *, kind: str | None = None, version: str | None = None,
-			  **filters: Any) -> QueryResult:
+			  include_staged: bool = False, **filters: Any) -> QueryResult:
 		"""Find items by their identifiers and metadata, from the index.
 
 		Parameters
@@ -1089,6 +1141,9 @@ class Repo:
 		kind : {"recording", "table", "array", "file"}, optional
 		version : str, optional
 			Any version name; default the current branch.
+		include_staged : bool, default False
+			Also see this Repo's staged changes (added, changed and removed items), as
+			``commit`` would record them.
 		**filters
 			Equality, or with a suffix (``sfreq__ge=250``; ``eq ne lt le gt ge in``); ``__``
 			between words is a dot (``participant__age__lt=40``).
@@ -1100,19 +1155,42 @@ class Repo:
 		"""
 		summary = self._summary(version)
 		expr = parse_query(expression, **({**filters, "kind": kind} if kind else filters))
+		staged = self._staged_tables() if include_staged and version is None else {}
+		gone = self._removed_subjects if include_staged and version is None else set()
 		hits: list[tuple[str, Any, Any, dict[str, Any]]] = []
+		tables: dict[str, tuple[Any, dict[str, Any]]] = {}
 		if summary is not None:
-			candidates = prune_query(expr, summary)
-			for i in np.nonzero(candidates)[0]:
-				sub_id = summary.subjects[i]
-				table = self._subject_table(sub_id, version)
-				if table is None:
+			picked = [summary.subjects[i] for i in np.nonzero(prune_query(expr, summary))[0]]
+			self._prefetch([s for s in picked if s not in staged], version)
+			for sub_id in picked:
+				if sub_id in gone or sub_id in staged:
 					continue
-				subject = summary.table.row(int(i))
-				rows = np.nonzero(query_mask(expr, table, subject))[0]
-				if rows.size:
-					hits.append((sub_id, table, rows, subject))
-		return QueryResult(hits, lambda sub_id, path, item_kind: self._view(sub_id, path, item_kind, version))
+				table = self._subject_table(sub_id, version)
+				if table is not None:
+					tables[sub_id] = (table, summary.table.row(summary.table.find(sub_id) or 0))
+		for sub_id, table in staged.items():  # the delta: evaluated whatever the summary says
+			if sub_id not in gone:
+				tables[sub_id] = (table, {f"participant.{k}": v for k, v in table.header["attrs"].items()})
+		for sub_id in sorted(tables):
+			table, subject = tables[sub_id]
+			rows = np.nonzero(query_mask(expr, table, subject))[0]
+			if rows.size:
+				hits.append((sub_id, table, rows, subject))
+		roots = {sub_id: self._writers[sub_id].root for sub_id in staged}
+		return QueryResult(hits, lambda sub_id, path, item_kind: self._view(sub_id, path, item_kind, version,
+																				 roots.get(sub_id)))
+
+	def _staged_tables(self) -> dict[str, Any]:
+		"""Subject indexes with this Repo's staged changes applied -- what commit would publish."""
+		out = {}
+		for sub_id, writer in self._writers.items():
+			if sub_id == "_dataset" or not writer.session.has_uncommitted_changes:
+				continue
+			published = self._subject_table(sub_id)
+			pending = nzindex.update_subject(published, writer.root, sub_id,
+											 _summarize(writer.session.status()), writer.captured)
+			out[sub_id] = nzindex.Table.decode(pending.finish("staged"))
+		return out
 
 	def get(self, path: str, version: str | None = None) -> Any:
 		"""One item by its path (as ``ls``, ``status`` and ``query`` print it), found by
@@ -1124,15 +1202,16 @@ class Repo:
 			raise KeyError(f"no such item: {path}")
 		return self._view(sub_id, path, table.values("kind", np.array([row]))[0], version)
 
-	def _view(self, sub_id: str, path: str, kind: str, version: str | None) -> Any:
+	def _view(self, sub_id: str, path: str, kind: str, version: str | None,
+			  root: zarr.Group | None = None) -> Any:
 		"""A lazy view of one indexed item: nothing opens until its data or metadata is
 		read, so walking query results to list paths and entities costs nothing."""
 		rel = path[len(sub_id) + 1:]
 		write = self._write_back()
 
 		def node(at: str) -> Any:
-			root = self.root_of(sub_id, version)
-			return root[at] if at else root
+			base = root if root is not None else self.root_of(sub_id, version)
+			return base[at] if at else base
 
 		if kind == "recording":
 			return RecordingView(lambda: node(rel), parse_entities(rel.rsplit("/", 1)[-1]), path, write)

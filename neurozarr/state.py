@@ -44,6 +44,11 @@ def persistable(target: Any) -> bool:
 	return isinstance(target, (str, Path)) and urlparse(str(target)).scheme != "memory"
 
 
+def is_local(target: Any) -> bool:
+	"""A store on this machine's file system (as opposed to object storage)."""
+	return isinstance(target, (str, Path)) and urlparse(str(target)).scheme in ("", "file")
+
+
 def normalize(target: str | Path) -> str:
 	text = str(target)
 	return str(Path(text).expanduser().resolve()) if urlparse(text).scheme in ("", "file") else text.rstrip("/")

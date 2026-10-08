@@ -68,7 +68,22 @@ for rec in hits:          # the usual lazy views
 repo.query(task="rest", sfreq__ge=250, kind="recording")   # the same, as keywords
 repo.query("exists(meta.PowerLineFrequency)", version="v1")  # any version
 repo.get("sub-01/ses-1/ieeg/task-rest")                    # one item by its path
+repo.query(task="rest", include_staged=True)               # with this Repo's staged changes
 ```
+
+A `Repo` reads one version until told otherwise. {meth}`~neurozarr.Repo.refresh`
+catches up with what others committed since -- one small read of the branch tip, then
+only the subjects whose index changed are fetched again -- and
+{meth}`~neurozarr.Repo.watch` yields each new version as it lands:
+
+```python
+for version in repo.watch(interval=2):          # near real time
+    print(version, len(repo.query("sfreq >= 250")))
+```
+
+Indexes of a remote store are also kept on local disk
+(`$XDG_CACHE_HOME/neurozarr/index/`), keyed by their content digest so they never go
+stale, and a query fetches the ones it needs concurrently.
 
 An expression uses `== != < <= > >= in`, `not in`, `and` / `or` / `not`,
 `exists(col)`, and `col("odd-name")` for a column whose name isn't a plain word. A

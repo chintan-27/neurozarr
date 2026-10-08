@@ -24,6 +24,7 @@ import hashlib
 import json
 import math
 import struct
+from pathlib import Path
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Iterable, cast
@@ -295,6 +296,32 @@ class _Cache:
 
 
 CACHE = _Cache()
+
+
+def _disk_dir() -> Path:
+	import os
+	return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "neurozarr" / "index"
+
+
+def disk_get(key: str) -> bytes | None:
+	"""An index from the local disk cache, if there and intact (checked by digest)."""
+	path = _disk_dir() / key
+	try:
+		blob = path.read_bytes()
+	except OSError:
+		return None
+	return blob if digest(blob) == key else None
+
+
+def disk_put(key: str, blob: bytes) -> None:
+	folder = _disk_dir()
+	try:
+		folder.mkdir(parents=True, exist_ok=True)
+		tmp = folder / f".{key}.tmp"
+		tmp.write_bytes(blob)
+		tmp.replace(folder / key)
+	except OSError:
+		pass  # a cache: failing to fill it is never an error
 
 
 def digest(blob: bytes) -> str:

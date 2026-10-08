@@ -30,6 +30,10 @@ Creating and filling a store:
    neurozarr.Repo.resolve
    neurozarr.Repo.ls
    neurozarr.Repo.find
+   neurozarr.Repo.query
+   neurozarr.Repo.get
+   neurozarr.Repo.refresh
+   neurozarr.Repo.watch
    neurozarr.Repo.tag
    neurozarr.Repo.tags
    neurozarr.Repo.head
