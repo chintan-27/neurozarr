@@ -30,7 +30,8 @@ P6=.bench_scratch/phase6
 OUT=$P6/query.jsonl
 mkdir -p "$P6"
 export XDG_STATE_HOME="$REPO/$P6/state_$SLURM_JOB_ID" XDG_CONFIG_HOME="$REPO/$P6/config_$SLURM_JOB_ID"
-DATASET="${1:?usage: sbatch phase6_query.slurm <dataset|synthetic>}"
+DATASET="${1:?usage: sbatch phase6_query.slurm <dataset|synthetic> [old]}"
+ONLY="${2:-}"  # "old": rerun just the old-catalog arm
 echo "node=$(hostname) loadavg=$(cut -d' ' -f1-3 /proc/loadavg)"
 rc=0
 
@@ -49,33 +50,38 @@ case "$DATASET" in
 esac
 [ -d "$NEW" ] || { echo "no phase-6 store at $NEW -- run phase6_ingest.slurm $DATASET 1 first" >&2; exit 2; }
 
-echo "=== $(date -Is) new: index ==="
-$PY scripts/bench/query_bench.py --impl new --store "$NEW" --name "$DATASET" --out "$OUT"
-s=$?; [ $s -ne 0 ] && rc=$s
+if [ -z "$ONLY" ]; then
+	echo "=== $(date -Is) new: index ==="
+	$PY scripts/bench/query_bench.py --impl new --store "$NEW" --name "$DATASET" --out "$OUT"
+	s=$?; [ $s -ne 0 ] && rc=$s
+fi
 
 echo "=== $(date -Is) old: JSON catalog ==="
-WHERE=$(cd /tmp && PYTHONPATH="$OLD" $PY -c 'import neurozarr; print(neurozarr.__file__)')
+# -P: `python -m` / `-c` otherwise put the cwd (this repo, i.e. the NEW code) ahead of
+# PYTHONPATH; the guard runs from here, exactly as the old calls below do
+OLDPY="$PY -P"
+WHERE=$(PYTHONPATH="$OLD" $OLDPY -c 'import neurozarr; print(neurozarr.__file__)')
 echo "old neurozarr imported from: $WHERE"
 case "$WHERE" in "$OLD"/*) ;; *) echo "WRONG neurozarr for the old arm -- refusing" >&2; exit 3 ;; esac
 case "$DATASET" in
 	hbn_eeg|pediatric_ieeg)
 		OLDSTORE=.bench_scratch/phase4/${DATASET}_scratch/neurozarr
 		echo "old fsck of $OLDSTORE (a stale or missing catalog would make old find() walk):"
-		PYTHONPATH="$OLD" $PY -m neurozarr.cli -C "$OLDSTORE" fsck
+		PYTHONPATH="$OLD" $OLDPY -m neurozarr.cli -C "$OLDSTORE" fsck
 		;;
 	*)
 		OLDSTORE=$P6/${DATASET}_old_store
 		rm -rf "$OLDSTORE"
-		PYTHONPATH="$OLD" $PY -m neurozarr.cli init "$OLDSTORE" \
-			&& PYTHONPATH="$OLD" $PY -m neurozarr.cli -C "$OLDSTORE" add "$SOURCE" -q \
-			&& PYTHONPATH="$OLD" $PY -m neurozarr.cli -C "$OLDSTORE" commit -m "old-catalog store"
+		PYTHONPATH="$OLD" $OLDPY -m neurozarr.cli init "$OLDSTORE" \
+			&& PYTHONPATH="$OLD" $OLDPY -m neurozarr.cli -C "$OLDSTORE" add "$SOURCE" -q \
+			&& PYTHONPATH="$OLD" $OLDPY -m neurozarr.cli -C "$OLDSTORE" commit -m "old-catalog store"
 		s=$?; [ $s -ne 0 ] && { echo "old store build failed" >&2; rc=$s; }
 		;;
 esac
-PYTHONPATH="$OLD" $PY scripts/bench/query_bench.py --impl old --store "$OLDSTORE" --name "$DATASET" --out "$OUT"
+PYTHONPATH="$OLD" $OLDPY scripts/bench/query_bench.py --impl old --store "$OLDSTORE" --name "$DATASET" --out "$OUT"
 s=$?; [ $s -ne 0 ] && rc=$s
 
-if [ "$DATASET" != chbmit_subsample ]; then  # BIDS sources only
+if [ -z "$ONLY" ] && [ "$DATASET" != chbmit_subsample ]; then  # BIDS sources only
 	echo "=== $(date -Is) pybids ==="
 	$PY scripts/bench/query_bench.py --impl pybids --source "$SOURCE" --name "$DATASET" --out "$OUT"
 	s=$?; [ $s -ne 0 ] && rc=$s

@@ -25,8 +25,8 @@
 set -uo pipefail
 REPO=/blue/neurology-dept/chintan.acharya/neurozarr-benchmark/neurozarr
 cd "$REPO"
-PY=.venv/bin/python
-NZ=.venv/bin/neurozarr
+PY=$REPO/.venv/bin/python
+NZ=$REPO/.venv/bin/neurozarr
 P6=.bench_scratch/phase6
 mkdir -p "$P6"
 # HEAD and the staging area live per user; keep this job's apart from anyone's shell
