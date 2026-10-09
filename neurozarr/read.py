@@ -389,7 +389,10 @@ class RecordingView:
 			scale, offset = np.array(raw_scale), np.array(raw_offset)
 			if indices is not None:
 				scale, offset = scale[indices], offset[indices]
-			values = values.astype(np.float64) * scale[:, None] + offset[:, None]
+			# in place: one float64 allocation, not three (13 GB each on a long iEEG recording)
+			values = values.astype(np.float64)
+			values *= scale[:, None]
+			values += offset[:, None]
 		return values, meta
 
 	def channels(self) -> pd.DataFrame:
