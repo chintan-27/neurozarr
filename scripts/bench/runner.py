@@ -7,7 +7,7 @@ raw enough that no claim in a paper depends on trusting a printed summary.
 
 Workloads (see arms.py's ArmStore for what each calls):
 	W1  full recording read (all channels, all samples)
-	W2  1.0s window read at 50% offset (all channels)
+	W2  1.0s window read, at a different offset each rep (all channels)
 	W3  single-channel full trace
 	W4  cross-subject/task metadata search
 	W5  sequential scan in 10s blocks, MB/s
@@ -238,23 +238,39 @@ def _pick_target(recs: list[RecInfo]) -> RecInfo:
 	return max(real, key=lambda r: r.n_samples)
 
 
-def run_workload(workload: str, store: ArmStore, target: RecInfo) -> tuple[Any, float, str]:
+def _physical(values: Any) -> np.ndarray:
+	# Every arm hands back float64 physical units -- what MNE's get_data() returns, and
+	# what neurozarr's data() returns after unpacking int16. float32 arms (HDF5, NWB)
+	# pay the cast inside the timed region, as neurozarr pays its own; before this,
+	# W1 compared a 6.5 GB float32 result against a 13 GB float64 one (Pediatric).
+	return np.asarray(values, dtype=np.float64)
+
+
+def window_start(target: RecInfo, window: int, rep: int) -> int:
+	"""W2's window moves every rep, the same sequence for every arm (golden-ratio
+	stride over the recording): reading one fixed window let an arm serve every rep
+	from a decoded-chunk cache -- NWB-HDF5 measured a constant 0.1 ms on an 8.4 MB
+	gzip chunk on Pediatric iEEG, which no decompression can do."""
+	span = max(0, target.n_samples - window)
+	return int(((rep + 3) * 0.6180339887498949 % 1.0) * span)
+
+
+def run_workload(workload: str, store: ArmStore, target: RecInfo, rep: int = 0) -> tuple[Any, float, str]:
 	"""Returns (result, elapsed_seconds, checksum). Every result is forced to
-	a concrete array before checksumming, so a lazily-evaluated arm can't
-	report a time that doesn't include the actual read."""
+	a concrete float64 array inside the timed region, so a lazily-evaluated arm
+	can't report a time that doesn't include the actual read."""
 	if workload == "W1":
-		result, t = _time(lambda: store.full_read(target.id))
+		result, t = _time(lambda: _physical(store.full_read(target.id)))
 		return result, t, _checksum(result)
 
 	if workload == "W2":
 		window = max(1, int(round(target.sfreq)))  # 1.0s
-		start = target.n_samples // 2
-		start = min(start, max(0, target.n_samples - window))
-		result, t = _time(lambda: store.window_read(target.id, start, window))
+		start = window_start(target, window, rep)
+		result, t = _time(lambda: _physical(store.window_read(target.id, start, window)))
 		return result, t, _checksum(result)
 
 	if workload == "W3":
-		result, t = _time(lambda: store.channel_read(target.id, 0))
+		result, t = _time(lambda: _physical(store.channel_read(target.id, 0)))
 		return result, t, _checksum(result)
 
 	if workload == "W4":
@@ -356,7 +372,7 @@ def run(source: Path, arm_names: list[str], reps: int, warmup: int, cache: str,
 						_apply_cold_cache(dest)
 						store = arm.open(dest)
 					try:
-						_, elapsed, checksum = run_workload(workload, store, target)
+						_, elapsed, checksum = run_workload(workload, store, target, rep)
 					except Exception as exc:
 						print(f"[{arm_name}] {workload} rep {rep} FAILED: {exc!r}", file=sys.stderr)
 						continue
