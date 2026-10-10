@@ -207,3 +207,20 @@ def test_missing_recording_raises(written):
 	visit = Repo(written).subject("sub-001").visit("ses-1")
 	with pytest.raises(KeyError, match="no recording"):
 		visit.recording(task="Nope")
+
+
+def test_narrow_reads_from_cached_chunks_match_direct_reads():
+	import zarr
+	from neurozarr.read import RecordingView
+	group = zarr.open_group(zarr.storage.MemoryStore(), mode="a")
+	stored = np.arange(3 * 1000, dtype=np.int16).reshape(3, 1000)
+	group.create_array("data", shape=stored.shape, chunks=(3, 100), dtype=stored.dtype)[:] = stored
+	group.attrs.update({"data_scale": [0.5, 2.0, 1.0], "data_offset": [0.0, 1.0, -3.0]})
+	scale, offset = np.array([[0.5], [2.0], [1.0]]), np.array([[0.0], [1.0], [-3.0]])
+	rec = RecordingView(group, {}, "sub-x/rec")
+	windows = [(0, 10), (95, 105), (99, 101), (250, 450), (990, 1000), (0, 1000), (500, 500), (400, 410), (400, 410)]
+	for (start, stop), picks in [(w, p) for w in windows for p in (None, [2, 0])]:  # 400-410 twice: from the cache
+		values, _ = rec.data(start=start, stop=stop, picks=picks)
+		rows = [0, 1, 2] if picks is None else picks
+		assert np.array_equal(values, stored[rows, start:stop] * scale[rows] + offset[rows]), (start, stop, picks)
+	assert len(rec._chunks) <= 4

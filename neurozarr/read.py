@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Callable, Iterator, NamedTuple, cast
 
 import numpy as np
@@ -244,6 +245,10 @@ class RecordingView:
 		self._node: Any = group
 		self.entities, self.path = entities, path
 		self._write = _write
+		self._data: zarr.Array | None = None
+		# decoded chunks of recent narrow reads, by (channels, chunk index): a loop of
+		# small windows (a scan in blocks) decodes each chunk once, not once per block
+		self._chunks: "OrderedDict[tuple[Any, int], np.ndarray]" = OrderedDict()
 
 	@property
 	def _group(self) -> zarr.Group:
@@ -293,7 +298,9 @@ class RecordingView:
 	def array(self) -> zarr.Array:
 		"""The underlying zarr array. Slice it directly if you want raw stored
 		values without calibration -- only the chunks you touch are fetched."""
-		return _array(self._group, "data")
+		if self._data is None:  # opened once: re-opening it cost a metadata read per data() call
+			self._data = _array(self._group, "data")
+		return self._data
 
 	@property
 	def shape(self) -> tuple[int, ...]:
@@ -378,11 +385,7 @@ class RecordingView:
 			stop = int(tmax * self.sfreq) if tmax is not None else stop
 
 		indices = self._picks(picks)
-		window = slice(start, stop)
-		# zarr types __getitem__ as possibly returning a scalar; selecting along
-		# two axes of a 2-D array always gives an array back.
-		values = cast(np.ndarray, self.array[:, window] if indices is None
-					  else self.array[indices, window])  # type: ignore[index]
+		values = self._stored(indices, slice(start, stop))
 
 		raw_scale, raw_offset = meta.get("data_scale"), meta.get("data_offset")
 		if raw_scale is not None and raw_offset is not None:
@@ -394,6 +397,37 @@ class RecordingView:
 			values *= scale[:, None]
 			values += offset[:, None]
 		return values, meta
+
+	def _stored(self, indices: list[int] | None, window: slice) -> np.ndarray:
+		"""Stored values of a window. A window within two chunks along time is cut from
+		cached decoded chunks (zarr decodes whole chunks anyway); wider reads go straight
+		to zarr, which fetches their chunks concurrently."""
+		array = self.array
+		n, step = array.shape[-1], array.chunks[-1]
+		start, stop, _ = window.indices(n)
+		first, last = start // step, (max(stop, start + 1) - 1) // step
+		if stop <= start or last - first > 1:
+			# zarr types __getitem__ as possibly returning a scalar; selecting along
+			# two axes of a 2-D array always gives an array back.
+			return cast(np.ndarray, array[:, window] if indices is None
+						else array[indices, window])  # type: ignore[index]
+		key = None if indices is None else tuple(indices)
+		blocks = []
+		for k in range(first, last + 1):
+			block = self._chunks.get((key, k))
+			if block is None:
+				span = slice(k * step, min(n, (k + 1) * step))
+				block = cast(np.ndarray, array[:, span] if indices is None else array[indices, span])  # type: ignore[index]
+				self._chunks[(key, k)] = block
+				# ponytail: 4 chunk columns per view (~32 MB at the 8 MiB chunk target);
+				# size it by bytes if views ever hold many channel subsets at once
+				while len(self._chunks) > 4:
+					self._chunks.popitem(last=False)
+			else:
+				self._chunks.move_to_end((key, k))
+			blocks.append(block)
+		joined = blocks[0] if len(blocks) == 1 else np.concatenate(blocks, axis=-1)
+		return joined[:, start - first * step:stop - first * step]
 
 	def channels(self) -> pd.DataFrame:
 		"""Read the channels table stored alongside this recording.

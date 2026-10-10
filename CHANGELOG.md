@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- The summary is spliced at commit instead of re-encoded: at 10,000 subjects a commit's
+  summary update went from 2.9 s to 34 ms, and a full build from 23 s to 0.8 s (item
+  paths no longer go through a Bloom filter; a path's subject is its first segment).
+  `Table.paths` no longer copies, which made `paths[i]` in a loop quadratic -- including
+  in every query over many subjects.
+- int16 recordings unpack in place: one float64 allocation instead of three.
+- Reading a recording in blocks (`data(start, stop)` in a loop) decoded the whole chunk
+  under each block again. A view now keeps its last few decoded chunks and opens its data
+  array once: a 10 s-block scan is 13-17x faster on BRAVO and CHB-MIT, 2.9x on HBN and
+  1.5x on Pediatric iEEG (HiPerGator), with identical values; full reads are unchanged.
+
 ### Added
 
 - A columnar index in every version, replacing the manifest's JSON `catalog` (schema 3;
@@ -18,6 +31,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   captures each item's row as it writes it (rows travel with staged work and back from
   parallel workers), and only items changed otherwise are re-read. Indexes are cached
   by content digest.
+- A packed index for stores with more than 16 subjects: every subject's index rows in
+  one object, so a query reaching many subjects makes one read instead of one per
+  subject (150 subjects, local: 243 to 37 ms cold). Refreshed lazily at commit, once
+  more than max(16, 5%) of subjects changed since it was packed; queries read those
+  from their own index meanwhile. `fsck` checks it against the subject indexes.
 - `repo.refresh()` (catch up with newer versions: one tip read, then only changed
   subject indexes refetched), `repo.watch(interval)` (yield new versions as they land),
   `query(include_staged=True)` (this Repo's staged changes as commit would record them),
