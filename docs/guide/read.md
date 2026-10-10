@@ -110,6 +110,13 @@ writes it, so committing re-reads only items changed some other way (metadata
 edits, renames). It is always exactly the version it belongs to, and is cached by
 its content digest.
 
+A query that reaches many subjects would otherwise read one index per subject -- one
+request each on object storage. So a store with more than 16 subjects also keeps a
+packed index: every subject's rows in one object. It is refreshed lazily, at a commit
+once more than 16 subjects (or 5% of them) changed since it was written; until then
+a wide query reads the packed index plus the few changed subjects' own indexes, so
+it is always current. Narrow queries keep reading single subject indexes.
+
 ## Reading the values
 
 ```python

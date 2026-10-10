@@ -218,3 +218,114 @@ def test_migrate_from_schema_2(tmp_path, tiny_bids):
 	assert result["changed"] and result["schema_version"] == 3
 	assert sorted(Repo.open(store).query().paths) == expected
 	assert Repo._for_migration(store).migrate()["changed"] is False
+
+
+# ---- the summary is spliced, not rebuilt ------------------------------------------------
+
+def test_updated_summary_equals_a_full_rebuild():
+	rng = random.Random(1)
+
+	def subject(s, salt):
+		rows = [{"path": f"sub-{s:02d}/ses-1/x/i{i}", "kind": "recording", "sub": f"sub-{s:02d}",
+				 "task": rng.choice(["rest", "go"]) if salt else "rest", "sfreq": float(rng.choice([250, 500])),
+				 "meta.id": f"{s}-{i}-{salt}"} for i in range(rng.randint(1, 6))]
+		if salt == 2:
+			rows[0]["sfreq"] = "n/a"  # a column turning categorical on one side
+		blob = encode(rows, {"sub": f"sub-{s:02d}", "snapshot": f"S{salt}", "sessions": ["ses-1"],
+							 "attrs": {"age": s + salt}, "session_attrs": {}})
+		return stats_of(Table.decode(blob), digest(blob))
+
+	import neurozarr.index as nzindex
+	stats = {f"sub-{s:02d}": subject(s, 0) for s in range(8)}
+	previous = Summary(Table.decode(build_summary(list(stats.values()))))
+	changed = {"sub-01": subject(1, 1), "sub-05": None, "sub-09": subject(9, 2)}
+	old_limit, nzindex._EXACT_VALUES = nzindex._EXACT_VALUES, 20  # meta.id outgrows exact sets in the merge
+	try:
+		spliced = Table.decode(nzindex.update_summary(previous, changed))
+		stats.update({k: v for k, v in changed.items() if v is not None})
+		del stats["sub-05"]
+		rebuilt = Table.decode(build_summary(list(stats.values())))
+	finally:
+		nzindex._EXACT_VALUES = old_limit
+	assert spliced.paths == rebuilt.paths == sorted(stats)
+	assert spliced.rows() == rebuilt.rows()
+	for name, spec in rebuilt.header["sets"].items():
+		assert spliced.header["sets"][name] == spec, name
+		key = f"{'set' if 'values' in spec else 'bloom'}:{name}"
+		assert np.array_equal(spliced.buffer(key), rebuilt.buffer(key)), name
+
+
+def test_path_queries_prune_by_subject(tmp_path, tiny_bids):
+	repo = Repo.init(str(tmp_path / "s"))
+	repo.add(tiny_bids)
+	repo.commit("import")
+	path = repo.query().paths[0]
+	assert repo.query(f"path == {path!r}").paths == [path]
+	assert "path" not in repo._summary().table.header["sets"]
+
+
+# ---- the packed index ---------------------------------------------------------------------
+
+def test_packed_index_gives_each_subject_its_own_rows():
+	from neurozarr.index import Slice, pack
+	rng = random.Random(2)
+
+	def subject(sub, salt=0):
+		rows = []
+		for i in range(rng.randint(0, 5)):
+			row = {"path": f"{sub}/ses-1/x/i{i}", "kind": "recording", "sub": sub, "task": rng.choice(["a", "b"]),
+				   "sfreq": float(rng.choice([100, 250]))}
+			row["meta.x"] = rng.choice([1, 5, 9]) if sub.endswith("0") else rng.choice(["n/a", "7"])  # numeric here, text there
+			rows.append(row)
+		return Table.decode(encode(rows, {"sub": sub, "snapshot": f"S{salt}", "sessions": ["ses-1"],
+										  "attrs": {}, "session_attrs": {}}))
+
+	tables = {sub: subject(sub) for sub in ["sub-1", "sub-1-a", "sub-10", "sub-2", "sub-3", "sub-20"]}
+	packed = Table.decode(pack(None, tables))
+	changed = {"sub-10": subject("sub-10", 1), "sub-2": None, "sub-6": subject("sub-6", 1)}
+	packed = Table.decode(pack(packed, changed))
+	tables.update({k: v for k, v in changed.items() if v is not None})
+	del tables["sub-2"]
+	assert set(packed.header["subjects"]) == set(tables)
+	for text in ["meta.x > 2", "meta.x == 'n/a'", "task == 'a' and sfreq >= 250", "exists(meta.x)", None]:
+		expr = parse(text)
+		for sub, table in tables.items():
+			piece = Slice(packed, sub)
+			assert piece.rows() == table.rows(), sub
+			assert list(mask(expr, piece)) == list(mask(expr, table)), (text, sub)
+
+
+def test_wide_queries_read_the_packed_index(tmp_path, tiny_bids, monkeypatch):
+	import neurozarr.index as nzindex
+	monkeypatch.setattr(nzindex, "PACK_MIN", 1)  # tiny_bids has 3 subjects
+	repo = Repo.init(str(tmp_path / "s"))
+	repo.add(tiny_bids)
+	repo.commit("import")
+	everything = repo.query().df
+
+	def reads(store):
+		monkeypatch.setattr(nzindex, "CACHE", nzindex._Cache())
+		fetched = []
+		real = Repo._blob
+		monkeypatch.setattr(Repo, "_blob", lambda self, name, *a, **kw: (fetched.append(name), real(self, name, *a, **kw))[1])
+		reader = Repo.open(store)
+		frame = reader.query().df
+		monkeypatch.setattr(Repo, "_blob", real)
+		return sorted(fetched), frame
+
+	fetched, frame = reads(repo.target)
+	assert fetched == ["_packed", "_summary"]
+	assert frame.equals(everything)
+
+	writer = Repo.open(repo.target, mode="a")  # one subject changes: not enough to repack
+	writer.subject("sub-02").visit("ses-1").add_recording(_raw(4), task="later")
+	writer.commit("one more")
+	fetched, frame = reads(repo.target)
+	assert fetched == ["_packed", "_summary", "sub-02"]
+	assert "sub-02/ses-1/ieeg/task-later" in list(frame["path"])
+	monkeypatch.setattr(nzindex, "PACK_MIN", 10**6)
+	assert frame.equals(Repo.open(repo.target).query().df)  # same answer without the packed index
+	monkeypatch.setattr(nzindex, "PACK_MIN", 1)
+
+	from neurozarr.validate import inspect_store
+	assert not [i for i in inspect_store(repo.target).issues if "packed" in i.code]

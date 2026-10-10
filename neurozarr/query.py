@@ -287,6 +287,8 @@ def prune(expr: Expr | None, summary: Summary) -> np.ndarray:
 	values = value if op in ("in", "not in") else (value,)
 	if op in ("!=", "not in"):
 		return summary.has_column(column)
+	if column == "path" and op in ("==", "in"):  # a path starts with its subject's id
+		return np.isin(np.array(summary.subjects, dtype=object), [str(v).split("/", 1)[0] for v in values])
 	lo, hi = table.num(f"zmin.{column}"), table.num(f"zmax.{column}")
 	numbers = [_num_value(v) for v in values]
 	zone = np.zeros(n, dtype=bool)

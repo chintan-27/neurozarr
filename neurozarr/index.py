@@ -20,6 +20,7 @@ DuckDB (zone maps, sorted rows), Arrow/Parquet (dictionary encoding, late
 materialization) and Bloom filters -- see ``docs/guide/read.md``.
 """
 
+import bisect
 import hashlib
 import json
 import math
@@ -36,6 +37,13 @@ from .read import ArrayView, ExternalFileView, RecordingView, TableView, owns_it
 
 INDEX_GROUP = "_index"
 SUMMARY = "_summary"  # never a subject id: those start with "sub-"
+PACKED = "_packed"
+# a query keeping more subjects than this reads them from the packed index (one read)
+# instead of one index each; a store with no more subjects than this gets no packed index
+PACK_MIN = 16
+# the packed index is rewritten at commit once more than max(PACK_MIN, this share of the
+# subjects) changed since it was written; until then queries read those few from their own
+PACK_STALE = 0.05
 _MAGIC = b"NZIX1\n"
 # a categorical column whose distinct values across the dataset fit this many gets an
 # exact value-membership matrix in the summary; above it, a Bloom filter per subject
@@ -147,7 +155,26 @@ def encode(rows: list[dict[str, Any]], header: dict[str, Any] | None = None,
 	Nothing is pickled: a blob from anywhere is safe to read.
 	"""
 	rows = sorted(rows, key=lambda r: r["path"])
-	names = sorted({key for row in rows for key in row} - {"path"})
+	columns: dict[str, Column] = {}
+	for name in sorted({key for row in rows for key in row} - {"path"}):
+		values = [row.get(name) for row in rows]
+		if _classify(values) == "num":
+			columns[name] = ("num", np.array([np.nan if v is None else float(v) for v in values]), [])
+		else:
+			texts = [None if v is None else _text(v) for v in values]
+			dictionary = sorted({t for t in texts if t is not None})
+			lookup = {t: i for i, t in enumerate(dictionary)}
+			columns[name] = ("cat", np.array([-1 if t is None else lookup[t] for t in texts], dtype=np.int32), dictionary)
+	return _encode_columns([r["path"] for r in rows], columns, header, buffers)
+
+
+# ("num", float64 values, []) or ("cat", int32 codes, sorted dictionary)
+Column = tuple[str, np.ndarray, list[str]]
+
+
+def _encode_columns(paths: list[str], columns: dict[str, Column], header: dict[str, Any] | None,
+					buffers: dict[str, np.ndarray] | None) -> bytes:
+	"""Already-columnar data -> a blob; ``paths`` sorted, every array in that row order."""
 	spec: dict[str, Any] = {}
 	parts: list[bytes] = []
 	offset = 0
@@ -160,18 +187,10 @@ def encode(rows: list[dict[str, Any]], header: dict[str, Any] | None = None,
 		offset += len(data) + (-len(data) % 8)
 		return entry
 
-	for name in names:
-		values = [row.get(name) for row in rows]
-		if _classify(values) == "num":
-			spec[name] = {"type": "num", **put(np.array([np.nan if v is None else float(v) for v in values]))}
-		else:
-			texts = [None if v is None else _text(v) for v in values]
-			dictionary = sorted({t for t in texts if t is not None})
-			lookup = {t: i for i, t in enumerate(dictionary)}
-			codes = np.array([-1 if t is None else lookup[t] for t in texts], dtype=np.int32)
-			spec[name] = {"type": "cat", "values": dictionary, **put(codes)}
+	for name, (kind, array, dictionary) in sorted(columns.items()):
+		spec[name] = {"type": kind, **({"values": dictionary} if kind == "cat" else {}), **put(array)}
 	extra = {name: put(array) for name, array in (buffers or {}).items()}
-	head = json.dumps({"n": len(rows), "paths": [r["path"] for r in rows], "columns": spec,
+	head = json.dumps({"n": len(paths), "paths": paths, "columns": spec,
 					   "buffers": extra, **(header or {})}, separators=(",", ":")).encode()
 	return _MAGIC + struct.pack("<Q", len(head)) + head + b"".join(parts)
 
@@ -198,7 +217,9 @@ class Table:
 
 	@property
 	def paths(self) -> list[str]:
-		return list(self.header["paths"])
+		"""Row paths, sorted. The table's own list, not a copy -- read it, don't change it
+		(a copy here made every ``paths[i]`` in a loop quadratic)."""
+		return cast("list[str]", self.header["paths"])
 
 	@property
 	def columns(self) -> list[str]:
@@ -458,9 +479,10 @@ def _bloom_positions(value: str) -> np.ndarray:
 
 def _bloom(values: Iterable[str]) -> np.ndarray:
 	bits = np.zeros(_BLOOM_BITS // 8, dtype=np.uint8)
-	for value in values:
-		positions = _bloom_positions(value)
-		np.bitwise_or.at(bits, positions // 8, (1 << (positions % 8)).astype(np.uint8))
+	positions = [_bloom_positions(value) for value in values]
+	if positions:
+		at = np.concatenate(positions)
+		np.bitwise_or.at(bits, at // 8, (1 << (at % 8)).astype(np.uint8))
 	return bits
 
 
@@ -471,11 +493,10 @@ def bloom_may_contain(bits: np.ndarray, value: str) -> bool:
 
 @dataclass
 class SubjectStats:
-	"""One subject's summary row, and per categorical column its values (or Bloom bits
-	when only those survive from an older summary)."""
+	"""One subject's summary row, and per categorical column its values."""
 
 	row: dict[str, Any]
-	sets: dict[str, "set[str] | np.ndarray"]
+	sets: dict[str, set[str]]
 
 
 def stats_of(table: Table, blob_digest: str) -> SubjectStats:
@@ -486,7 +507,8 @@ def stats_of(table: Table, blob_digest: str) -> SubjectStats:
 	kinds, names = table.codes("kind")
 	for kind in ("recording", "table", "array", "file"):
 		row[f"count.{kind}"] = int(np.sum(kinds == names.index(kind))) if kind in names else 0
-	sets: dict[str, set[str] | np.ndarray] = {"path": set(table.paths)}
+	# no set for "path": an item's path starts with its subject id, which prune uses directly
+	sets: dict[str, set[str]] = {}
 	for name in table.columns[1:]:
 		if table.kind_of(name) == "num":
 			column = table.num(name)
@@ -499,7 +521,7 @@ def stats_of(table: Table, blob_digest: str) -> SubjectStats:
 	return SubjectStats(row, sets)
 
 
-def build_summary(stats: list[SubjectStats]) -> bytes:
+def build_summary(stats: list[SubjectStats], header: dict[str, Any] | None = None) -> bytes:
 	"""The dataset's summary from every subject's entry."""
 	stats = sorted(stats, key=lambda s: s.row["path"])
 	n = len(stats)
@@ -508,21 +530,180 @@ def build_summary(stats: list[SubjectStats]) -> bytes:
 	buffers: dict[str, np.ndarray] = {}
 	for name in columns:
 		entries = [s.sets.get(name, set()) for s in stats]
-		known = [e for e in entries if isinstance(e, set)]
-		universe = sorted(set().union(*known)) if known else []
-		if len(known) == n and len(universe) <= _EXACT_VALUES:
+		universe = sorted(set().union(*entries))
+		if len(universe) <= _EXACT_VALUES:
 			lookup = {v: j for j, v in enumerate(universe)}
 			matrix = np.zeros((n, len(universe)), dtype=bool)
 			for i, entry in enumerate(entries):
-				assert isinstance(entry, set)
 				matrix[i, [lookup[v] for v in entry]] = True
 			exact[name] = {"values": universe}
 			buffers[f"set:{name}"] = np.packbits(matrix, axis=1) if universe else np.zeros((n, 0), np.uint8)
 		else:
 			exact[name] = {"bloom": True}
-			buffers[f"bloom:{name}"] = np.stack([_bloom(e) if isinstance(e, set) else e for e in entries]) \
+			buffers[f"bloom:{name}"] = np.stack([_bloom(e) for e in entries]) \
 				if n else np.zeros((0, _BLOOM_BITS // 8), np.uint8)
-	return encode([s.row for s in stats], {"sets": exact}, buffers)
+	return encode([s.row for s in stats], {"sets": exact, **(header or {})}, buffers)
+
+
+def update_summary(previous: "Summary | None", changed: dict[str, "SubjectStats | None"],
+				   header: dict[str, Any] | None = None) -> bytes:
+	"""The next summary: ``previous`` with the ``changed`` subjects' rows replaced (None =
+	removed). Untouched rows are carried as arrays, so a commit costs what it touched
+	plus array copies -- not a Python decode and re-encode of every subject."""
+	if previous is None:
+		return build_summary([s for s in changed.values() if s is not None], header)
+	fresh = Table.decode(build_summary([s for s in changed.values() if s is not None]))
+	old = previous.table
+	keep = np.nonzero(~np.isin(np.array(old.paths, dtype=object), list(changed)))[0] if old.n else np.zeros(0, int)
+	parts = [(old, keep), (fresh, np.arange(fresh.n))]
+	paths = [old.paths[i] for i in keep] + fresh.paths
+	order = np.array(sorted(range(len(paths)), key=paths.__getitem__), dtype=np.intp)
+	columns: dict[str, Column] = {}
+	for name in sorted(set(old.header["columns"]) | set(fresh.header["columns"])):
+		if all(t.kind_of(name) in ("num", None) for t, _ in parts):
+			columns[name] = ("num", np.concatenate([t.num(name)[rows] for t, rows in parts])[order], [])
+		else:
+			codes, dictionary = _merge_codes([(*t.codes(name), rows) for t, rows in parts])
+			columns[name] = ("cat", codes[order], dictionary)
+	sets: dict[str, Any] = {}
+	buffers: dict[str, np.ndarray] = {}
+	for name in sorted(set(old.header["sets"]) | set(fresh.header["sets"])):
+		specs = [t.header["sets"].get(name, {"values": []}) for t, _ in parts]
+		universe = sorted(set().union(*(spec.get("values", []) for spec in specs)))
+		matrix = None
+		if all("values" in spec for spec in specs):
+			lookup = {v: j for j, v in enumerate(universe)}
+			matrix = np.zeros((len(paths), len(universe)), dtype=bool)
+			at = 0
+			for (t, rows), spec in zip(parts, specs):
+				if spec["values"]:
+					block = np.unpackbits(t.buffer(f"set:{name}"), axis=1, count=len(spec["values"]))[rows].astype(bool)
+					matrix[at:at + len(rows), [lookup[v] for v in spec["values"]]] = block
+				at += len(rows)
+			used = matrix.any(axis=0)  # values only removed subjects had are dropped
+			universe, matrix = [v for v, u in zip(universe, used) if u], matrix[:, used]
+		if matrix is not None and len(universe) <= _EXACT_VALUES:
+			sets[name] = {"values": universe}
+			buffers[f"set:{name}"] = np.packbits(matrix[order], axis=1) if universe else np.zeros((len(paths), 0), np.uint8)
+		else:
+			blooms = [_bloom_rows(t, name, spec, rows) for (t, rows), spec in zip(parts, specs)]
+			sets[name] = {"bloom": True}
+			buffers[f"bloom:{name}"] = np.concatenate(blooms)[order]
+	return _encode_columns([paths[i] for i in order], columns, {"sets": sets, **(header or {})}, buffers)
+
+
+def _merge_codes(parts: list[tuple[np.ndarray, list[str], np.ndarray]]) -> tuple[np.ndarray, list[str]]:
+	"""Concatenate dictionary-encoded columns (codes, dictionary, rows taken) onto one dictionary."""
+	dictionary = sorted(set().union(*(values for _, values, _ in parts)))
+	lookup = {v: j for j, v in enumerate(dictionary)}
+	out = []
+	for codes, values, rows in parts:
+		remap = np.array([lookup[v] for v in values] + [-1], dtype=np.int32)  # remap[-1] = missing
+		out.append(remap[codes[rows]])
+	merged = np.concatenate(out) if out else np.zeros(0, np.int32)
+	used = np.unique(merged[merged >= 0])  # values only dropped rows had are dropped too
+	compact = np.full(len(dictionary) + 1, -1, dtype=np.int32)
+	compact[used] = np.arange(len(used), dtype=np.int32)
+	return compact[merged], [dictionary[i] for i in used]
+
+
+def _bloom_rows(table: "Table", name: str, spec: dict[str, Any], rows: np.ndarray) -> np.ndarray:
+	"""A set column's rows as Bloom bits, converting exact value sets when the merged
+	column outgrows them (only on that transition: a per-row loop)."""
+	if "bloom" in spec:
+		return cast(np.ndarray, table.buffer(f"bloom:{name}")[rows])
+	out = np.zeros((len(rows), _BLOOM_BITS // 8), dtype=np.uint8)
+	if spec["values"]:
+		matrix = np.unpackbits(table.buffer(f"set:{name}"), axis=1, count=len(spec["values"]))[rows].astype(bool)
+		for k, row in enumerate(matrix):
+			out[k] = _bloom(v for v, b in zip(spec["values"], row) if b)
+	return out
+
+
+# ---- the packed index ----------------------------------------------------------------
+
+_TEXT = "\x00text"  # the text half of a column that is numeric in some subjects, text in others
+_FORMAT_KEYS = ("n", "paths", "columns", "buffers")
+
+
+def pack(previous: "Table | None", stale: dict[str, "Table | None"]) -> bytes:
+	"""Every subject's index rows in one blob: ``previous`` (a packed index) with the
+	``stale`` subjects replaced by their current index (None = removed).
+
+	Rows stay sorted by path, so each subject's rows are one contiguous range, recorded
+	in the header with the subject's own index header and column types. A column that is
+	numeric in some subjects and text in others is stored both ways, so each subject's
+	slice reads it back exactly as its own index had it.
+	"""
+	parts: list[tuple[Table, np.ndarray]] = []
+	headers: dict[str, dict[str, Any]] = {}
+	if previous is not None:
+		kept = {sub: info for sub, info in previous.header["subjects"].items() if sub not in stale}
+		ranges = [np.arange(info["start"], info["stop"]) for info in kept.values()]
+		parts.append((previous, np.concatenate(ranges) if ranges else np.zeros(0, np.intp)))
+		headers.update({sub: {"header": info["header"], "types": info["types"]} for sub, info in kept.items()})
+	for sub, table in stale.items():
+		if table is not None:
+			parts.append((table, np.arange(table.n)))
+			headers[sub] = {"header": {k: v for k, v in table.header.items() if k not in _FORMAT_KEYS},
+							"types": {name: entry["type"] for name, entry in table.header["columns"].items()}}
+	paths = [p for t, rows in parts for p in (t.paths[i] for i in rows)]
+	order = np.array(sorted(range(len(paths)), key=paths.__getitem__), dtype=np.intp)
+	paths = [paths[i] for i in order]
+	columns: dict[str, Column] = {}
+	for name in sorted({n.removesuffix(_TEXT) for t, _ in parts for n in t.header["columns"]}):
+		kinds = set().union(*({"num", "cat"} if k == "both" else {k} for t, _ in parts if (k := _kind_in(t, name))))
+		if "num" in kinds:
+			columns[name] = ("num", np.concatenate([_num_in(t, name)[rows] for t, rows in parts])[order], [])
+		if "cat" in kinds:
+			codes, dictionary = _merge_codes([(*_codes_in(t, name), rows) for t, rows in parts])
+			columns[name + _TEXT if "num" in kinds else name] = ("cat", codes[order], dictionary)
+	# each subject's rows are contiguous; their order is that of "<sub>/" prefixes
+	subjects: dict[str, Any] = {}
+	at = 0
+	for sub in sorted(headers, key=lambda sub: sub + "/"):
+		stop = bisect.bisect_left(paths, sub + "0", lo=at)  # "/" < "0": past every "<sub>/..."
+		subjects[sub] = {"start": at, "stop": stop, **headers[sub]}
+		at = stop
+	return _encode_columns(paths, columns, {"subjects": subjects}, None)
+
+
+def _kind_in(table: "Table", name: str) -> str | None:
+	"""A column's type in an index, where a packed index may hold it both ways."""
+	if name + _TEXT in table.header["columns"]:
+		return "both"
+	return table.kind_of(name)
+
+
+def _num_in(table: "Table", name: str) -> np.ndarray:
+	return table.num(name)  # NaN where the column is text or absent
+
+
+def _codes_in(table: "Table", name: str) -> tuple[np.ndarray, list[str]]:
+	"""Text codes of a column, only where it is text: numeric values belong to the numeric half."""
+	if name + _TEXT in table.header["columns"]:
+		return table.codes(name + _TEXT)
+	if table.kind_of(name) == "num":
+		return np.full(table.n, -1, dtype=np.int32), []
+	return table.codes(name)
+
+
+class Slice(Table):
+	"""One subject's rows of a packed index, read as that subject's own index: same
+	header, same columns with the same types, sharing the packed buffers (no copy)."""
+
+	def __init__(self, packed: Table, sub_id: str):
+		info = packed.header["subjects"][sub_id]
+		start, stop = info["start"], info["stop"]
+		spec = packed.header["columns"]
+		columns = {name: spec[name + _TEXT] if kind == "cat" and name + _TEXT in spec else spec[name]
+				   for name, kind in info["types"].items()}
+		super().__init__({**info["header"], "n": stop - start, "paths": packed.paths[start:stop],
+						  "columns": columns, "buffers": {}}, packed._body)
+		self._packed, self._range = packed, slice(start, stop)
+
+	def _array(self, entry: dict[str, Any]) -> np.ndarray:
+		return self._packed._array(entry)[self._range]
 
 
 @dataclass
@@ -534,23 +715,6 @@ class Summary:
 	@property
 	def subjects(self) -> list[str]:
 		return self.table.paths
-
-	def entry(self, sub_id: str) -> SubjectStats | None:
-		"""A subject's entry as stored -- to carry it into the next summary unchanged."""
-		i = self.table.find(sub_id)
-		if i is None:
-			return None
-		sets: dict[str, set[str] | np.ndarray] = {}
-		for name, spec in self.table.header["sets"].items():
-			if "values" in spec:
-				bits = np.unpackbits(self.table.buffer(f"set:{name}")[i], count=len(spec["values"])).astype(bool)
-				if bits.any():
-					sets[name] = {v for v, b in zip(spec["values"], bits) if b}
-			else:
-				bloom = self.table.buffer(f"bloom:{name}")[i]
-				if bloom.any():
-					sets[name] = bloom.copy()
-		return SubjectStats(self.table.row(i), sets)
 
 	def digest_of(self, sub_id: str) -> str | None:
 		i = self.table.find(sub_id)
@@ -576,6 +740,9 @@ class Summary:
 
 	def has_column(self, column: str) -> np.ndarray:
 		"""Per subject: does any of its items carry ``column``?"""
+		if column == "path":
+			return self.table.num("count.recording") + self.table.num("count.table") \
+				+ self.table.num("count.array") + self.table.num("count.file") > 0
 		spec = self.table.header["sets"].get(column)
 		if spec is not None:
 			if "values" in spec:

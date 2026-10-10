@@ -201,6 +201,21 @@ def inspect_store(target: object) -> ValidationReport:
 				report.add(_issue("store.stale_index", Severity.ERROR,
 					"subject index describes a different snapshot than the one published", sub_id,
 					published_snapshot=manifest.subject_snapshots[sub_id]))
+		packed_info = summary.table.header.get("packed") if summary is not None else None
+		if summary is not None and packed_info is not None:
+			from .index import PACKED, Slice
+			packed_blob = repo._blob(PACKED)
+			if packed_blob is None or digest(packed_blob) != packed_info["digest"]:
+				report.add(_issue("store.corrupt_packed_index", Severity.ERROR,
+					"packed index is missing or does not match the summary's digest", str(target)))
+			else:
+				packed = Table.decode(packed_blob)
+				for sub_id, packed_digest in sorted(packed_info["subjects"].items()):
+					blob = repo._blob(sub_id) if packed_digest == summary.digest_of(sub_id) else None
+					if blob is not None and digest(blob) == packed_digest \
+							and Slice(packed, sub_id).rows() != Table.decode(blob).rows():
+						report.add(_issue("store.corrupt_packed_index", Severity.ERROR,
+							"packed index rows differ from the subject's own index", sub_id))
 
 	for sub_id, snapshot in manifest.subject_snapshots.items():
 		if not repo._repo_exists(sub_id):

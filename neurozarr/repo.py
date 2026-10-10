@@ -743,6 +743,24 @@ class Repo:
 			table = nzindex.CACHE.put(key, nzindex.Table.decode(blob))
 		return table
 
+	def _packed(self, version: str | None) -> "nzindex.Table | None":
+		"""The packed index of this version, if it has one (cached by digest)."""
+		summary = self._summary(version)
+		info = summary.table.header.get("packed") if summary is not None else None
+		if info is None:
+			return None
+		table = nzindex.CACHE.get(info["digest"])
+		if table is None:
+			blob = nzindex.disk_get(info["digest"]) if self.index_cache else None
+			if blob is None:
+				blob = self._blob(nzindex.PACKED, version)
+				if blob is None:
+					return None
+				if self.index_cache:
+					nzindex.disk_put(info["digest"], blob)
+			table = nzindex.CACHE.put(info["digest"], nzindex.Table.decode(blob))
+		return table
+
 	def _prefetch(self, subjects: list[str], version: str | None) -> None:
 		"""Fetch the indexes of these subjects that aren't cached, concurrently: on object
 		storage each is one request, and their latencies overlap instead of adding up."""
@@ -790,16 +808,41 @@ class Repo:
 		touched, not the store size."""
 		blob = self._blob(nzindex.SUMMARY, fresh=True)
 		previous = nzindex.Summary(nzindex.Table.decode(blob)) if blob is not None else None
-		entries = {sub: entry for sub in (previous.subjects if previous else [])
-				   if (entry := previous.entry(sub)) is not None} if previous else {}
+		changed: dict[str, nzindex.SubjectStats | None] = {}
 		for sub_id, subject_blob in updates.items():
 			if subject_blob is None:
-				entries.pop(sub_id, None)
+				changed[sub_id] = None
 				writer.drop(f"{nzindex.INDEX_GROUP}/{sub_id}")
 				continue
 			writer.put_blob(f"{nzindex.INDEX_GROUP}/{sub_id}", subject_blob)
-			entries[sub_id] = nzindex.stats_of(nzindex.Table.decode(subject_blob), nzindex.digest(subject_blob))
-		writer.put_blob(f"{nzindex.INDEX_GROUP}/{nzindex.SUMMARY}", nzindex.build_summary(list(entries.values())))
+			changed[sub_id] = nzindex.stats_of(nzindex.Table.decode(subject_blob), nzindex.digest(subject_blob))
+		packed = self._repack(writer, previous, changed, updates)
+		writer.put_blob(f"{nzindex.INDEX_GROUP}/{nzindex.SUMMARY}",
+						nzindex.update_summary(previous, changed, {"packed": packed} if packed else None))
+
+	def _repack(self, writer: Writer, previous: "nzindex.Summary | None",
+				changed: dict[str, "nzindex.SubjectStats | None"], updates: dict[str, bytes | None]) -> dict[str, Any] | None:
+		"""Keep the packed index (every subject's rows in one blob, for wide queries) in step,
+		lazily: rewritten only once enough subjects changed since it was written -- until
+		then queries read those few from their own index. Returns what it holds."""
+		digests = dict(zip(previous.subjects, previous.table.values("digest"))) if previous else {}
+		digests.update({sub: stats.row["digest"] for sub, stats in changed.items() if stats is not None})
+		for sub, stats in changed.items():
+			if stats is None:
+				digests.pop(sub, None)
+		info = previous.table.header.get("packed") if previous else None
+		packed_digests = info["subjects"] if info else {}
+		stale = {sub for sub, d in digests.items() if packed_digests.get(sub) != d} | (packed_digests.keys() - digests.keys())
+		if len(digests) <= nzindex.PACK_MIN or (info and len(stale) <= max(nzindex.PACK_MIN, nzindex.PACK_STALE * len(digests))):
+			return info if info and len(digests) > nzindex.PACK_MIN else None
+		old = self._blob(nzindex.PACKED, fresh=True) if info else None
+		tables: dict[str, nzindex.Table | None] = {}
+		for sub in stale:
+			blob = updates.get(sub) if sub in updates else (self._blob(sub, fresh=True) if sub in digests else None)
+			tables[sub] = None if blob is None else nzindex.Table.decode(blob)
+		packed_blob = nzindex.pack(None if old is None else nzindex.Table.decode(old), tables)
+		writer.put_blob(f"{nzindex.INDEX_GROUP}/{nzindex.PACKED}", packed_blob)
+		return {"digest": nzindex.digest(packed_blob), "subjects": digests}
 
 	def _publish_subject_snapshots(self, touched: dict[str, str], message: str,
 								   indexes: dict[str, bytes | None] | None = None) -> str | None:
@@ -1163,11 +1206,20 @@ class Repo:
 		tables: dict[str, tuple[Any, dict[str, Any]]] = {}
 		if summary is not None:
 			picked = [summary.subjects[i] for i in np.nonzero(prune_query(expr, summary))[0]]
-			self._prefetch([s for s in picked if s not in staged], version)
+			packed = self._packed(version) if len(picked) > nzindex.PACK_MIN else None
+			in_pack: set[str] = set()
+			if packed is not None:  # wide query: one read, plus the subjects changed since it was packed
+				packed_digests = summary.table.header["packed"]["subjects"]
+				digests = dict(zip(summary.subjects, summary.table.values("digest")))
+				in_pack = {s for s in picked if packed_digests.get(s) == digests[s]}
+			self._prefetch([s for s in picked if s not in staged and s not in in_pack], version)
 			for sub_id in picked:
 				if sub_id in gone or sub_id in staged:
 					continue
-				table = self._subject_table(sub_id, version)
+				# ponytail: the packed index is still masked one subject slice at a time (per-subject
+				# participant values); one vectorized pass over all rows if wide queries need it
+				table = nzindex.Slice(cast(nzindex.Table, packed), sub_id) if sub_id in in_pack \
+					else self._subject_table(sub_id, version)
 				if table is not None:
 					tables[sub_id] = (table, subject_values(summary, summary.table.find(sub_id) or 0, wanted))
 		for sub_id, table in staged.items():  # the delta: evaluated whatever the summary says
