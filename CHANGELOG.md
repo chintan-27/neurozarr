@@ -18,6 +18,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   under each block again. A view now keeps its last few decoded chunks and opens its data
   array once: a 10 s-block scan is 13-17x faster on BRAVO and CHB-MIT, 2.9x on HBN and
   1.5x on Pediatric iEEG (HiPerGator), with identical values; full reads are unchanged.
+  On top of that: int16 is unpacked and scaled in one pass, the next chunk is decoded in
+  the background while a forward read uses the current one, and a window straddling two
+  chunks copies only its two pieces -- the Pediatric scan drops again, 9.8 s to 5.7 s
+  (same node), now as fast as reading the whole recording at once.
 
 ### Added
 
