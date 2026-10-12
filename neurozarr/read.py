@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Callable, Iterator, NamedTuple, cast
 
 import numpy as np
@@ -21,6 +22,17 @@ class WriteBack(NamedTuple):
 	set_attrs: Callable[[Attrs], None]
 	rename: Callable[[tuple[str, ...], str], None]
 	delete: Callable[[tuple[str, ...]], None]
+
+
+_DECODER: ThreadPoolExecutor | None = None
+
+
+def _decoder() -> ThreadPoolExecutor:
+	"""One background thread for chunk prefetch, shared by every view, started on first use."""
+	global _DECODER
+	if _DECODER is None:
+		_DECODER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="neurozarr-prefetch")
+	return _DECODER
 
 
 def _array(node: zarr.Group, name: str) -> zarr.Array:
@@ -248,7 +260,8 @@ class RecordingView:
 		self._data: zarr.Array | None = None
 		# decoded chunks of recent narrow reads, by (channels, chunk index): a loop of
 		# small windows (a scan in blocks) decodes each chunk once, not once per block
-		self._chunks: "OrderedDict[tuple[Any, int], np.ndarray]" = OrderedDict()
+		self._chunks: "OrderedDict[tuple[Any, int], np.ndarray | Future[np.ndarray]]" = OrderedDict()
+		self._last_chunk: tuple[Any, int] | None = None
 
 	@property
 	def _group(self) -> zarr.Group:
@@ -392,10 +405,13 @@ class RecordingView:
 			scale, offset = np.array(raw_scale), np.array(raw_offset)
 			if indices is not None:
 				scale, offset = scale[indices], offset[indices]
-			# in place: one float64 allocation, not three (13 GB each on a long iEEG recording)
-			values = values.astype(np.float64)
-			values *= scale[:, None]
-			values += offset[:, None]
+			# one pass that casts and scales into one float64 array (an astype then *= was two
+			# passes, and a plain expression three allocations: 13 GB each on a long iEEG recording)
+			values = np.multiply(values, scale[:, None], dtype=np.float64)
+			if offset.any():
+				values += offset[:, None]
+		elif values.base is not None:
+			values = values.copy()  # a cut of a cached chunk: the caller may write to its result
 		return values, meta
 
 	def _stored(self, indices: list[int] | None, window: slice) -> np.ndarray:
@@ -412,22 +428,42 @@ class RecordingView:
 			return cast(np.ndarray, array[:, window] if indices is None
 						else array[indices, window])  # type: ignore[index]
 		key = None if indices is None else tuple(indices)
-		blocks = []
+		pieces = []
 		for k in range(first, last + 1):
-			block = self._chunks.get((key, k))
-			if block is None:
-				span = slice(k * step, min(n, (k + 1) * step))
-				block = cast(np.ndarray, array[:, span] if indices is None else array[indices, span])  # type: ignore[index]
-				self._chunks[(key, k)] = block
-				# ponytail: 4 chunk columns per view (~32 MB at the 8 MiB chunk target);
-				# size it by bytes if views ever hold many channel subsets at once
-				while len(self._chunks) > 4:
-					self._chunks.popitem(last=False)
-			else:
-				self._chunks.move_to_end((key, k))
-			blocks.append(block)
-		joined = blocks[0] if len(blocks) == 1 else np.concatenate(blocks, axis=-1)
-		return joined[:, start - first * step:stop - first * step]
+			block = self._chunk(array, indices, key, k)
+			lo, hi = max(start, k * step) - k * step, min(stop, (k + 1) * step) - k * step
+			pieces.append(block[:, lo:hi])
+		# reading forward chunk by chunk (a scan): decode the next chunk while this one is used
+		previous, self._last_chunk = self._last_chunk, (key, last)
+		if previous is not None and previous[0] == key and previous[1] in (last - 1, last) \
+				and (last + 1) * step < n and (key, last + 1) not in self._chunks:
+			self._chunks[(key, last + 1)] = _decoder().submit(self._read_chunk, array, indices, last + 1)
+			self._trim()
+		return pieces[0] if len(pieces) == 1 else np.concatenate(pieces, axis=-1)
+
+	@staticmethod
+	def _read_chunk(array: zarr.Array, indices: list[int] | None, k: int) -> np.ndarray:
+		step = array.chunks[-1]
+		span = slice(k * step, min(array.shape[-1], (k + 1) * step))
+		return cast(np.ndarray, array[:, span] if indices is None else array[indices, span])  # type: ignore[index]
+
+	def _chunk(self, array: zarr.Array, indices: list[int] | None, key: Any, k: int) -> np.ndarray:
+		"""One decoded chunk column: from the cache, from a prefetch in flight, or read now."""
+		block = self._chunks.get((key, k))
+		if block is None:
+			block = self._read_chunk(array, indices, k)
+		elif isinstance(block, Future):
+			block = block.result()
+		self._chunks[(key, k)] = block
+		self._chunks.move_to_end((key, k))
+		self._trim()
+		return block
+
+	def _trim(self) -> None:
+		# ponytail: 4 chunk columns per view (~32 MB at the 8 MiB chunk target);
+		# size it by bytes if views ever hold many channel subsets at once
+		while len(self._chunks) > 4:
+			self._chunks.popitem(last=False)
 
 	def channels(self) -> pd.DataFrame:
 		"""Read the channels table stored alongside this recording.

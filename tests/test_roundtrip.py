@@ -224,3 +224,12 @@ def test_narrow_reads_from_cached_chunks_match_direct_reads():
 		rows = [0, 1, 2] if picks is None else picks
 		assert np.array_equal(values, stored[rows, start:stop] * scale[rows] + offset[rows]), (start, stop, picks)
 	assert len(rec._chunks) <= 4
+
+	unscaled = zarr.open_group(zarr.storage.MemoryStore(), mode="a")
+	unscaled.create_array("data", shape=stored.shape, chunks=(3, 100), dtype=stored.dtype)[:] = stored
+	rec = RecordingView(unscaled, {}, "sub-x/rec")
+	first, _ = rec.data(start=0, stop=10)
+	first[:] = -1  # writing to a result must not reach the cache
+	assert np.array_equal(rec.data(start=0, stop=10)[0], stored[:, :10])
+	scan = np.concatenate([rec.data(start=s, stop=min(1000, s + 30))[0] for s in range(0, 1000, 30)], axis=-1)
+	assert np.array_equal(scan, stored)  # a forward scan, with the next chunk prefetched
