@@ -254,3 +254,16 @@ def test_data_can_return_float32(written):
 	assert np.allclose(half, full, rtol=1e-6)
 	window = rec.data(start=150, stop=250, dtype=np.float32)[0]
 	assert window.dtype == np.float32 and np.array_equal(window, half[:, 150:250])
+
+
+def test_channel_picks_read_the_right_rows():
+	import zarr
+	from neurozarr.read import RecordingView
+	group = zarr.open_group(zarr.storage.MemoryStore(), mode="a")
+	stored = np.arange(5 * 400, dtype=np.float32).reshape(5, 400)
+	group.create_array("data", shape=stored.shape, chunks=(5, 100), dtype=stored.dtype)[:] = stored
+	rec = RecordingView(group, {}, "sub-x/rec")
+	for picks in ([2], [1, 2, 3], [4, 0], [3, 1, 3], [-1], [0, -1]):
+		rows = [p % 5 for p in picks]
+		for start, stop in ((0, 400), (50, 150), (10, 20)):
+			assert np.array_equal(rec.data(start=start, stop=stop, picks=picks)[0], stored[rows, start:stop]), (picks, start)

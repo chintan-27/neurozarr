@@ -24,6 +24,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (same node), now as fast as reading the whole recording at once. A forward read now
   decodes the next 3 chunks side by side, and `data(dtype=np.float32)` returns half the
   memory for int16 recordings (Pediatric-shaped local test: scan 0.81 to 0.43 s).
+- Reading a subset of channels selects a plain range of rows instead of a list (zarr's
+  orthogonal selection): one channel had been slower to read than all of them (RNS
+  17.6 vs 2.4 ms).
 - `find()` and iterating query results build each view without re-decoding its row:
   6,019 hits on RNS 80 to 28 ms.
 

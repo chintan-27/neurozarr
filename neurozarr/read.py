@@ -36,6 +36,20 @@ def _decoder() -> ThreadPoolExecutor:
 	return _DECODER
 
 
+def _rows(array: zarr.Array, indices: list[int] | None, span: slice) -> np.ndarray:
+	"""Channels ``indices`` (None = all) of a time span. Read as a plain range of rows:
+	a list of rows goes through zarr's general orthogonal selection, which made one
+	channel slower to read than every channel (RNS 17.6 vs 2.4 ms) -- and a chunk holds
+	all channels, so the rows in between cost no extra decoding."""
+	if indices is None:
+		return cast(np.ndarray, array[:, span])
+	n_ch = array.shape[0]
+	rows = [i + n_ch if i < 0 else i for i in indices]
+	lo, hi = min(rows), max(rows) + 1
+	block = cast(np.ndarray, array[lo:hi, span])
+	return block if rows == list(range(lo, hi)) else block[np.asarray(rows) - lo]
+
+
 def _array(node: zarr.Group, name: str) -> zarr.Array:
 	"""Fetch a child the store's layout guarantees is an array.
 
@@ -432,10 +446,7 @@ class RecordingView:
 		start, stop, _ = window.indices(n)
 		first, last = start // step, (max(stop, start + 1) - 1) // step
 		if stop <= start or last - first > 1:
-			# zarr types __getitem__ as possibly returning a scalar; selecting along
-			# two axes of a 2-D array always gives an array back.
-			return cast(np.ndarray, array[:, window] if indices is None
-						else array[indices, window])  # type: ignore[index]
+			return _rows(array, indices, window)
 		key = None if indices is None else tuple(indices)
 		pieces = []
 		for k in range(first, last + 1):
@@ -457,7 +468,7 @@ class RecordingView:
 	def _read_chunk(array: zarr.Array, indices: list[int] | None, k: int) -> np.ndarray:
 		step = array.chunks[-1]
 		span = slice(k * step, min(array.shape[-1], (k + 1) * step))
-		return cast(np.ndarray, array[:, span] if indices is None else array[indices, span])  # type: ignore[index]
+		return _rows(array, indices, span)
 
 	def _chunk(self, array: zarr.Array, indices: list[int] | None, key: Any, k: int) -> np.ndarray:
 		"""One decoded chunk column: from the cache, from a prefetch in flight, or read now."""
