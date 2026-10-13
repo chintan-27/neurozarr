@@ -24,14 +24,15 @@ class WriteBack(NamedTuple):
 	delete: Callable[[tuple[str, ...]], None]
 
 
+_PREFETCH = 3  # chunks decoded ahead of a forward read
 _DECODER: ThreadPoolExecutor | None = None
 
 
 def _decoder() -> ThreadPoolExecutor:
-	"""One background thread for chunk prefetch, shared by every view, started on first use."""
+	"""Background threads for chunk prefetch, shared by every view, started on first use."""
 	global _DECODER
 	if _DECODER is None:
-		_DECODER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="neurozarr-prefetch")
+		_DECODER = ThreadPoolExecutor(max_workers=_PREFETCH, thread_name_prefix="neurozarr-prefetch")
 	return _DECODER
 
 
@@ -341,7 +342,8 @@ class RecordingView:
 
 	def data(self, start: int | None = None, stop: int | None = None, tmin: float | None = None,
 			 tmax: float | None = None,
-			 picks: "str | int | list[str | int] | None" = None) -> tuple[np.ndarray, dict[str, Any]]:
+			 picks: "str | int | list[str | int] | None" = None,
+			 dtype: "np.typing.DTypeLike | None" = None) -> tuple[np.ndarray, dict[str, Any]]:
 		"""Read samples, converted back to physical units.
 
 		Only the requested window is fetched from storage, so reading a few
@@ -360,6 +362,11 @@ class RecordingView:
 		picks : str or int or list, optional
 			Channels to read, as names (matched against :meth:`ch_names`) or
 			integer indices. Default reads every channel.
+		dtype : numpy dtype, optional
+			Type of the values returned. Default: float64 for recordings packed as
+			int16, otherwise the stored type. ``np.float32`` halves the memory a long
+			int16 recording needs and makes reading it faster; its precision (about 7
+			significant digits) is above that of 16-bit samples.
 
 		Returns
 		-------
@@ -381,6 +388,7 @@ class RecordingView:
 		>>> values, meta = rec.data(start=1000, stop=2000)
 		>>> values, meta = rec.data(tmin=10, tmax=20)
 		>>> values, meta = rec.data(tmin=10, tmax=20, picks=["LFP_L"])
+		>>> values, meta = rec.data(dtype=np.float32)  # half the memory
 		"""
 		meta = self.meta
 		if start is not None and tmin is not None:
@@ -407,11 +415,12 @@ class RecordingView:
 				scale, offset = scale[indices], offset[indices]
 			# one pass that casts and scales into one float64 array (an astype then *= was two
 			# passes, and a plain expression three allocations: 13 GB each on a long iEEG recording)
-			values = np.multiply(values, scale[:, None], dtype=np.float64)
+			values = np.multiply(values, scale[:, None], dtype=np.float64 if dtype is None else dtype)
 			if offset.any():
 				values += offset[:, None]
-		elif values.base is not None:
-			values = values.copy()  # a cut of a cached chunk: the caller may write to its result
+		elif values.base is not None or (dtype is not None and values.dtype != np.dtype(dtype)):
+			# a cut of a cached chunk must be copied (the caller may write to its result)
+			values = values.astype(values.dtype if dtype is None else dtype)
 		return values, meta
 
 	def _stored(self, indices: list[int] | None, window: slice) -> np.ndarray:
@@ -435,9 +444,12 @@ class RecordingView:
 			pieces.append(block[:, lo:hi])
 		# reading forward chunk by chunk (a scan): decode the next chunk while this one is used
 		previous, self._last_chunk = self._last_chunk, (key, last)
-		if previous is not None and previous[0] == key and previous[1] in (last - 1, last) \
-				and (last + 1) * step < n and (key, last + 1) not in self._chunks:
-			self._chunks[(key, last + 1)] = _decoder().submit(self._read_chunk, array, indices, last + 1)
+		if previous is not None and previous[0] == key and previous[1] in (last - 1, last):
+			# several ahead, decoded concurrently: one chunk decodes no faster with more
+			# threads, but several decode side by side (measured 13 ms each, ~5 ms in parallel)
+			for k in range(last + 1, min(last + 1 + _PREFETCH, -(-n // step))):
+				if (key, k) not in self._chunks:
+					self._chunks[(key, k)] = _decoder().submit(self._read_chunk, array, indices, k)
 			self._trim()
 		return pieces[0] if len(pieces) == 1 else np.concatenate(pieces, axis=-1)
 
@@ -460,9 +472,10 @@ class RecordingView:
 		return block
 
 	def _trim(self) -> None:
-		# ponytail: 4 chunk columns per view (~32 MB at the 8 MiB chunk target);
-		# size it by bytes if views ever hold many channel subsets at once
-		while len(self._chunks) > 4:
+		# ponytail: 6 chunk columns per view (the one in use, one behind for a straddling
+		# window, the prefetched ones: ~48 MB at the 8 MiB chunk target); size it by bytes
+		# if views ever hold many channel subsets at once
+		while len(self._chunks) > 3 + _PREFETCH:
 			self._chunks.popitem(last=False)
 
 	def channels(self) -> pd.DataFrame:

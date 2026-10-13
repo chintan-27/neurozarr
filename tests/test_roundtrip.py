@@ -223,7 +223,8 @@ def test_narrow_reads_from_cached_chunks_match_direct_reads():
 		values, _ = rec.data(start=start, stop=stop, picks=picks)
 		rows = [0, 1, 2] if picks is None else picks
 		assert np.array_equal(values, stored[rows, start:stop] * scale[rows] + offset[rows]), (start, stop, picks)
-	assert len(rec._chunks) <= 4
+	from neurozarr.read import _PREFETCH
+	assert len(rec._chunks) <= 3 + _PREFETCH
 
 	unscaled = zarr.open_group(zarr.storage.MemoryStore(), mode="a")
 	unscaled.create_array("data", shape=stored.shape, chunks=(3, 100), dtype=stored.dtype)[:] = stored
@@ -233,3 +234,23 @@ def test_narrow_reads_from_cached_chunks_match_direct_reads():
 	assert np.array_equal(rec.data(start=0, stop=10)[0], stored[:, :10])
 	scan = np.concatenate([rec.data(start=s, stop=min(1000, s + 30))[0] for s in range(0, 1000, 30)], axis=-1)
 	assert np.array_equal(scan, stored)  # a forward scan, with the next chunk prefetched
+
+
+def test_data_can_return_float32(written):
+	import zarr
+	from neurozarr.read import RecordingView
+	rec = Repo(written).subject("sub-001").visit("ses-1").recording(task="Stream", run=1)
+	stored, _ = rec.data()
+	assert stored.dtype == rec.array.dtype  # unpacked recordings come back as stored by default
+	assert rec.data(dtype=np.float64)[0].dtype == np.float64
+
+	group = zarr.open_group(zarr.storage.MemoryStore(), mode="a")  # an int16-packed recording
+	packed = np.arange(2 * 500, dtype=np.int16).reshape(2, 500)
+	group.create_array("data", shape=packed.shape, chunks=(2, 100), dtype=packed.dtype)[:] = packed
+	group.attrs.update({"data_scale": [1e-6, 2e-6], "data_offset": [0.0, 1e-3]})
+	rec = RecordingView(group, {}, "sub-x/rec")
+	full, half = rec.data()[0], rec.data(dtype=np.float32)[0]
+	assert full.dtype == np.float64 and half.dtype == np.float32
+	assert np.allclose(half, full, rtol=1e-6)
+	window = rec.data(start=150, stop=250, dtype=np.float32)[0]
+	assert window.dtype == np.float32 and np.array_equal(window, half[:, 150:250])

@@ -21,7 +21,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   On top of that: int16 is unpacked and scaled in one pass, the next chunk is decoded in
   the background while a forward read uses the current one, and a window straddling two
   chunks copies only its two pieces -- the Pediatric scan drops again, 9.8 s to 5.7 s
-  (same node), now as fast as reading the whole recording at once.
+  (same node), now as fast as reading the whole recording at once. A forward read now
+  decodes the next 3 chunks side by side, and `data(dtype=np.float32)` returns half the
+  memory for int16 recordings (Pediatric-shaped local test: scan 0.81 to 0.43 s).
+- `find()` and iterating query results build each view without re-decoding its row:
+  6,019 hits on RNS 80 to 28 ms.
 
 ### Added
 

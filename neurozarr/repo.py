@@ -158,6 +158,7 @@ class Repo:
 		self._root_cache: dict[tuple[str, str | None], zarr.Group] = {}
 		self._summary_cache: dict[str | None, nzindex.Summary | None] = {}
 		self._seen_tip: str | None = None  # the branch tip the cached reads came from
+		self._write_back_cache: WriteBack | None = None
 		# indexes are immutable per digest, so a local disk copy never goes stale; worth
 		# it only when the store is remote
 		self.index_cache = not state.is_local(target)
@@ -640,7 +641,9 @@ class Repo:
 		"""Bound to every view built from this Repo, so a view's set_attrs()/
 		rename()/delete() can reach back through it without read.py knowing
 		what a Repo is."""
-		return WriteBack(self._route_attrs, self._route_rename, self._route_delete)
+		if self._write_back_cache is None:  # one per Repo: every view shares it
+			self._write_back_cache = WriteBack(self._route_attrs, self._route_rename, self._route_delete)
+		return self._write_back_cache
 
 	def commit(self, message: str) -> str | None:
 		"""Record everything staged as one new dataset version (``git commit``).

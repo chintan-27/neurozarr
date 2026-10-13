@@ -343,13 +343,18 @@ class QueryResult:
 		return [table.header["paths"][i] for _, table, i in self._entries()]
 
 	def __iter__(self) -> "Iterator[Any]":
-		for sub, table, i in self._entries():
-			yield self._view_of(sub, table.header["paths"][i], table.values("kind", np.array([i]))[0])
+		for sub, table, rows, _ in self._hits:
+			paths = table.header["paths"]
+			for i, kind in zip(rows, table.values("kind", rows)):  # kinds decoded once per subject
+				yield self._view_of(sub, paths[i], kind)
 
 	def __getitem__(self, position: int) -> Any:
-		for n, (sub, table, i) in enumerate(self._entries()):
-			if n == position % len(self):
+		left = position % len(self) if len(self) else position
+		for sub, table, rows, _ in self._hits:
+			if left < len(rows):
+				i = rows[left]
 				return self._view_of(sub, table.header["paths"][i], table.values("kind", np.array([i]))[0])
+			left -= len(rows)
 		raise IndexError(position)
 
 	@property
