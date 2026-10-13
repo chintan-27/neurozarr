@@ -196,7 +196,10 @@ def fadvise_dontneed(paths: list[Path]) -> None:
 
 
 def _files_under(dest: Path) -> list[Path]:
-	return [p for p in Path(dest).rglob("*") if p.is_file()]
+	# follows links: the raw arm's store is a link to the source files, and Phase 7 links
+	# each format's existing store into its scratch -- rglob skipped both, so those files
+	# were never evicted
+	return [Path(root) / name for root, _, names in os.walk(dest, followlinks=True) for name in names]
 
 
 # ---------------------------------------------------------------------------
@@ -367,12 +370,12 @@ def run(source: Path, arm_names: list[str], reps: int, warmup: int, cache: str,
 			for workload in WORKLOADS:
 				n_warmup = warmup if cache == "warm" else 0
 				for rep in range(-n_warmup, reps):
-					if cache == "cold":
-						store.close()
-						_apply_cold_cache(dest)
-						store = arm.open(dest)
-					elif cache == "fresh" and workload != "W4":
+					if cache in ("fresh", "cold") and workload != "W4":
 						store.forget(target.id)  # a first read: nothing decoded kept in memory
+					if cache == "cold":
+						# and nothing in the OS page cache either. Re-opening the whole store
+						# instead (as before) re-scanned every source file per rep for raw
+						_apply_cold_cache(dest)
 					try:
 						_, elapsed, checksum = run_workload(workload, store, target, rep)
 					except Exception as exc:
