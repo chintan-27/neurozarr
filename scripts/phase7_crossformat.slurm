@@ -18,7 +18,10 @@
 # changes since Phase 6: W1-W3 return float64 in every arm (casts timed), W2's window
 # moves every rep.
 #
-#	sbatch phase7_crossformat.slurm <bravo|rns|chbmit_subsample|hbn_eeg|pediatric_ieeg> [run tag]
+#	sbatch phase7_crossformat.slurm <bravo|rns|chbmit_subsample|hbn_eeg|pediatric_ieeg> [run tag] [warm|fresh]
+#
+# fresh: before every read each format drops what it holds in memory for the recording
+# (HDF5's 8 MiB decoded-chunk cache had served repeated reads of small recordings)
 
 set -uo pipefail
 REPO=/blue/neurology-dept/chintan.acharya/neurozarr-benchmark/neurozarr
@@ -28,6 +31,7 @@ B=.bench_scratch
 P7=$B/phase7
 DATASET="${1:?usage: sbatch phase7_crossformat.slurm <dataset> [run tag]}"
 TAG="${2:+_$2}"  # a rerun writes its own results file
+CACHE="${3:-warm}"
 export XDG_STATE_HOME="$REPO/$P7/state_$SLURM_JOB_ID"
 case "$DATASET" in
 	bravo)            SOURCE=BIDS;                    OLD=$B/phase5/bravo_scratch ;;
@@ -62,7 +66,7 @@ done
 rm -rf "$SCRATCH/plain_zarr"  # rebuilt below with the current writer (small datasets only)
 ls -la "$SCRATCH"
 echo "=== $(date -Is) cross-format reads $DATASET [$ARMS]; node=$(hostname) loadavg=$(cut -d' ' -f1-3 /proc/loadavg) ==="
-$PY scripts/bench/runner.py "$SOURCE" --arms "$ARMS" --reps 10 --warmup 2 --cache warm --reuse-existing \
+$PY scripts/bench/runner.py "$SOURCE" --arms "$ARMS" --reps 10 --warmup 2 --cache "$CACHE" --reuse-existing \
 	--no-checksum-source --out "$P7/${DATASET}${TAG}.jsonl" --name "$DATASET" --scratch "$SCRATCH"
 rc=$?
 rm -rf "$XDG_STATE_HOME" "$SCRATCH/plain_zarr"
