@@ -44,6 +44,9 @@ class ArmStore(Protocol):
 	def search(self, **entities: str) -> list[str]: ...
 	def sequential_scan(self, rec_id: str, block_samples: int) -> Iterator[np.ndarray]: ...
 	def close(self) -> None: ...
+	# Drop whatever this store holds in memory for one recording (open handles, decoded
+	# chunks), so the next read opens it as a first read would; files stay in the OS cache.
+	def forget(self, rec_id: str) -> None: ...
 
 
 class Arm(Protocol):
@@ -146,6 +149,11 @@ class RawStore:
 	def close(self) -> None:
 		self._cache = None
 
+	def forget(self, rec_id: str) -> None:
+		import mne
+		# a new handle, opened here (outside the timed read) like every other format's
+		self._cache = (rec_id, mne.io.read_raw(self._paths[rec_id], preload=False, verbose=False))
+
 
 # ---------------------------------------------------------------------------
 # neurozarr: the system under test.
@@ -238,6 +246,15 @@ class NeurozarrStore:
 
 	def close(self) -> None:
 		pass
+
+	def forget(self, rec_id: str) -> None:
+		from neurozarr.read import RecordingView
+		# a new view over the same group, its array opened here (outside the timed read):
+		# no decoded chunks carried over. Not looked up again -- that walks the subject.
+		old = self._view(rec_id)
+		fresh = RecordingView(old._group, old.entities, old.path)
+		fresh.array
+		self._cache = (rec_id, fresh)
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +350,12 @@ class PlainZarrStore:
 			values, _ = rec.data(start=start, stop=min(n, start + block_samples))
 			yield values
 
+	def forget(self, rec_id: str) -> None:
+		from neurozarr.read import RecordingView
+		old = self._recs[rec_id]  # a new view over the same group: no decoded chunks
+		self._recs[rec_id] = RecordingView(old._group, old.entities, old.path)
+		self._recs[rec_id].array  # opened here, outside the timed read
+
 	def close(self) -> None:
 		pass
 
@@ -421,7 +444,8 @@ class Hdf5Store:
 	def __init__(self, dest: Path):
 		import h5py
 
-		self._file = h5py.File(Path(dest) / "store.h5", "r")
+		self._path = Path(dest) / "store.h5"
+		self._file = h5py.File(self._path, "r")
 		self._recs: dict[str, Any] = {}
 
 		def visit(name: str, obj: Any) -> None:
@@ -473,6 +497,15 @@ class Hdf5Store:
 		n = ds.shape[-1]
 		for start in range(0, n, block_samples):
 			yield self._decode(ds, ds[:, start:min(n, start + block_samples)])
+
+	def forget(self, rec_id: str) -> None:
+		import h5py
+		# re-open the file: HDF5's decoded-chunk cache (8 MiB per dataset in HDF5 2.0)
+		# lives on the open dataset, and otherwise served repeated reads from memory
+		names = list(self._recs)
+		self._file.close()
+		self._file = h5py.File(self._path, "r")
+		self._recs = {name: self._file[name + "/data"] for name in names}
 
 	def close(self) -> None:
 		self._file.close()
@@ -654,6 +687,7 @@ class NwbStore:
 
 		self._ios: list[Any] = []
 		self._recs: dict[str, Any] = {}
+		self._io_cls, self._file_of = io_cls, {}  # rec_id -> (its file, its io)
 		self._info: dict[str, RecInfo] = {}
 		for path in sorted(Path(dest).glob(glob)):
 			io = io_cls(str(path), mode="r")
@@ -666,6 +700,7 @@ class NwbStore:
 				rec_id = "/".join((sub_id, ses_id, "ieeg", name)) if ses_id != "ses-none" \
 					else "/".join((sub_id, "ieeg", name))
 				self._recs[rec_id] = series
+				self._file_of[rec_id] = (path, io)
 				self._info[rec_id] = RecInfo(
 					id=rec_id, entities=entities, n_channels=series.data.shape[1],
 					n_samples=series.data.shape[0], sfreq=float(series.rate or 0.0),
@@ -693,6 +728,17 @@ class NwbStore:
 		n = data.shape[0]
 		for start in range(0, n, block_samples):
 			yield data[start:min(n, start + block_samples), :].T
+
+	def forget(self, rec_id: str) -> None:
+		path, io = self._file_of[rec_id]  # re-open just this recording's file
+		io.close()
+		fresh = self._io_cls(str(path), mode="r")
+		nwbfile = fresh.read()
+		self._ios = [fresh if x is io else x for x in self._ios]
+		for other, (p, o) in list(self._file_of.items()):
+			if o is io:
+				self._recs[other] = nwbfile.acquisition[self._recs[other].name]
+				self._file_of[other] = (p, fresh)
 
 	def close(self) -> None:
 		for io in self._ios:

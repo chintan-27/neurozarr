@@ -371,6 +371,8 @@ def run(source: Path, arm_names: list[str], reps: int, warmup: int, cache: str,
 						store.close()
 						_apply_cold_cache(dest)
 						store = arm.open(dest)
+					elif cache == "fresh" and workload != "W4":
+						store.forget(target.id)  # a first read: nothing decoded kept in memory
 					try:
 						_, elapsed, checksum = run_workload(workload, store, target, rep)
 					except Exception as exc:
@@ -474,7 +476,10 @@ def main() -> None:
 	parser.add_argument("--arms", default=",".join(ARMS), help="comma-separated arm names")
 	parser.add_argument("--reps", type=int, default=DEFAULT_REPS)
 	parser.add_argument("--warmup", type=int, default=WARMUP_REPS)
-	parser.add_argument("--cache", choices=["warm", "cold"], default="warm")
+	# warm: repeated reads of one open recording (a format may answer from its own memory);
+	# fresh: before every read the format drops what it holds for the recording, files stay
+	# in the OS cache -- a first read; cold: the OS cache is dropped too
+	parser.add_argument("--cache", choices=["warm", "fresh", "cold"], default="warm")
 	parser.add_argument("--out", default="bench_results.jsonl")
 	parser.add_argument("--name", default=None, help="dataset label in the output (default: source's name)")
 	parser.add_argument("--scratch", default=None, help="where each arm's converted store is written (default: next to --out)")
