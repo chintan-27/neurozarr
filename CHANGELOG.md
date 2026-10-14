@@ -27,6 +27,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Reading a subset of channels selects a plain range of rows instead of a list (zarr's
   orthogonal selection): one channel had been slower to read than all of them (RNS
   17.6 vs 2.4 ms).
+- A correction stores what changed: replacing a recording with one laid out the same way
+  writes only the chunks whose values differ (42 MB EDF, one sample: 23.9 MB to 1.5 MB per
+  version), and an identical replacement writes nothing -- so re-running a conversion adds
+  no empty version. On local stores a commit also deletes the snapshot Icechunk's fork()
+  writes, which nothing refers to afterwards (BRAVO: 1.29 to 0.70 MB per edit).
 - `revert` and `merge` no longer walk every re-pinned subject to rebuild its index: they
   reuse the index already stored for that snapshot (the reverted-to or merged version),
   else carry the published one forward by the snapshot diff (BRAVO: 2.2 s to 0.05 s each).
