@@ -83,6 +83,25 @@ class Timer:
 		return result
 
 
+def largest_edf(source: Path) -> Path:
+	"""The edit that shows the other end: DataLad stores a new copy of the whole file,
+	neurozarr the chunks it touched plus the subject's snapshot."""
+	return max(sorted(source.rglob("*.edf")), key=lambda p: p.stat().st_size)
+
+
+def bids_from_chbmit(chbmit: Path, dest: Path, n_files: int) -> Path:
+	"""A minimal BIDS dataset of CHB-MIT's first ``n_files`` recordings of chb01 (links):
+	large EDFs (~40 MB each), which BRAVO and RNS don't have."""
+	import shutil as _shutil
+	_shutil.rmtree(dest, ignore_errors=True)
+	ieeg = dest / "sub-chb01" / "ses-01" / "eeg"
+	ieeg.mkdir(parents=True)
+	(dest / "dataset_description.json").write_text(json.dumps({"Name": "chbmit-subset", "BIDSVersion": "1.8.0"}))
+	for i, edf in enumerate(sorted((chbmit / "chb01").glob("chb01_*.edf"))[:n_files], start=1):
+		(ieeg / f"sub-chb01_ses-01_task-scalp_run-{i:02d}_eeg.edf").symlink_to(edf.resolve())
+	return dest
+
+
 def pick_edfs(source: Path) -> tuple[Path, Path]:
 	edfs = sorted(source.rglob("*_ieeg.edf")) or sorted(source.rglob("*.edf"))
 	subjects = sorted({p.relative_to(source).parts[0] for p in edfs})
@@ -96,12 +115,13 @@ def neurozarr_side(source: Path, scratch: Path, t: Timer, edits: int) -> None:
 	for p in (store, clone):
 		shutil.rmtree(p, ignore_errors=True)
 	a, b = pick_edfs(source)
+	big = largest_edf(source)
 	work = scratch / "nz_edits"
 	shutil.rmtree(work, ignore_errors=True)
 	work.mkdir(parents=True)
 
 	# where the reader files each of the two EDFs (one pass over the source)
-	wanted = {a.resolve(), b.resolve()}
+	wanted = {a.resolve(), b.resolve(), big.resolve()}
 	filed = {Path(i.raw.filenames[0]).resolve(): i.entities for i in reader_for(source).read()
 			 if getattr(i, "raw", None) is not None and Path(i.raw.filenames[0]).resolve() in wanted}
 
@@ -142,6 +162,10 @@ def neurozarr_side(source: Path, scratch: Path, t: Timer, edits: int) -> None:
 		t.out.write(json.dumps({**t.base, "tool": "neurozarr", "step": "edit_bytes", "k": k,
 								"bytes": tree_bytes(store) - before}) + "\n")
 	assert abs(value(repo, a) - baseline) > 0, "edit not visible"
+	before = tree_bytes(store)
+	t("neurozarr", "edit_large", lambda: correct(repo, big, 1, "fix the largest file"), file_bytes=big.stat().st_size)
+	t.out.write(json.dumps({**t.base, "tool": "neurozarr", "step": "edit_large_bytes",
+							"file_bytes": big.stat().st_size, "bytes": tree_bytes(store) - before}) + "\n")
 	old = t("neurozarr", "read_old_version", lambda: value(Repo.open(str(store)), a, first_version))
 	assert old == baseline, (old, baseline)
 
@@ -172,7 +196,7 @@ def datalad_side(source: Path, scratch: Path, t: Timer, edits: int) -> None:
 			subprocess.run(["chmod", "-R", "u+w", str(p)], check=False)
 			shutil.rmtree(p, ignore_errors=True)
 	a, b = pick_edfs(source)
-	rel_a, rel_b = a.relative_to(source), b.relative_to(source)
+	rel_a, rel_b, rel_big = a.relative_to(source), b.relative_to(source), largest_edf(source).relative_to(source)
 
 	def do_import() -> None:
 		sh("datalad", "create", "--force", str(ds))
@@ -199,6 +223,11 @@ def datalad_side(source: Path, scratch: Path, t: Timer, edits: int) -> None:
 		t.out.write(json.dumps({**t.base, "tool": "datalad", "step": "edit_bytes", "k": k,
 								"bytes": tree_bytes(ds, ".git") - before}) + "\n")
 	assert abs(first_sample(ds / rel_a) - baseline) > 0, "edit not visible"
+	before = tree_bytes(ds, ".git")
+	size = (source / rel_big).stat().st_size
+	t("datalad", "edit_large", lambda: correct(rel_big, 1, "fix the largest file"), file_bytes=size)
+	t.out.write(json.dumps({**t.base, "tool": "datalad", "step": "edit_large_bytes", "file_bytes": size,
+							"bytes": tree_bytes(ds, ".git") - before}) + "\n")
 
 	def read_old() -> float:
 		sh("git", "checkout", first, "--", str(rel_a), cwd=ds)
@@ -237,12 +266,16 @@ def main() -> None:
 	parser.add_argument("--scratch", type=Path, required=True)
 	parser.add_argument("--edits", type=int, default=5)
 	parser.add_argument("--tools", default="neurozarr,datalad")
+	parser.add_argument("--from-chbmit", type=int, default=0,
+						help="build the source as BIDS from this many CHB-MIT chb01 files (source = CHB-MIT root)")
 	args = parser.parse_args()
 	args.scratch.mkdir(parents=True, exist_ok=True)
+	if args.from_chbmit:
+		args.source = bids_from_chbmit(args.source, args.scratch / "chbmit_bids", args.from_chbmit)
 	os.environ.setdefault("GIT_AUTHOR_NAME", "bench"), os.environ.setdefault("GIT_AUTHOR_EMAIL", "bench@localhost")
 	os.environ.setdefault("GIT_COMMITTER_NAME", "bench"), os.environ.setdefault("GIT_COMMITTER_EMAIL", "bench@localhost")
 	base = {"dataset": args.name, "node": platform.node(), "loadavg": os.getloadavg()[0],
-			"source_bytes": tree_bytes(args.source)}
+			"source_bytes": sum(p.stat().st_size for p in args.source.rglob("*") if p.is_file())}  # links followed
 	with open(args.out, "a") as out:
 		t = Timer(out, base)
 		for tool in args.tools.split(","):
