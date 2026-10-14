@@ -277,6 +277,7 @@ class RecordingView:
 		# small windows (a scan in blocks) decodes each chunk once, not once per block
 		self._chunks: "OrderedDict[tuple[Any, int], np.ndarray | Future[np.ndarray]]" = OrderedDict()
 		self._last_chunk: tuple[Any, int] | None = None
+		self._names: list | None = None  # channel names, read once when a pick is a name
 
 	@property
 	def _group(self) -> zarr.Group:
@@ -351,8 +352,11 @@ class RecordingView:
 			return None
 		if isinstance(picks, (str, int)):
 			picks = [picks]
-		names = self.ch_names()
-		return [names.index(p) if isinstance(p, str) else p for p in picks]
+		if all(isinstance(p, int) for p in picks):
+			return list(picks)  # no table read: looking names up cost 15-20 ms a read
+		if self._names is None:
+			self._names = self.ch_names()
+		return [self._names.index(p) if isinstance(p, str) else p for p in picks]
 
 	def data(self, start: int | None = None, stop: int | None = None, tmin: float | None = None,
 			 tmax: float | None = None,
