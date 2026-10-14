@@ -27,6 +27,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Reading a subset of channels selects a plain range of rows instead of a list (zarr's
   orthogonal selection): one channel had been slower to read than all of them (RNS
   17.6 vs 2.4 ms).
+- `revert` and `merge` no longer walk every re-pinned subject to rebuild its index: they
+  reuse the index already stored for that snapshot (the reverted-to or merged version),
+  else carry the published one forward by the snapshot diff (BRAVO: 2.2 s to 0.05 s each).
+  A full `clone` of a local store hard-links Icechunk's immutable objects instead of
+  copying them (BRAVO 1.3 s to 0.23 s). Integer channel picks no longer read the
+  channels table (15-20 ms per read).
 - `find()` and iterating query results build each view without re-decoding its row:
   6,019 hits on RNS 80 to 28 ms.
 

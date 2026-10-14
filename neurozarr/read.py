@@ -353,7 +353,7 @@ class RecordingView:
 		if isinstance(picks, (str, int)):
 			picks = [picks]
 		if all(isinstance(p, int) for p in picks):
-			return list(picks)  # no table read: looking names up cost 15-20 ms a read
+			return [int(p) for p in picks]  # no table read: looking names up cost 15-20 ms a read
 		if self._names is None:
 			self._names = self.ch_names()
 		return [self._names.index(p) if isinstance(p, str) else p for p in picks]

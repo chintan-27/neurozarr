@@ -329,3 +329,17 @@ def test_wide_queries_read_the_packed_index(tmp_path, tiny_bids, monkeypatch):
 
 	from neurozarr.validate import inspect_store
 	assert not [i for i in inspect_store(repo.target).issues if "packed" in i.code]
+
+
+def test_revert_of_a_replaced_recording_keeps_the_index_exact(tmp_path, tiny_bids):
+	repo = Repo.init(str(tmp_path / "s"))
+	repo.add(tiny_bids)
+	repo.commit("import")
+	path = repo.query(kind="recording").paths[0]
+	sub, ses = path.split("/")[:2]
+	task = repo.get(path).entities["task"]
+	repo.subject(sub).visit(ses).add_recording(_raw(9), existing="replace", task=task)
+	edited = repo.commit("replace one recording")
+	repo.revert(edited)
+	assert path in repo.query(kind="recording").paths
+	_rows_now(repo)  # every subject's stored index equals a fresh walk of its tree

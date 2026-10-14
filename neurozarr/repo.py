@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 from typing import Any, Iterator, Literal, cast
 import datetime
 import logging
+import os
 import re
 import shutil
 import multiprocessing
@@ -1550,7 +1551,8 @@ class Repo:
 			result["subjects"] = {k: v for k, v in result["subjects"].items() if k == subject}
 		return result
 
-	def _repin(self, pins: dict[str, str | None], message: str, metadata: dict[str, Any] | None = None) -> str:
+	def _repin(self, pins: dict[str, str | None], message: str, metadata: dict[str, Any] | None = None,
+			   known: str | None = None) -> str:
 		"""Commit a new dataset version on the current branch with these subjects
 		re-pinned (None: unpublished), moving each subject's branch to its pin so later
 		writes build on it. No sample data is copied."""
@@ -1569,7 +1571,7 @@ class Repo:
 			else:
 				repo.create_branch(self._branch, pin)
 			snapshots[sub_id] = pin
-			updates[sub_id] = nzindex.build_subject(self._root_at(sub_id, pin), sub_id).finish(pin)
+			updates[sub_id] = self._index_at(sub_id, pin, known)
 		manifest = replace(current, updated_at=utc_now(), created_with=self._package_version(),
 						   subject_snapshots=snapshots)
 		writer = self._writer_for("_dataset")
@@ -1581,6 +1583,27 @@ class Repo:
 		self._base_manifest = manifest
 		self._invalidate_read_cache()
 		return version
+
+	def _index_at(self, sub_id: str, pin: str, known: str | None = None) -> bytes:
+		"""A subject's index at snapshot ``pin``, cheapest first: the one already stored at
+		dataset version ``known`` if it describes ``pin`` (a revert returns to a version
+		published before; a merge takes the other branch's); else the published index
+		carried forward by the difference between the two snapshots, as a commit does;
+		else a walk of the subject. Always walking made revert and merge take seconds."""
+		if known is not None:
+			blob = self._blob(sub_id, known)
+			if blob is not None and nzindex.Table.decode(blob).header.get("snapshot") == pin:
+				return blob
+		published = self._published_index(sub_id)
+		if published is not None:
+			try:  # icechunk diffs only forward along one history
+				changes = _summarize(self._icechunk_repo(sub_id).diff(
+					from_snapshot_id=published.header["snapshot"], to_snapshot_id=pin))
+			except icechunk.IcechunkError:
+				pass
+			else:
+				return nzindex.update_subject(published, self._root_at(sub_id, pin), sub_id, changes).finish(pin)
+		return nzindex.build_subject(self._root_at(sub_id, pin), sub_id).finish(pin)
 
 	def revert(self, version: str, message: str | None = None) -> str:
 		"""Undo one version with a new one (``git revert``): every subject it changed is
@@ -1606,7 +1629,8 @@ class Repo:
 				raise WriteConflictError(f"{sub_id} changed again after {version!r}; revert the later version "
 										 "first, or rm/add it yourself")
 			pins[sub_id] = before.subject_snapshots.get(sub_id)
-		return self._repin(pins, message or f"Revert \"{shown['message']}\"\n\nThis reverts version {target}.")
+		return self._repin(pins, message or f"Revert \"{shown['message']}\"\n\nThis reverts version {target}.",
+						   known=shown["parent"])
 
 	def reset_hard(self, version: str) -> None:
 		"""Move the current branch to ``version`` and drop what is staged on it
@@ -1714,7 +1738,7 @@ class Repo:
 			_replay(source, writer.root, their_changes)
 			pins[sub_id] = writer.save(title)
 			self._writers.pop(sub_id, None)
-		return self._repin(pins, title, {_MERGED: [other]})
+		return self._repin(pins, title, {_MERGED: [other]}, known=other)
 
 	@classmethod
 	def clone(cls, source: StorageTarget, dest: StorageTarget, version: str | None = None,
@@ -1733,7 +1757,7 @@ class Repo:
 								 "(CLI: clone --depth 1) to copy one version anywhere")
 			if Path(str(dest)).exists():
 				raise FileExistsError(f"{dest} already exists")
-			shutil.copytree(str(source), str(dest))
+			shutil.copytree(str(source), str(dest), copy_function=_link_or_copy)
 			return cls.open(dest, mode="a")
 		origin = cls.open(source, **storage_options)
 		snapshot = origin.resolve(version)
@@ -1859,6 +1883,23 @@ def _known_snapshot(repo: icechunk.Repository, snapshot: str) -> bool:
 		return True
 	except (icechunk.IcechunkError, ValueError):
 		return False
+
+
+# Icechunk never rewrites these once written (they are named by content or id), so a
+# local clone can share them, as git's local clone shares .git/objects
+_IMMUTABLE_DIRS = {"chunks", "manifests", "snapshots", "transactions"}
+
+
+def _link_or_copy(src: str, dst: str) -> object:
+	"""copytree's copy step for a full clone: hard-link an immutable object (same
+	filesystem), copy everything else -- refs and config change in place."""
+	if Path(src).parent.name in _IMMUTABLE_DIRS:
+		try:
+			os.link(src, dst)
+			return dst
+		except OSError:  # another filesystem, or links not allowed
+			pass
+	return shutil.copy2(src, dst)
 
 
 def _rebuilt_at_publish(path: str) -> bool:
