@@ -141,12 +141,13 @@ def test_concurrent_commits_conflict_only_when_they_touch_the_same_data(tmp_path
 	found = {r.path for r in Repo.open(store).find()}
 	assert {"sub-01/ses-1/ieeg/task-alice", "sub-02/ses-1/ieeg/task-bob"} <= found
 
-	# now both rewrite the same recording
+	# now both change the same recording, differently (an identical rewrite changes
+	# nothing, so it is no conflict -- as in git)
 	alice = Repo.open(store, mode="a")
-	alice.subject("sub-01").visit("ses-1").add_recording(raw, task="alice", existing="replace")
+	alice.subject("sub-01").visit("ses-1").add_recording(_scaled(raw, 2.0), task="alice", existing="replace")
 	_as_user(monkeypatch, tmp_path, "bob")
 	bob = Repo.open(store, mode="a")
-	bob.subject("sub-01").visit("ses-1").add_recording(raw, task="alice", existing="replace")
+	bob.subject("sub-01").visit("ses-1").add_recording(_scaled(raw, 3.0), task="alice", existing="replace")
 	bob.commit("bob rewrites it")
 	published = Repo.open(store).resolve()
 	_as_user(monkeypatch, tmp_path, "alice")
@@ -154,4 +155,57 @@ def test_concurrent_commits_conflict_only_when_they_touch_the_same_data(tmp_path
 		Repo.open(store, mode="a").commit("alice rewrites it too")
 	assert Repo.open(store).resolve() == published  # nothing half-published
 	values = Repo.open(store).subject("sub-01").visit("ses-1").recording(task="alice").data()[0]
-	assert np.abs(values - raw.get_data()).max() < 1e-9
+	assert np.abs(values - 3.0 * raw.get_data()).max() < 1e-9  # bob's, the one published
+
+
+def test_commit_leaves_no_fork_snapshot_behind(tmp_path, tiny_bids):
+	import icechunk
+	store = tmp_path / "s"
+	repo = Repo.init(str(store))
+	repo.add(tiny_bids)
+	first = repo.commit("import")
+	sub = repo.subjects()[0]
+	path = repo.query(kind="recording", sub=sub).paths[0]
+	before = repo.get(path).data()[0]
+	sub_repo, ses = repo.subject(sub), path.split("/")[1]
+	sub_repo.visit(ses).add_recording(_scaled(repo.get(path).raw(), 2.0), existing="replace", **repo.get(path).entities)
+	repo.commit("edit")
+	for repo_id in [*repo.subjects(), "_dataset"]:
+		ice = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store / repo_id)))
+		reachable = {s.id for b in ice.list_branches() for s in ice.ancestry(branch=b)}
+		on_disk = {p.name for p in (store / repo_id / "snapshots").iterdir()}
+		assert on_disk <= reachable, f"{repo_id}: unreferenced snapshots {on_disk - reachable}"
+	assert np.allclose(Repo.open(str(store)).get(path, version=first).data()[0], before)  # history intact
+	from neurozarr.validate import inspect_store
+	assert not inspect_store(str(store)).errors
+
+
+def _scaled(raw, factor):
+	copy = raw.copy().load_data()
+	copy._data *= factor
+	return copy
+
+
+def test_a_correction_writes_only_the_chunks_it_changes(tmp_path):
+	import mne
+	store = tmp_path / "s"
+	repo = Repo.init(str(store))
+	data = np.random.default_rng(0).standard_normal((2, 5 * 65536)) * 1e-5  # 5 chunks along time
+	raw = mne.io.RawArray(data, mne.create_info(2, 1000.0, "eeg"), verbose=False)
+	repo.subject("sub-01").visit("ses-1").add_recording(raw, task="long")
+	first = repo.commit("import")
+	chunks = lambda: set((store / "sub-01" / "chunks").iterdir())
+	before = chunks()
+	fixed = raw.copy().load_data()
+	fixed._data[0, 3 * 65536 + 7] += 1e-3  # one sample, in the fourth chunk
+	repo.subject("sub-01").visit("ses-1").add_recording(fixed, task="long", existing="replace")
+	repo.commit("correct one sample")
+	assert len(chunks() - before) == 1
+	rec = Repo.open(str(store)).subject("sub-01").visit("ses-1").recording(task="long")
+	assert np.allclose(rec.data()[0], fixed.get_data(), atol=1e-12)
+	assert np.allclose(Repo.open(str(store)).get(rec.path, version=first).data()[0], raw.get_data(), atol=1e-12)
+
+	shorter = mne.io.RawArray(data[:, :1000], mne.create_info(2, 1000.0, "eeg"), verbose=False)
+	repo.subject("sub-01").visit("ses-1").add_recording(shorter, task="long", existing="replace")
+	repo.commit("a different layout is rewritten whole")
+	assert Repo.open(str(store)).subject("sub-01").visit("ses-1").recording(task="long").shape == (2, 1000)

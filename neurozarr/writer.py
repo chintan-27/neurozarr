@@ -2,6 +2,7 @@ import itertools
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, cast
 
 import icechunk
@@ -208,6 +209,23 @@ def _join(parent: str, name: str) -> str:
 	return f"{parent}/{name}" if parent else name
 
 
+def _same_layout(group: zarr.Group, shape: tuple[int, ...], dtype: Any, chunks: tuple[int, ...],
+				 compressors: Any) -> zarr.Array | None:
+	"""The stored recording array, if a replacement can be written into it chunk by chunk:
+	same shape, dtype, chunking and codec. (Packing scale and offset are compared by the
+	caller's attrs: a different scale changes every stored value anyway.)"""
+	if "data" not in group:
+		return None
+	array = cast(zarr.Array, group["data"])
+	if array.shape != shape or array.dtype != np.dtype(dtype) or array.chunks != chunks:
+		return None
+	if compressors != "auto":  # an explicit codec must match the stored one
+		wanted = list(compressors) if isinstance(compressors, (list, tuple)) else [compressors]
+		if [c.to_dict() for c in array.compressors] != [c.to_dict() for c in wanted]:  # type: ignore[union-attr]
+			return None
+	return array
+
+
 class Writer:
 	"""Internal engine that places standardized items in the store's tree, which
 	is laid out by subject/session/datatype/entities following BIDS naming.
@@ -222,6 +240,11 @@ class Writer:
 		# the snapshot it was forked from, for spotting changes made since.
 		self._session = session
 		self._repo, self._branch, self._base = repo, branch, base
+		# where this repository keeps its snapshot files, for a local store (else None):
+		# Icechunk's fork() writes a full copy of the tip's snapshot that nothing refers
+		# to once the fork is committed, so save() removes it -- half of what an edit
+		# added on a large subject (BRAVO sub-001: 2 x 610 KB per commit)
+		self.snapshot_dir: Path | None = None
 		self.drifted = False  # after save(): the branch moved since this was staged
 		# index rows of the items written here, by path -- described from what is in hand,
 		# so commit needs no re-read of them (see index.update_subject)
@@ -309,15 +332,28 @@ class Writer:
 		chunks = recording_chunks(item.raw, layout, self._codec)
 		compressors = self._compressors("Recording", layout.dtype, chunks,
 										sample=lambda: middle_chunk(item.raw, self._codec))
-		util.set_attrs(group, attrs)
-		array = group.create_array(
-			"data", shape=shape, dtype=layout.dtype, chunks=chunks,
-			filters=self._codec.filters, compressors=compressors,
-			overwrite=True,  # re-converting a source into an existing store replaces it
-		)
-		for start in range(0, shape[-1], chunks[-1]):
-			stop = min(shape[-1], start + chunks[-1])
-			array[:, start:stop] = encode_recording(item.raw, start, stop, layout, self._codec)
+		current = group.attrs.asdict()
+		if {**current, **attrs} != current:
+			util.set_attrs(group, attrs)
+		array = _same_layout(group, shape, layout.dtype, chunks, compressors)
+		if array is not None:
+			# replacing a recording with one laid out the same way (a correction): write
+			# only the chunks whose values differ -- a version then stores what changed,
+			# not a re-encoded copy of the whole recording (42 MB EDF, one sample: 24 MB)
+			for start in range(0, shape[-1], chunks[-1]):
+				stop = min(shape[-1], start + chunks[-1])
+				encoded = encode_recording(item.raw, start, stop, layout, self._codec)
+				if not np.array_equal(array[:, start:stop], encoded):
+					array[:, start:stop] = encoded
+		else:
+			array = group.create_array(
+				"data", shape=shape, dtype=layout.dtype, chunks=chunks,
+				filters=self._codec.filters, compressors=compressors,
+				overwrite=True,  # re-converting a source into an existing store replaces it
+			)
+			for start in range(0, shape[-1], chunks[-1]):
+				stop = min(shape[-1], start + chunks[-1])
+				array[:, start:stop] = encode_recording(item.raw, start, stop, layout, self._codec)
 		self._capture(group.path, "recording",
 					  {k: v for k, v in group.attrs.asdict().items() if k != "_neurozarr_item_type"}, node=array)
 		record_write(array.nbytes)
@@ -520,6 +556,10 @@ class Writer:
 			session = self._repo.writable_session(self._branch)
 			session.merge(cast(icechunk.ForkSession, self._session))
 			snapshot = session.commit(message, metadata)
+			if self.snapshot_dir is not None and isinstance(self._session, icechunk.ForkSession):
+				# ponytail: local stores only; on object storage the fork's snapshot stays
+				# until `gc`, until deletion through the store's own API is added with S3
+				(self.snapshot_dir / self._session.snapshot_id).unlink(missing_ok=True)
 		log_progress("Committed", self._label or "store", f"snapshot {snapshot}")
 		log_mem()
 		return snapshot

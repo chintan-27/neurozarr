@@ -229,13 +229,21 @@ class Repo:
 		if self._mode != "a":
 			return
 		for repo_id, (forked, base, rows) in self._local.staged(self._branch).items():
-			writer = Writer(forked, self._codec, repo_id, repo=self._icechunk_repo(repo_id), branch=self._branch, base=base)
+			writer = self._committer(Writer(forked, self._codec, repo_id, repo=self._icechunk_repo(repo_id),
+											branch=self._branch, base=base), repo_id)
 			writer.captured = rows
 			self._writers[repo_id] = writer
 		self._removed_subjects = self._local.removed(self._branch)
 
 	def _repo_exists(self, sub_id: str) -> bool:
 		return icechunk.Repository.exists(storage_from(self.target, sub_id, **self._storage_options))
+
+	def _committer(self, writer: Writer, repo_id: str) -> Writer:
+		"""A writer that commits ``repo_id``: told where that repository's snapshots live
+		on disk (local stores) so it can drop its own fork's snapshot after committing."""
+		if state.is_local(self.target):
+			writer.snapshot_dir = Path(str(self.target)) / repo_id / "snapshots"
+		return writer
 
 	def _icechunk_repo(self, sub_id: str) -> icechunk.Repository:
 		if sub_id not in self._repos:
@@ -275,8 +283,9 @@ class Repo:
 				# snapshot this branch's manifest pins (or empty, for a new subject)
 				pinned = (self._base_manifest.subject_snapshots.get(sub_id) if self._base_manifest else None)
 				repo.create_branch(self._branch, pinned or repo.lookup_branch(state.DEFAULT_BRANCH))
-			self._writers[sub_id] = Writer(repo.writable_session(self._branch).fork(), self._codec, sub_id,
-										   repo=repo, branch=self._branch, base=repo.lookup_branch(self._branch))
+			self._writers[sub_id] = self._committer(Writer(repo.writable_session(self._branch).fork(), self._codec,
+														   sub_id, repo=repo, branch=self._branch,
+														   base=repo.lookup_branch(self._branch)), sub_id)
 		return self._writers[sub_id]
 
 	def _stage(self, *repo_ids: str) -> None:
@@ -604,8 +613,8 @@ class Repo:
 				results = pool.map(_ingest_subject, jobs)
 				for sub, forked, captured in progress(results) if progress else results:
 					previous = self._writers[sub]
-					writer = Writer(forked, self._codec, sub, repo=self._icechunk_repo(sub),
-									branch=self._branch, base=previous.base)
+					writer = self._committer(Writer(forked, self._codec, sub, repo=self._icechunk_repo(sub),
+													branch=self._branch, base=previous.base), sub)
 					writer.captured = {**previous.captured, **captured}
 					self._writers[sub] = writer
 		except Exception:

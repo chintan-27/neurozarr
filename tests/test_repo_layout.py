@@ -31,7 +31,8 @@ def test_reconverting_the_same_source_is_idempotent(store, raw):
 
 	subject = Repo(store).subject("sub-001")
 	assert len(subject.recordings()) == 1, "re-ingest duplicated the recording"
-	assert [m for _, m, _ in Repo(store).log("sub-001")][:2] == ["second pass", "first pass"]
+	# the second pass found nothing different to write, so (as in git) no new version
+	assert [m for _, m, _ in Repo(store).log("sub-001")][:1] == ["first pass"]
 
 
 def test_each_subject_is_an_independent_repo(store, raw):
