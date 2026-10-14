@@ -16,7 +16,8 @@
 #	                                                  and query latency on every Phase 6 store
 #	sbatch phase9_final.slurm readers <rep>         # RNS through BidsReader / ManifestReader /
 #	                                                  the explicit API
-#	sbatch phase9_final.slurm versioning <bravo|rns> # neurozarr vs DataLad (git-annex)
+#	sbatch phase9_final.slurm versioning <bravo|rns|chbmit5>  # neurozarr vs DataLad (git-annex);
+#	                                                  chbmit5 = 5 CHB-MIT EDFs as BIDS, for large-file edits
 
 set -uo pipefail
 REPO=/blue/neurology-dept/chintan.acharya/neurozarr-benchmark/neurozarr
@@ -65,9 +66,15 @@ case "$WHAT" in
 		rm -rf "$W/bids" "$W/manifest" "$W/explicit" ;;
 	versioning)
 		D="${2:?dataset}"
-		case "$D" in bravo) SRC=BIDS ;; rns) SRC=datasets/rns ;; *) echo "unknown $D" >&2; exit 64 ;; esac
+		EXTRA=""
+		case "$D" in
+			bravo) SRC=BIDS ;;
+			rns)   SRC=datasets/rns ;;
+			chbmit5) SRC=datasets/chbmit; EXTRA="--from-chbmit 5" ;;  # large files: ~40 MB EDFs
+			*) echo "unknown $D" >&2; exit 64 ;;
+		esac
 		command -v datalad >/dev/null && command -v git-annex >/dev/null || { echo "datalad/git-annex missing" >&2; exit 2; }
-		$PY scripts/bench/versioning_bench.py "$SRC" --name "$D" --out "$P9/versioning.jsonl" --scratch "$P9/versioning_$D"
+		$PY scripts/bench/versioning_bench.py "$SRC" $EXTRA --name "$D" --out "$P9/versioning_final.jsonl" --scratch "$P9/versioning_$D"
 		rc=$?
 		chmod -R u+w "$P9/versioning_$D" 2>/dev/null; rm -rf "$P9/versioning_$D" ;;
 	*) echo "unknown $WHAT" >&2; exit 64 ;;
