@@ -236,7 +236,17 @@ class Repo:
 		self._removed_subjects = self._local.removed(self._branch)
 
 	def _repo_exists(self, sub_id: str) -> bool:
-		return icechunk.Repository.exists(storage_from(self.target, sub_id, **self._storage_options))
+		# open and keep it rather than ask exists(): on object storage each exists() and
+		# open() is its own round of requests, and a read checked _dataset three times
+		# before opening it (24 requests to read one recording, 15 of them repeats)
+		if sub_id in self._repos:
+			return True
+		try:
+			self._repos[sub_id] = icechunk.Repository.open(storage_from(self.target, sub_id, **self._storage_options))
+		except icechunk.RepositoryNotFoundError:
+			return False
+		log_progress("Opening repository", sub_id)
+		return True
 
 	def _committer(self, writer: Writer, repo_id: str) -> Writer:
 		"""A writer that commits ``repo_id``: told where that repository's snapshots live
@@ -246,16 +256,11 @@ class Repo:
 		return writer
 
 	def _icechunk_repo(self, sub_id: str) -> icechunk.Repository:
-		if sub_id not in self._repos:
-			storage = storage_from(self.target, sub_id, **self._storage_options)
-			if icechunk.Repository.exists(storage):
-				log_progress("Opening repository", sub_id)
-				self._repos[sub_id] = icechunk.Repository.open(storage)
-			elif self._mode == "r":
+		if not self._repo_exists(sub_id):
+			if self._mode == "r":
 				raise StoreIntegrityError(f"store manifest references missing repository {sub_id!r}")
-			else:
-				log_progress("Creating repository", sub_id)
-				self._repos[sub_id] = icechunk.Repository.create(storage)
+			log_progress("Creating repository", sub_id)
+			self._repos[sub_id] = icechunk.Repository.create(storage_from(self.target, sub_id, **self._storage_options))
 		return self._repos[sub_id]
 
 	def _writer_for(self, sub_id: str) -> Writer:
