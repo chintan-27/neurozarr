@@ -11,7 +11,9 @@ import re
 import shutil
 import multiprocessing
 import warnings
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from types import SimpleNamespace
+import pickle
 
 import icechunk
 import mne  # type: ignore[import-untyped]  # mne ships no type information
@@ -60,24 +62,43 @@ def _subject_of(item: Any) -> str | None:
 	return item.entities.sub
 
 
-def _ingest_subject(job: tuple[Any, ...]) -> tuple[str, Any, dict[str, dict[str, Any]]]:
-	"""Runs in a worker process: the ordinary serial ingest of one subject, into a
-	fork of that subject's session handed over by the parent."""
-	target, storage_options, codec, reader, sub, policy, forked, log_level, plan, branch = job
+def _ingest_unit(job: tuple[Any, ...]) -> tuple[str, dict[str, bytes], set[str], dict[str, dict[str, Any]]]:
+	"""Runs in a worker process: an ordinary Writer, but over an OverlayStore on the
+	subject's staged session -- so it sees the store as a serial ingest would and
+	writes nothing to it -- and hands the parent what it wrote, for Writer.replay."""
+	sub, base, reader, plan, codec, policy, log_level = job
 	if log_level < logging.WARNING:  # spawn starts with no logging setup; mirror the parent's
 		set_verbosity(log_level)
-	repo = Repo.open(target, mode="a", codec=codec, branch=branch, **storage_options)
-	# only this subject's fork: never what the parent staged in the shared index
-	repo._writers = {sub: Writer(forked, codec, sub)}  # written to only; the parent stages and commits it
-	repo._removed_subjects = set()
-	repo._batch = 1  # the parent writes the index, once, after every worker is back
-	repo._plan = plan  # the parent's plan: probed once, never re-learned per worker
-	items = (item for item in reader.read() if _subject_of(item) is not None)  # dataset-level: the parent's
-	repo._ingest_items(items, None, policy)
-	if set(repo._writers) != {sub}:
-		raise ValueError(f"{type(reader).__name__}.for_subject({sub!r}) yielded items of other subjects: "
-						 f"{sorted(set(repo._writers) - {sub})}")
-	return sub, forked, repo._writers[sub].captured
+	overlay = util.OverlayStore(pickle.loads(base).store)
+	writer = Writer(cast(Any, SimpleNamespace(store=overlay)), codec, sub)
+	writer.plan = plan  # the parent's plan: probed once, never re-learned per worker
+	for item in reader.read():
+		owner = _subject_of(item)
+		if owner is None:
+			continue  # dataset-level: the parent's
+		if owner != sub:
+			raise ValueError(f"{type(reader).__name__} yielded items of {owner} in {sub}'s work")
+		if isinstance(item, Attrs):
+			writer.add_attrs(Attrs(Repo._route(item.path)[1], item.attrs))
+		else:
+			writer.dispatch(item, policy)
+	writer._flush()
+	return sub, overlay.written(), overlay.deleted, writer.captured
+
+
+def _batches(units: list[tuple[Any, int]], count: int) -> list[tuple[list[Any], int]]:
+	"""Consecutive runs of one subject's units, each about 1/count of its bytes, with
+	their size: few enough that a worker's setup is noise, many enough to keep every
+	worker busy."""
+	target = max(1, sum(size for _, size in units) // max(1, count))
+	batches: list[tuple[list[Any], int]] = []
+	for unit, size in units:
+		if not batches or (batches[-1][0] and batches[-1][1] + size > target):
+			batches.append(([], 0))
+		batch, filled = batches[-1]
+		batch.append(unit)
+		batches[-1] = (batch, filled + size)
+	return batches
 
 
 def _open_writer(icechunk_repo: icechunk.Repository, codec: CodecConfig | None, label: str = "") -> Writer:
@@ -523,11 +544,14 @@ class Repo:
 		existing : {"error", "skip", "replace"}, default "error"
 			How to handle an item already present at the same entity path.
 		workers : int or None, default 1
-			Ingest this many subjects at once, each in its own process; ``None``
-			means one per CPU. Needs a reader with ``subjects()`` and
-			``for_subject()`` (the built-in readers have both) and a store other
-			processes can reach (a path or object-store URI, not ``memory://``);
-			otherwise it ingests serially. ``progress`` then counts subjects.
+			Read and encode in this many processes at once; ``None`` means one per
+			CPU this process may use. The work is split into recordings (each with
+			its sidecars) for a reader with ``units()``, like :class:`BidsReader`,
+			else into subjects (``subjects()`` and ``for_subject()``); this process
+			writes everything, so the store is the same as a serial ingest's. Needs
+			a store other processes can reach (a path or object-store URI, not
+			``memory://``); otherwise it ingests serially. ``progress`` then counts
+			batches of that work.
 
 		See Also
 		--------
@@ -579,6 +603,7 @@ class Repo:
 
 	def _ingest_items(self, items: Iterator[Any], progress: Any, policy: ExistingPolicy) -> None:
 		try:
+			items = util.prefetch(items)
 			for item in progress(items) if progress else items:
 				if isinstance(item, Attrs):
 					self._route_attrs(item)
@@ -605,23 +630,47 @@ class Repo:
 
 	def _ingest_parallel(self, reader: Reader, subjects: list[str], workers: int | None,
 						 progress: Any, policy: ExistingPolicy) -> None:
-		"""Each worker writes one subject into that subject's staged fork, handed over and
-		handed back; commit() then records it exactly as after a serial add -- one commit
-		per subject, with commit()'s message."""
+		"""Workers encode, this process writes. A reader with ``units()`` is split into
+		those (a recording with its sidecars), anything else into subjects. Each worker
+		runs an ordinary Writer over an overlay of its subject's staged session and hands
+		back the bytes it wrote; replaying them here is ~5% of a serial ingest (measured:
+		all of BRAVO, 156 MB in 6,381 keys, in 1.7 s), so the work scales with units, not
+		subjects -- and no two processes ever write one session."""
 		try:
-			jobs = [(self.target, self._storage_options, self._codec, cast(Any, reader).for_subject(sub), sub,
-					 policy, self._writer_for(sub).session, logger.getEffectiveLevel(), self._plan, self._branch)
-					for sub in subjects]
+			source = cast(Any, reader)
+			count = workers or os.process_cpu_count() or 1
+			if hasattr(source, "units"):
+				# what lies outside every unit (dataset, subject, session metadata) first,
+				# here, so workers see it -- and never create those groups themselves
+				self._ingest_items(source.without_units().read(), None, policy)
+				by_subject: dict[str, list[tuple[Any, int]]] = {}
+				for unit, size in source.units():
+					by_subject.setdefault(unit[1], []).append((unit, size))
+				total = sum(size for units in by_subject.values() for _, size in units) or 1
+				work = [(sub, source.for_units(batch), size) for sub, units in by_subject.items()
+						for batch, size in _batches(units, round(4 * count * sum(s for _, s in units) / total))]
+			else:
+				self._ingest_items((item for item in source.for_subject(None).read()
+									if _subject_of(item) is None), None, policy)
+				work = [(sub, source.for_subject(sub), 0) for sub in subjects]
+			# each subject's staged session, pickled now: replays below change it while
+			# later jobs still wait to be sent
+			bases = {sub: pickle.dumps(self._writer_for(sub).session) for sub, _, _ in work}
+			work.sort(key=lambda job: -job[2])  # biggest first, so none is left for last
+			jobs = [(sub, bases[sub], part, self._plan, self._codec, policy, logger.getEffectiveLevel())
+					for sub, part, _ in work]
 			# spawn, not fork: forking with icechunk's runtime already open deadlocks the children
 			context = multiprocessing.get_context("spawn")
-			with ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
-				results = pool.map(_ingest_subject, jobs)
-				for sub, forked, captured in progress(results) if progress else results:
-					previous = self._writers[sub]
-					writer = self._committer(Writer(forked, self._codec, sub, repo=self._icechunk_repo(sub),
-													branch=self._branch, base=previous.base), sub)
-					writer.captured = {**previous.captured, **captured}
-					self._writers[sub] = writer
+			with ProcessPoolExecutor(max_workers=count, mp_context=context) as pool:
+				futures = [pool.submit(_ingest_unit, job) for job in jobs]
+				del jobs
+				done = as_completed(futures)
+				for future in progress(done) if progress else done:
+					sub, written, deleted, captured = future.result()
+					writer = self._writers[sub]
+					writer.replay(written, deleted)
+					writer.captured.update(captured)
+					futures.remove(future)  # its bytes are in the store now
 		except Exception:
 			self._failed = True
 			raise
@@ -652,12 +701,23 @@ class Repo:
 		sub_id, stripped = self._route(path)
 		self._delete(stripped, sub_id)
 
+	def _route_write(self, path: tuple[str, ...], start: int, values: np.ndarray,
+					 channels: list[int] | None) -> None:
+		sub_id, stripped = self._route(path)
+		try:
+			self._writer_for(sub_id).write_samples(stripped, start, values, channels)
+			self._stage(sub_id)
+		except Exception:
+			self._failed = True
+			raise
+
 	def _write_back(self) -> WriteBack:
 		"""Bound to every view built from this Repo, so a view's set_attrs()/
 		rename()/delete() can reach back through it without read.py knowing
 		what a Repo is."""
 		if self._write_back_cache is None:  # one per Repo: every view shares it
-			self._write_back_cache = WriteBack(self._route_attrs, self._route_rename, self._route_delete)
+			self._write_back_cache = WriteBack(self._route_attrs, self._route_rename, self._route_delete,
+											   self._route_write)
 		return self._write_back_cache
 
 	def commit(self, message: str) -> str | None:

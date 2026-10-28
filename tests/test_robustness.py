@@ -21,7 +21,7 @@ def test_unsafe_subject_ids_are_rejected(sub):
 
 
 @pytest.mark.parametrize("kwargs", [
-	{"dtype": "float32"},
+	{"dtype": "int8"},
 	{"bitround_k": 16},
 	{"bitround_k": 1.5},
 	{"dtype": "float16", "bitround_k": 1},

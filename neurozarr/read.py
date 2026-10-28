@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import zarr
 
+from . import util
 from .entities import parse_entities
 from .items import Attrs
 from .log import logger
@@ -16,12 +17,13 @@ if TYPE_CHECKING:
 
 class WriteBack(NamedTuple):
 	"""Bound to a view obtained from a writable Repo (by Subject/Visit, via
-	views_in's write= param), so set_attrs()/rename()/delete() can route a
-	change back through Repo._route_attrs/_route_rename/_route_delete without
-	read.py depending on Repo itself."""
+	views_in's write= param), so set_attrs()/rename()/delete()/write() can route a
+	change back through Repo._route_attrs/_route_rename/_route_delete/_route_write
+	without read.py depending on Repo itself."""
 	set_attrs: Callable[[Attrs], None]
 	rename: Callable[[tuple[str, ...], str], None]
 	delete: Callable[[tuple[str, ...]], None]
+	write: Callable[[tuple[str, ...], int, np.ndarray, "list[int] | None"], None]
 
 
 _PREFETCH = 3  # chunks decoded ahead of a forward read
@@ -72,10 +74,23 @@ def _table_df(node: zarr.Group | zarr.Array, columns: list[str] | None = None) -
 	attrs = node.attrs.asdict()
 	names = cast("list[str] | None", attrs.get("columns"))
 
-	if isinstance(node, zarr.Group) and attrs.get("table_schema_version") in (2, 3):
+	if isinstance(node, zarr.Group) and attrs.get("table_schema_version") in (2, 3, 4):
 		series_list: list[pd.Series] = []
+		inline = cast("dict[str, Any]", attrs.get(util.INLINE_KEY, {}))
 		for spec in cast("list[dict[str, Any]]", attrs.get("schema", [])):
-			if "array" in spec:  # schema 3: packed into a shared array, one row per column
+			if "inline" in spec:  # schema 4: a small table's values in the group's own attrs
+				i = int(spec["inline"])
+				raw = inline["values"][i]
+				physical = spec["physical"]
+				if physical == "str":
+					values = np.array(raw, dtype=np.dtypes.StringDType())
+				elif np.dtype(physical).kind == "f":
+					values = np.array([np.nan if v is None else v for v in raw], dtype=physical)
+				else:
+					values = np.array(raw, dtype=physical)
+				mask = np.zeros(len(values), dtype=bool)
+				mask[inline["masks"].get(str(i), [])] = True
+			elif "array" in spec:  # schema 3: packed into a shared array, one row per column
 				array_name, row = str(spec["array"]), int(spec["row"])
 				values = np.asarray(_array(node, array_name)[row])
 				mask_name = f"{array_name}__mask"
@@ -196,7 +211,7 @@ class TableView:
 	def meta(self) -> dict[str, Any]:
 		"""The table's own metadata, without the bookkeeping the writer added."""
 		return {k: v for k, v in self._group[self.name].attrs.asdict().items()
-				if k not in ("_neurozarr_item_type", "table_schema_version", "columns", "dtypes", "schema")}
+				if k not in ("_neurozarr_item_type", "table_schema_version", "columns", "dtypes", "schema", util.INLINE_KEY)}
 
 	def set_attrs(self, attrs: dict[str, Any]) -> None:
 		"""Add or update this table's metadata after creation.
@@ -315,6 +330,69 @@ class RecordingView:
 		obtained from a writable :class:`Repo`.
 		"""
 		_require_write(self._write).delete(_target_path(self.path, None))
+
+	def write(self, values: "np.typing.ArrayLike", start: int = 0,
+			  picks: "str | int | list[str | int] | None" = None) -> None:
+		"""Overwrite samples in place, in physical units -- a correction.
+
+		Only the chunks the samples fall in are rewritten, so the new version stores
+		those chunks and nothing else. Not committed until :meth:`Repo.commit`. Only
+		available on a view obtained from a writable :class:`Repo`; this view keeps
+		showing pre-change data until the store is reopened.
+
+		Parameters
+		----------
+		values : array_like
+			Shape ``(n_channels, n_samples)``: one row per channel in ``picks`` (or
+			every channel), in the units :meth:`data` returns.
+		start : int, default 0
+			Sample index the first column goes to.
+		picks : str or int or list, optional
+			Channels to write, as names or indices. Default: every channel.
+
+		Raises
+		------
+		ValueError
+			If the samples fall outside the recording, the shape does not match the
+			channels, or the recording is packed as int16 and a value is not exactly
+			one of its steps (``data_scale`` apart) -- nothing is rounded. To store
+			finer values, add the recording again with a float ``CodecConfig.dtype``.
+
+		Examples
+		--------
+		>>> values, _ = rec.data(start=0, stop=1)
+		>>> values[0, 0] += rec.meta["data_scale"][0]  # one step up
+		>>> rec.write(values, start=0)
+		>>> repo.commit("fix the first sample")
+		"""
+		back = _require_write(self._write)
+		indices = self._picks(picks)
+		values = np.asarray(values, dtype=np.float64)
+		n_channels, n_samples = self.shape
+		rows = n_channels if indices is None else len(indices)
+		if values.ndim != 2 or values.shape[0] != rows:
+			raise ValueError(f"values must have shape ({rows}, n_samples), got {values.shape}")
+		if start < 0 or start + values.shape[1] > n_samples:
+			raise ValueError(f"samples {start}:{start + values.shape[1]} fall outside the recording (0:{n_samples})")
+		back.write(_target_path(self.path, None), start, self._encode(values, indices), indices)
+		self._chunks.clear()
+
+	def _encode(self, values: np.ndarray, indices: list[int] | None) -> np.ndarray:
+		"""Physical values as stored: exact int16 steps, or the stored float type."""
+		meta, dtype = self.meta, self.array.dtype
+		if meta.get("data_scale") is None or meta.get("data_offset") is None:
+			return values.astype(dtype)
+		scale, offset = np.array(meta["data_scale"]), np.array(meta["data_offset"])
+		if indices is not None:
+			scale, offset = scale[indices], offset[indices]
+		steps = (values - offset[:, None]) / scale[:, None]
+		counts = np.round(steps)
+		# 1e-6 of a step: far above float64 error, far below a real off-grid value
+		if not np.isfinite(steps).all() or np.abs(steps - counts).max(initial=0) > 1e-6:
+			raise ValueError(f"{self.path} is packed as int16: values must be whole steps of data_scale")
+		if counts.min(initial=0) < np.iinfo(dtype).min or counts.max(initial=0) > np.iinfo(dtype).max:
+			raise ValueError(f"{self.path} is packed as int16: values fall outside its range")
+		return counts.astype(dtype)
 
 	@property
 	def meta(self) -> dict[str, Any]:

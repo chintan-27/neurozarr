@@ -22,7 +22,7 @@ def test_probe_follows_the_data_and_optimize():
 	sparse = ((rng.random((4, 131072)) < 0.02) * rng.integers(-500, 500, (4, 131072))).astype("int16")
 	assert _shuffle(probe(noise)[0]) != "noshuffle"
 	chain, sizes = probe(sparse)
-	assert _shuffle(chain) == "noshuffle" and chain[0].typesize == 2 and set(sizes) == {"noshuffle", "shuffle", "bitshuffle"}
+	assert _shuffle(chain) == "noshuffle" and chain[0].typesize == 2 and set(sizes) == {"noshuffle", "shuffle", "bitshuffle", "noshuffle@3", "shuffle@3", "bitshuffle@3"}
 	speed = probe(sparse, "speed")[0][0]
 	assert (str(getattr(speed.cname, "value", speed.cname)), speed.clevel) == ("lz4", 1)
 	assert (probe(sparse, "balanced")[0][0].clevel, probe(sparse, "size")[0][0].clevel) == (5, 9)
@@ -31,7 +31,8 @@ def test_probe_follows_the_data_and_optimize():
 		probe(noise, "smallest")
 
 
-def test_reader_plan_decides_every_codec_and_is_recorded(tmp_path, tiny_bids):
+def test_reader_plan_decides_every_codec_and_is_recorded(tmp_path, tiny_bids, monkeypatch):
+	monkeypatch.setattr("neurozarr.util.INLINE_TABLE_BYTES", 0)  # tables as arrays, so they carry codecs
 	reader = BidsReader(tiny_bids)
 	plan = reader.codec_plan()
 	assert {"Recording", "Recording/float32", "Table"} <= set(plan.groups)
@@ -43,7 +44,7 @@ def test_reader_plan_decides_every_codec_and_is_recorded(tmp_path, tiny_bids):
 	repo = Repo.open(tmp_path / "store")
 	rec = repo.subject("sub-02").visit("ses-1").recording(task="rest")
 	(codec,) = rec.array.compressors
-	assert isinstance(codec, BloscCodec) and codec.clevel == 5
+	assert isinstance(codec, BloscCodec) and codec.clevel == plan.levels["Recording/float32"] in (3, 5)
 	assert str(getattr(codec.shuffle, "value", codec.shuffle)) == plan.groups["Recording/float32"]
 	events = repo.subject("sub-02").root()["ses-1/eeg/task-rest/events"]  # a sidecar lives with its recording
 	codecs = {str(a.dtype): list(a.compressors) for _, a in events.arrays()}
@@ -131,3 +132,12 @@ def test_cli_optimize_flag(tmp_path, tiny_bids):
 	codecs = {str(getattr(c.cname, "value", c.cname)) for r in Repo.open(tmp_path / "store").find()
 			  for c in r.array.compressors}
 	assert codecs == {"lz4"}
+
+
+def test_balanced_takes_the_cheaper_level_only_when_it_stores_about_as_small():
+	from neurozarr.codecs import _choose
+	assert _choose({"noshuffle": 1000, "shuffle": 1200, "bitshuffle": 1300, "noshuffle@3": 1009,
+					"shuffle@3": 1300, "bitshuffle@3": 1400}, "balanced") == ("noshuffle", 3)
+	assert _choose({"noshuffle": 1000, "shuffle": 1200, "bitshuffle": 1300, "noshuffle@3": 1020,
+					"shuffle@3": 1300, "bitshuffle@3": 1400}, "balanced") == ("noshuffle", 5)
+	assert _choose({"noshuffle": 1000, "shuffle": 900, "bitshuffle": 1300}, "size") == ("shuffle", 9)

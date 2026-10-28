@@ -43,9 +43,8 @@ from itertools import islice
 from typing import Any, Literal
 
 import numpy as np
-import zarr
+from numcodecs import Blosc  # type: ignore[import-untyped]
 from zarr.codecs import BloscCodec, ZstdCodec
-from zarr.storage import MemoryStore
 
 from .errors import ValidationError
 from .items import Array, Item, Recording, Table
@@ -54,12 +53,19 @@ OPTIMIZE = ("speed", "balanced", "size")
 PROBE_LEVELS = (0, 1, 2, 3, 4)
 Shuffle = Literal["noshuffle", "shuffle", "bitshuffle"]
 _SHUFFLES: tuple[Shuffle, ...] = ("noshuffle", "shuffle", "bitshuffle")
+_BLOSC_SHUFFLE = {"noshuffle": Blosc.NOSHUFFLE, "shuffle": Blosc.SHUFFLE, "bitshuffle": Blosc.BITSHUFFLE}
 # compressor and level per optimize -- from the 52-config sweep: lz4 writes ~2x and
 # reads ~1.5x faster than zstd-1; zstd-5 is within a few % of zstd-9's size at
 # 10-40x its write speed; zstd-9 (Blosc's top level) is the smallest core codec.
 _WRITE: dict[str, tuple[Literal["lz4", "zstd"], int]] = {"speed": ("lz4", 1), "balanced": ("zstd", 5), "size": ("zstd", 9)}
 _PROBE: dict[str, tuple[Literal["lz4", "zstd"], int]] = {"speed": ("lz4", 1), "balanced": ("zstd", 5), "size": ("zstd", 5)}
 _ZSTD_LEVEL = {"speed": 1, "balanced": 5, "size": 19}  # strings and embedded files
+# "balanced" also probes this cheaper level and writes with it where it stores within
+# _LEVEL_SLACK of the full level. On BRAVO int16 recordings zstd-3 (no shuffle) stored
+# 141.4 MB vs zstd-5's 141.3 MB at 1.7x the speed (56 vs 33 MB/s, all 1,623 chunks);
+# levels 1-2 were 25-30% bigger. Whether that holds is data-dependent, so it is probed.
+_FAST_LEVEL = {"balanced": 3}
+_LEVEL_SLACK = 1.01
 # ponytail: stop reading a sampled subject after opening this many recordings/arrays
 # -- enough to see every group at levels 1-2. A group seen only past it falls back a level.
 _ITEMS_PER_SUBJECT = 50
@@ -78,11 +84,12 @@ def _blosc(cname: Literal["lz4", "zstd"], level: int, shuffle: Shuffle, itemsize
 	return [BloscCodec(cname=cname, clevel=level, shuffle=shuffle, typesize=itemsize)]
 
 
-def _stored_bytes(sample: np.ndarray, chain: list[Any]) -> int:
-	array = zarr.create_array(MemoryStore(), shape=sample.shape, chunks=sample.shape or (1,),
-							  dtype=sample.dtype, compressors=chain)
-	array[...] = sample
-	return int(array.nbytes_stored())
+def _stored_bytes(sample: np.ndarray, cname: str, level: int, shuffle: Shuffle) -> int:
+	# the chunk's compressed size, encoded directly: a throwaway zarr array per probe
+	# cost ~25 event-loop round trips each and was half of a small dataset's ingest.
+	# zarr's BloscCodec wraps this same numcodecs Blosc on the little-endian bytes.
+	codec = Blosc(cname=cname, clevel=level, shuffle=_BLOSC_SHUFFLE[shuffle])
+	return len(codec.encode(np.ascontiguousarray(sample, dtype=sample.dtype.newbyteorder("<"))))
 
 
 def _unprobed(item_type: str, dtype: np.dtype) -> bool:
@@ -99,10 +106,23 @@ def probe(sample: np.ndarray, optimize: str = "balanced") -> tuple[list[Any], di
 	if sample.dtype.kind in "OSUT":
 		return [ZstdCodec(level=_ZSTD_LEVEL[optimize])], {}
 	cname, level = _PROBE[optimize]
-	sizes: dict[str, int] = {mode: _stored_bytes(sample, _blosc(cname, level, mode, sample.dtype.itemsize))
-							 for mode in _SHUFFLES}
-	cname, level = _WRITE[optimize]
-	return _blosc(cname, level, min(_SHUFFLES, key=lambda m: sizes[m]), sample.dtype.itemsize), sizes
+	sizes: dict[str, int] = {mode: _stored_bytes(sample, cname, level, mode) for mode in _SHUFFLES}
+	if optimize in _FAST_LEVEL:
+		sizes.update({f"{mode}@{_FAST_LEVEL[optimize]}": _stored_bytes(sample, cname, _FAST_LEVEL[optimize], mode)
+					  for mode in _SHUFFLES})
+	shuffle, level = _choose(sizes, optimize)
+	return _blosc(_WRITE[optimize][0], level, shuffle, sample.dtype.itemsize), sizes
+
+
+def _choose(sizes: dict[str, int], optimize: str) -> tuple[Shuffle, int]:
+	"""(shuffle, level) from probed sizes: the smallest shuffle mode at the probe level,
+	then the cheaper level if it stores within _LEVEL_SLACK of that."""
+	shuffle = min(_SHUFFLES, key=lambda m: sizes[m])
+	level = _WRITE[optimize][1]
+	fast = _FAST_LEVEL.get(optimize)
+	if fast is not None and f"{shuffle}@{fast}" in sizes and sizes[f"{shuffle}@{fast}"] <= _LEVEL_SLACK * sizes[shuffle]:
+		level = fast
+	return shuffle, level
 
 
 def group_keys(item_type: str, dtype: Any, chunks: tuple[int, ...]) -> list[str]:
@@ -123,6 +143,9 @@ class CodecPlan:
 		See :mod:`neurozarr.codecs`.
 	groups : dict
 		Plan key (see :func:`group_keys`) to the chosen shuffle mode.
+	levels : dict
+		Plan key to the compression level written with, when probing chose one
+		(``"balanced"`` may pick a cheaper level that stores about as small).
 	evidence : dict
 		Plan key to ``{"files": n, "bytes": {shuffle mode: stored bytes}}``.
 	"""
@@ -130,6 +153,7 @@ class CodecPlan:
 	optimize: str = "balanced"
 	probe_level: int = 2
 	groups: dict[str, Shuffle] = field(default_factory=dict)
+	levels: dict[str, int] = field(default_factory=dict)
 	evidence: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 	def compressors(self, item_type: str, dtype: Any, chunks: tuple[int, ...],
@@ -146,7 +170,7 @@ class CodecPlan:
 		cname, level = _WRITE[self.optimize]
 		for key in reversed(group_keys(item_type, dtype, chunks)[:min(self.probe_level, 3)]):
 			if key in self.groups:
-				return _blosc(cname, level, self.groups[key], dtype.itemsize)
+				return _blosc(cname, self.levels.get(key, level), self.groups[key], dtype.itemsize)
 		return "auto"
 
 	def as_dict(self) -> dict[str, Any]:
@@ -154,6 +178,7 @@ class CodecPlan:
 		cname, level = _WRITE[self.optimize]
 		return {"optimize": self.optimize, "probe_level": self.probe_level,
 				"compressor": {"blosc": cname, "clevel": level}, "shuffle": dict(self.groups),
+				"clevel": dict(self.levels),
 				"evidence": self.evidence}
 
 
@@ -220,7 +245,7 @@ class _Planner:
 	def plan(self) -> CodecPlan:
 		plan = CodecPlan(optimize=self.optimize, probe_level=self.level)
 		for key, sizes in self.totals.items():
-			plan.groups[key] = min(_SHUFFLES, key=lambda m: sizes[m])
+			plan.groups[key], plan.levels[key] = _choose(sizes, self.optimize)
 			plan.evidence[key] = {"files": self.files[key], "bytes": dict(sizes)}
 		return plan
 

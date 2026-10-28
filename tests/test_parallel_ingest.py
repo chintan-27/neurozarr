@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from neurozarr import Repo
+from neurozarr.items import Attrs
 from neurozarr.readers import BidsReader, ManifestReader, SmartReader
 
 # spawned workers import mne and icechunk from scratch, a few seconds each
@@ -91,3 +92,59 @@ def test_cli_parallel_smart_reader(tmp_path, tiny_bids):
 					 "--answers", str(tmp_path / "answers.json"), "-q"]) == 0
 	assert cli.main(["-C", store, "commit", "-m", "parallel"]) == 0
 	assert Repo.open(tmp_path / "store").subjects() == list(SUBJECTS)
+
+
+def test_a_workers_last_small_table_is_not_lost(tmp_path, tiny_bids):
+	# a subject's stream ends with a derivatives table small enough to be staged, not
+	# written; a worker must flush it before handing its fork back
+	beh = tiny_bids / "derivatives" / "pipe" / "sub-02" / "ses-1" / "beh"
+	beh.mkdir(parents=True)
+	(tiny_bids / "derivatives" / "pipe" / "dataset_description.json").write_text(json.dumps({"Name": "pipe"}))
+	(beh / "sub-02_ses-1_task-x_beh.tsv").write_text("a\tb\n1\t2\n")
+	trees = []
+	for workers in (1, 2):
+		repo = Repo.init(tmp_path / f"store{workers}")
+		repo.add(BidsReader(tiny_bids), workers=workers)
+		repo.commit("convert")
+		root = Repo.open(tmp_path / f"store{workers}").subject("sub-02").root()
+		trees.append(sorted(path for path, _ in root.members(max_depth=None)))
+	assert trees[0] == trees[1] and any(p.startswith("derivatives/pipe") for p in trees[1])
+
+
+@pytest.mark.parametrize("existing", ["skip", "replace"])
+def test_parallel_re_add_follows_the_existing_policy(tmp_path, tiny_bids, existing):
+	# workers see the committed store through their overlay, so a re-add is decided
+	# exactly as a serial one -- and a replace's old chunks are deleted, not left behind
+	target = tmp_path / "store"
+	repo = Repo.init(target)
+	repo.add(BidsReader(tiny_bids), workers=2)
+	repo.commit("first")
+	before, _ = _contents(target)
+	repo = Repo.open(target, mode="a")
+	repo.add(BidsReader(tiny_bids), workers=2, existing=existing)
+	repo.commit("again") if existing == "replace" else None
+	after, repo = _contents(target)
+	assert sorted(after) == sorted(before) and all(np.array_equal(after[p], before[p]) for p in before)
+	with pytest.raises(Exception, match="already exists"):
+		Repo.open(target, mode="a").add(BidsReader(tiny_bids), workers=2)
+
+
+def test_replay_keeps_every_workers_attrs_on_a_shared_group(store):
+	from neurozarr.util import OverlayStore
+	from neurozarr.writer import Writer
+	import icechunk
+	repo = icechunk.Repository.create(icechunk.in_memory_storage())
+	parent = Writer(repo.writable_session("main"))
+	parent._flush()
+	results = []
+	for name, attrs in (("a", {"x": 1, "both": "a"}), ("b", {"y": 2, "both": "b"})):
+		overlay = OverlayStore(parent.session.store)
+		worker = Writer(type("S", (), {"store": overlay})())
+		worker._require(("ses-1", "eeg", name))
+		worker._flush()
+		worker.add_attrs(Attrs(("ses-1",), attrs))
+		results.append((overlay.written(), overlay.deleted))
+	for written, deleted in results:
+		parent.replay(written, deleted)
+	assert dict(parent.root["ses-1"].attrs) == {"x": 1, "y": 2, "both": "b"}
+	assert sorted(parent.root["ses-1/eeg"].group_keys()) == ["a", "b"]

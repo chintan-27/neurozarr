@@ -504,7 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 	p = command("init", cmd_init, "create an empty store (default: the current directory)")
 	p.add_argument("path", nargs="?", help="a path or URI")
-	p.add_argument("--dtype", choices=["int16", "float16"], help="how to pack sample data")
+	p.add_argument("--dtype", choices=["int16", "float16", "float32", "float64"], help="how to pack sample data")
 
 	p = command("remote", cmd_remote, "manage named remotes (a URI plus its storage options)")
 	p.add_argument("action", nargs="?", choices=["add", "remove", "list"], default="list")
@@ -522,7 +522,7 @@ def build_parser() -> argparse.ArgumentParser:
 				   help="codec decisions per: 0 none (zarr default), 1 item type, 2 + stored dtype, "
 						"3 + chunk shape, 4 each array (default: 2)")
 	p.add_argument("--probe-files", type=int, metavar="N", help="arrays probed per group (default: 8)")
-	p.add_argument("--dtype", choices=["int16", "float16"], help="how to pack sample data")
+	p.add_argument("--dtype", choices=["int16", "float16", "float32", "float64"], help="how to pack sample data")
 	p.add_argument("-j", "--workers", type=int, metavar="N", help="stage N subjects in parallel")
 	p.add_argument("--existing", choices=[policy.value for policy in ExistingPolicy], default="error",
 				   help="when an item already exists (default: error)")

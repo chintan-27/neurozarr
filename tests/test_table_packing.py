@@ -5,9 +5,15 @@ off each column's own schema entry, so this is purely a storage-layout change.""
 
 import numpy as np
 import pandas as pd
+import pytest
 import zarr
 
-from neurozarr import Repo
+from neurozarr import Repo, util
+
+
+@pytest.fixture(autouse=True)
+def _arrays_not_inline(monkeypatch):
+	monkeypatch.setattr(util, "INLINE_TABLE_BYTES", 0)  # these tests are about the array layout
 
 
 def test_columns_sharing_dtype_and_nullability_are_packed_into_one_array(store):

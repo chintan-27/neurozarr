@@ -31,6 +31,16 @@ def test_int16_calibration_path_roundtrips(store, raw_calibrated):
 	assert np.array_equal(values, raw_calibrated.get_data())
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_float_options_store_physical_values_even_with_calibration(store, raw_calibrated, dtype):
+	repo = Repo.init(store, codec=CodecConfig(dtype=dtype))
+	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw_calibrated, task="Stream")
+	repo.commit(dtype)
+	rec = Repo.open(store).subject("sub-001").visit("ses-1").recording(task="Stream")
+	assert rec.array.dtype == np.dtype(dtype)
+	assert np.array_equal(rec.data()[0], raw_calibrated.get_data().astype(dtype))
+
+
 def _compressors(store):
 	rec = Repo(store).subject("sub-001").visit("ses-1").recording(task="Stream")
 	return rec, list(rec.array.compressors)

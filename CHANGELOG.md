@@ -6,8 +6,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `RecordingView.write(values, start=, picks=)`: correct samples in place, in physical
+  units; only the chunks they fall in are rewritten, so a version stores just those. A
+  value an int16 recording can't hold exactly is refused, not rounded.
+- `CodecConfig(dtype="float32")` and `dtype="float64"` (CLI `--dtype`): store physical
+  values at that precision instead of int16 + calibration; float64 is exactly what mne
+  returns.
+- Table schema 4: a table whose values fit in 32 KiB of JSON is stored inline in its
+  group's attrs -- one object instead of ~5 arrays, so one GET to read it remotely.
+  Larger tables keep the packed column arrays; schema 2 and 3 stores read unchanged.
+
+### Changed
+
+- `Repo.add(workers=N)` splits the work into recordings, not subjects: workers read and
+  encode, the parent writes everything. A dataset with one big subject (BRAVO: 666 of
+  909 recordings in sub-001) now gains from parallel ingest -- per subject it could not.
+  Readers can offer `units()` / `for_units()` / `without_units()`; others still split by
+  subject.
+- Conversion is ~2x faster single-process (BRAVO, 909 EDFs + ~1,450 sidecar tables:
+  96 s to ~39 s on a laptop, store unchanged at 142 MB, `verify` still matches):
+  inline small tables (96 to 58 s); codec probes counted with Blosc directly instead of
+  a throwaway zarr array; pandas encoding of tables vectorised (4.6 to 1.2 ms a table);
+  new groups, arrays and chunks written straight to the store from zarr's own metadata
+  classes, byte-identical to what zarr writes (~5 ms of zarr-python per node before);
+  existence checks answered from what the writer itself created; new nodes batched into
+  one icechunk call.
+- Opening an EDF+ file is ~2x faster (BRAVO: 9.8 to 4.3 ms a file; the whole conversion
+  37 to 30 s): mne converts the annotation channel to bytes one data record at a time;
+  neurozarr hands it the records as one row -- the same bytes, the same annotations.
+- The `balanced` codec plan also probes zstd level 3 and uses it where it stores within
+  1% of level 5: on BRAVO the same size (141.4 vs 141.3 MB) at 1.7x the speed.
+
 ### Fixed
 
+- Parallel ingest lost a subject's last small table (BRAVO: sub-003's derivatives).
 - The summary is spliced at commit instead of re-encoded: at 10,000 subjects a commit's
   summary update went from 2.9 s to 34 ms, and a full build from 23 s to 0.8 s (item
   paths no longer go through a Bloom filter; a path's subject is its first segment).

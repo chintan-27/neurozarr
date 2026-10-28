@@ -99,6 +99,9 @@ class BidsReader:
 		# workers each converting one subject still agree on it.
 		self.root_dir = Path(root_dir)
 		self._only = None if subjects is None else set(subjects)
+		# parallel ingest: None reads everything; a dict collects each unit's size instead
+		# of reading any unit; a tuple reads only those units (see units())
+		self._units: dict[Any, int] | tuple[Any, ...] | None = None
 		self.checksum = checksum
 		self.unclaimed = UnclaimedPolicy(unclaimed)
 		self.include_derivatives = include_derivatives
@@ -119,10 +122,41 @@ class BidsReader:
 		limited._only = set() if sub is None else {sub}
 		return limited
 
+	def units(self) -> list[tuple[Any, int]]:
+		"""Each recording with its own sidecars -- one set of entities in one datatype
+		folder -- as ``(unit, bytes on disk)``, so :meth:`Repo.add` can spread them over
+		processes: no two units write the same item."""
+		walker = copy.copy(self)
+		found: dict[Any, int] = {}
+		walker._units = found
+		for _ in walker.read():
+			pass
+		return list(found.items())
+
+	def for_units(self, units: list[Any]) -> "BidsReader":
+		"""This reader limited to some of :meth:`units`, and to nothing outside them."""
+		limited = copy.copy(self)
+		limited._units = tuple(units)
+		return limited
+
+	def without_units(self) -> "BidsReader":
+		"""This reader limited to what lies outside every unit: dataset, subject and
+		session metadata."""
+		limited = copy.copy(self)
+		limited._units = {}
+		return limited
+
 	def _wanted(self, sub: str) -> bool:
 		return self._only is None or sub in self._only
 
 	def read(self) -> Iterator[Item]:
+		if isinstance(self._units, tuple):
+			folders: dict[tuple[Any, ...], set[Any]] = {}
+			for prefix, sub, ses, datatype, folder, entities in self._units:
+				folders.setdefault((prefix, sub, ses, datatype, folder), set()).add(entities)
+			for (prefix, sub, ses, datatype, folder), wanted in folders.items():
+				yield from self._read_datatype_dir(sub, ses, datatype, Path(folder), prefix, wanted)
+			return
 		log_progress("Reading BIDS dataset", str(self.root_dir))
 		yield Attrs((), clean_nan(load_json(self.root_dir / "dataset_description.json")))
 
@@ -186,7 +220,7 @@ class BidsReader:
 		return attrs, fieldInfo
 
 	def _read_datatype_dir(self, sub: str, ses: str | None, datatype: str, dir_path: Path,
-						   prefix: tuple[str, ...] = ()) -> Iterator[Item]:
+						   prefix: tuple[str, ...] = (), wanted: set[Any] | None = None) -> Iterator[Item]:
 		groups: dict[tuple[tuple[tuple[str, str], ...], str], dict[str, Path]] = {}
 		for f in sorted(dir_path.iterdir()):
 			if not f.is_file():
@@ -202,6 +236,12 @@ class BidsReader:
 			groups[key][ext] = f
 
 		for (entityItems, suffix), exts in groups.items():
+			if isinstance(self._units, dict):
+				unit = (prefix, sub, ses, datatype, str(dir_path), entityItems)
+				self._units[unit] = self._units.get(unit, 0) + sum(f.stat().st_size for f in exts.values())
+				continue
+			if wanted is not None and entityItems not in wanted:
+				continue
 			item_entities = Entities(sub, ses, datatype, dict(entityItems))
 			dataExts = [e for e in exts if e != ".json"]
 			if not dataExts:
