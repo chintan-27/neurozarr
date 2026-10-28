@@ -112,6 +112,13 @@ def test_zero_padded_entities_survive_a_csv_manifest(tmp_path, tsv_file):
 	assert [i.entities.group_name() for i in items] == ["run-01", "run-02", "run-11"]
 
 
+def test_reads_a_tsv_manifest(tmp_path, tsv_file):
+	"""The CLI advertises .tsv manifests; read as comma-separated they came back as one column."""
+	manifest = tmp_path / "manifest.tsv"
+	pd.DataFrame([{"sub": "sub-001", "run": "01", "path": str(tsv_file)}]).to_csv(manifest, index=False, sep="\t")
+	assert list(ManifestReader(manifest).read())[0].entities.extra == {"run": "01"}
+
+
 def test_blank_cells_in_a_csv_manifest_are_still_missing(tmp_path, tsv_file):
 	manifest = tmp_path / "manifest.csv"
 	pd.DataFrame([

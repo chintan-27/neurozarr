@@ -118,7 +118,8 @@ class ManifestReader:
 		elif Path(manifest).suffix.lower() == ".json":
 			self.df = pd.read_json(manifest, dtype=False, convert_dates=False)
 		else:
-			self.df = pd.read_csv(manifest, dtype=str)
+			sep = "\t" if Path(manifest).suffix.lower() == ".tsv" else ","
+			self.df = pd.read_csv(manifest, dtype=str, sep=sep)
 		self.path_col, self.sub_col, self.ses_col = path_col, sub_col, ses_col
 		self.datatype_col, self.name_col, self.meta_col = datatype_col, name_col, meta_col
 		self.entity_cols = entity_cols
