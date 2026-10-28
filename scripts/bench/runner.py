@@ -18,6 +18,11 @@ that both finished without raising. `t_open` (store construction cost) is
 recorded once per (arm, cache-state) rather than per workload, since it's
 what W2 and W4 would otherwise silently fold into their own numbers.
 
+Each arm is measured on the same seeded sample of recordings (--recordings, the
+largest always included): one target per dataset let a single file's layout stand
+for the whole dataset. Recording ids agree across arms, so the same seed picks the
+same recordings in every format.
+
 Statistical protocol (see the plan): n=10 measured reps per condition after 2
 discarded warm-up reps for warm-cache runs; n=5 for --time-convert. Report
 median+IQR+min, never mean -- I/O latency is right-skewed with real outliers.
@@ -44,6 +49,7 @@ from typing import Any, Iterator
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from bench import fidelity  # noqa: E402
 from bench.arms import ARMS, ArmStore, RecInfo  # noqa: E402
 
 WORKLOADS = ("W1", "W2", "W3", "W4", "W5")
@@ -241,6 +247,15 @@ def _pick_target(recs: list[RecInfo]) -> RecInfo:
 	return max(real, key=lambda r: r.n_samples)
 
 
+def pick_targets(recs: list[RecInfo], n: int, seed: int) -> list[RecInfo]:
+	"""The largest recording plus a seeded random sample of the rest, in id order."""
+	import random
+
+	largest = _pick_target(recs)
+	rest = sorted((r for r in recs if r.n_samples > 1 and r.sfreq > 0 and r.id != largest.id), key=lambda r: r.id)
+	return [largest] + random.Random(seed).sample(rest, min(n - 1, len(rest)))
+
+
 def _physical(values: Any) -> np.ndarray:
 	# Every arm hands back float64 physical units -- what MNE's get_data() returns, and
 	# what neurozarr's data() returns after unpacking int16. float32 arms (HDF5, NWB)
@@ -312,7 +327,9 @@ def run_workload(workload: str, store: ArmStore, target: RecInfo, rep: int = 0) 
 
 def run(source: Path, arm_names: list[str], reps: int, warmup: int, cache: str,
 		out: Path, dataset_name: str, scratch: Path, checksum_source: bool,
-		arms: dict[str, Any] | None = None, reuse_existing: bool = False) -> None:
+		arms: dict[str, Any] | None = None, reuse_existing: bool = False,
+		n_recordings: int = 20, seed: int = 0, convert_only: bool = False,
+		fidelity_sample: int | None = None) -> None:
 	"""arms defaults to the registered ARMS by name; pass a custom dict (e.g.
 	several Hdf5Arm instances at different chunk shapes, under names that
 	aren't in ARMS) for a one-off sweep without touching the arm registry.
@@ -324,6 +341,36 @@ def run(source: Path, arm_names: list[str], reps: int, warmup: int, cache: str,
 	arms = arms if arms is not None else ARMS
 	env = environment_record(scratch)
 	fingerprint = dataset_fingerprint(source) if checksum_source else {"_skipped": True}  # type: ignore[dict-item]
+	source_bytes, source_files = store_size(source)
+	# fidelity is checked for every arm in every run: the reference is the source as mne
+	# reads it (the raw arm), plus every table and metadata file the reader yields
+	reference_dest = scratch / "raw"
+	if not reference_dest.exists():
+		ARMS["raw"].convert(source, reference_dest)
+	reference = ARMS["raw"].open(reference_dest)
+	expected = fidelity.source_content(source)
+	reference_reads: dict[tuple[str, str, int], Any] = {}
+
+	def check_fidelity(arm_name: str, arm: Any, dest: Path, converted: bool) -> dict[str, Any]:
+		"""Once per store: checked after converting it, and the verdict kept beside it, so
+		an experiment reusing the store reuses the verdict too."""
+		if arm_name == "raw":
+			return {"fidelity_ok": True, "fidelity_note": "the source itself"}
+		verdict = dest.parent / f"{dest.name}.fidelity.json"
+		if not converted and verdict.exists():
+			return {**json.loads(verdict.read_text()), "fidelity_reused": True}
+		opened = arm.open(dest)
+		try:
+			result, seconds = _time(lambda: fidelity.check(arm_name, opened, dest, source,
+															 getattr(arm, "content", "full"), reference, expected,
+															 sample=fidelity_sample, seed=seed))
+		finally:
+			opened.close()
+		if not result["fidelity_ok"]:
+			print(f"[{arm_name}] FIDELITY FAILED: {result['fidelity_problems'][:5]}", file=sys.stderr)
+		result = {**result, "fidelity_s": seconds, "fidelity_checked_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+		verdict.write_text(json.dumps(result))
+		return {**result, "fidelity_reused": False}
 
 	with out.open("a") as sink:
 		for arm_name in arm_names:
@@ -336,25 +383,43 @@ def run(source: Path, arm_names: list[str], reps: int, warmup: int, cache: str,
 			load_before = os.getloadavg()
 			if reuse_existing and dest.exists():
 				print(f"[{arm_name}] reusing existing store at {dest}, skipping convert", file=sys.stderr)
-				convert_s = 0.0
+				convert_s = None  # not measured here; conversion has its own experiment
+				converted = False
 			else:
 				print(f"[{arm_name}] converting...", file=sys.stderr)
 				_, convert_s = _time(lambda: arm.convert(source, dest))
+				converted = True
 			store_bytes, store_files = store_size(dest)
+			print(f"[{arm_name}] checking fidelity...", file=sys.stderr)
+			fidelity_row = check_fidelity(arm_name, arm, dest, converted)
+			if convert_only:
+				# every arm converts in one process here (neurozarr's own -j ingest is
+				# timed separately, as a feature the baselines' libraries don't offer)
+				sink.write(json.dumps({"timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+										"dataset": dataset_name, "arm": arm_name, "workload": "_convert", "rep": 0,
+										"elapsed_s": convert_s, "store_bytes_apparent": store_bytes,
+										"store_file_count": store_files, "source_bytes_apparent": source_bytes,
+										"source_file_count": source_files, "peak_rss_kb_cumulative": _peak_rss_kb(),
+										"loadavg_before_convert": list(load_before), **fidelity_row, **env}) + "\n")
+				sink.flush()
+				continue
 
 			print(f"[{arm_name}] opening...", file=sys.stderr)
-			(store, target), open_s = _time(lambda: _open_and_pick(arm, dest))
+			store, open_s = _time(lambda: arm.open(dest))
+			targets = pick_targets(store.recordings(), n_recordings, seed)
 
 			base_row = {
+				**fidelity_row,
 				"timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
 				"dataset": dataset_name,
 				"dataset_fingerprint_truncated": fingerprint.get("_truncated", fingerprint.get("_skipped")),
 				"arm": arm_name,
 				"cache_state": cache,
-				"target_recording": target.id,
-				"target_shape": [target.n_channels, target.n_samples],
-				"target_chunk_shape": list(target.chunk_shape) if target.chunk_shape else None,
 				"convert_s": convert_s,
+				"source_bytes_apparent": source_bytes,
+				"source_file_count": source_files,
+				"sample_seed": seed,
+				"sample_ids": [t.id for t in targets],
 				"open_s": open_s,
 				"store_bytes_apparent": store_bytes,
 				"store_file_count": store_files,
@@ -367,35 +432,43 @@ def run(source: Path, arm_names: list[str], reps: int, warmup: int, cache: str,
 			sink.write(json.dumps({**base_row, "workload": "_open", "rep": 0,
 									"elapsed_s": open_s, "checksum": None}) + "\n")
 
-			for workload in WORKLOADS:
-				n_warmup = warmup if cache == "warm" else 0
-				for rep in range(-n_warmup, reps):
-					if cache in ("fresh", "cold") and workload != "W4":
-						store.forget(target.id)  # a first read: nothing decoded kept in memory
-					if cache == "cold":
-						# and nothing in the OS page cache either. Re-opening the whole store
-						# instead (as before) re-scanned every source file per rep for raw
-						_apply_cold_cache(dest)
-					try:
-						_, elapsed, checksum = run_workload(workload, store, target, rep)
-					except Exception as exc:
-						print(f"[{arm_name}] {workload} rep {rep} FAILED: {exc!r}", file=sys.stderr)
-						continue
-					if rep < 0:
-						continue  # discarded warm-up
-					row = {**base_row, "workload": workload, "rep": rep, "elapsed_s": elapsed,
-						   "checksum": checksum, "peak_rss_kb_cumulative": _peak_rss_kb()}
-					sink.write(json.dumps(row) + "\n")
-				sink.flush()
+			for target in targets:
+				target_row = {**base_row, "target_recording": target.id,
+							  "target_shape": [target.n_channels, target.n_samples],
+							  "target_chunk_shape": list(target.chunk_shape) if target.chunk_shape else None}
+				for workload in WORKLOADS:
+					n_warmup = warmup if cache == "warm" else 0
+					for rep in range(-n_warmup, reps):
+						if cache in ("fresh", "cold") and workload != "W4":
+							store.forget(target.id)  # a first read: nothing decoded kept in memory
+						if cache == "cold":
+							# and nothing in the OS page cache either. Re-opening the whole store
+							# instead (as before) re-scanned every source file per rep for raw
+							_apply_cold_cache(dest)
+						try:
+							result, elapsed, checksum = run_workload(workload, store, target, rep)
+						except Exception as exc:
+							print(f"[{arm_name}] {target.id} {workload} rep {rep} FAILED: {exc!r}", file=sys.stderr)
+							continue
+						if rep < 0:
+							continue  # discarded warm-up
+						# the same read of the source, outside the timed region
+						ref_key = (target.id, workload, rep if workload == "W2" else 0)
+						if ref_key not in reference_reads:
+							reference_reads[ref_key] = run_workload(workload, reference, target, rep)[0]
+						matches, read_err = fidelity.read_matches(workload, result, reference_reads[ref_key],
+																  fidelity.stored_dtype(arm_name))
+						if not matches:
+							print(f"[{arm_name}] {target.id} {workload} rep {rep}: READ DIFFERS FROM SOURCE "
+								  f"(rel err {read_err})", file=sys.stderr)
+						row = {**target_row, "workload": workload, "rep": rep, "elapsed_s": elapsed,
+							   "checksum": checksum, "read_matches_source": matches, "read_rel_err": read_err,
+							   "peak_rss_kb_cumulative": _peak_rss_kb()}
+						sink.write(json.dumps(row) + "\n")
+					sink.flush()
 
 			store.close()
 			print(f"[{arm_name}] done", file=sys.stderr)
-
-
-def _open_and_pick(arm: Any, dest: Path) -> tuple[ArmStore, RecInfo]:
-	store = arm.open(dest)
-	target = _pick_target(store.recordings())
-	return store, target
 
 
 def _apply_cold_cache(dest: Path) -> None:
@@ -477,7 +550,13 @@ def main() -> None:
 	parser.add_argument("--summarize", action="store_true", help="summarize an existing results .jsonl instead of running")
 	parser.add_argument("--compare", default=None, help="with --summarize: two arm names, comma-separated, for a bootstrap ratio CI")
 	parser.add_argument("--arms", default=",".join(ARMS), help="comma-separated arm names")
-	parser.add_argument("--reps", type=int, default=DEFAULT_REPS)
+	parser.add_argument("--reps", type=int, default=DEFAULT_REPS, help="reps per recording")
+	parser.add_argument("--recordings", type=int, default=20, help="recordings sampled per dataset (largest + seeded random)")
+	parser.add_argument("--seed", type=int, default=0)
+	parser.add_argument("--fidelity-sample", type=int, default=None, metavar="N",
+						help="check the samples of N seeded recordings instead of all (tables and metadata always in full)")
+	parser.add_argument("--convert-only", action="store_true", help="time each arm's conversion and store size; no reads")
+	parser.add_argument("--allow-dirty", action="store_true", help="run on uncommitted code (results are then not reportable)")
 	parser.add_argument("--warmup", type=int, default=WARMUP_REPS)
 	# warm: repeated reads of one open recording (a format may answer from its own memory);
 	# fresh: before every read the format drops what it holds for the recording, files stay
@@ -507,9 +586,13 @@ def main() -> None:
 	if unknown:
 		parser.error(f"unknown arm(s) {unknown}; choose from {sorted(ARMS)}")
 
+	if _git_info()["git_dirty"] and not args.allow_dirty:
+		parser.error("uncommitted changes: commit (and tag) first so results map to one code version, or pass --allow-dirty")
+
 	run(source, arm_names, args.reps, args.warmup, args.cache, out,
 		args.name or source.name, scratch, not args.no_checksum_source,
-		reuse_existing=args.reuse_existing)
+		reuse_existing=args.reuse_existing, n_recordings=args.recordings, seed=args.seed,
+		convert_only=args.convert_only, fidelity_sample=args.fidelity_sample)
 
 
 if __name__ == "__main__":

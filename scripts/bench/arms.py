@@ -17,6 +17,7 @@ layout.
 
 from __future__ import annotations
 
+import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -159,11 +160,35 @@ class RawStore:
 # neurozarr: the system under test.
 # ---------------------------------------------------------------------------
 
+class _SignalsOnly:
+	"""A reader passing through only its recordings (each with its own sidecar
+	metadata; the writer adds its annotations) -- the "signals" content level."""
+
+	def __init__(self, reader: Any):
+		self._reader = reader
+
+	def read(self) -> Iterator[Any]:
+		from neurozarr.items import Recording
+		return (item for item in self._reader.read() if isinstance(item, Recording))
+
+	def codec_plan(self, layout: Any = None) -> Any:
+		return self._reader.codec_plan(layout)
+
+	def subjects(self) -> list[str]:
+		return self._reader.subjects()
+
+	def for_subject(self, sub: str | None) -> "_SignalsOnly":
+		return _SignalsOnly(self._reader.for_subject(sub))
+
+
 class NeurozarrArm:
 	name = "neurozarr"
 
+	def __init__(self, dtype: str = "int16", content: str = "full", workers: int = 1):
+		self.dtype, self.content, self.workers = dtype, _check_content(content), workers
+
 	def convert(self, source: Path, dest: Path) -> None:
-		from neurozarr import Repo
+		from neurozarr import CodecConfig, Repo
 		from neurozarr.readers import reader_for
 
 		# A benchmark run always wants a fresh store, never a resume/append --
@@ -171,8 +196,9 @@ class NeurozarrArm:
 		# mid-conversion (e.g. by a timeout) can leave behind.
 		if dest.exists():
 			shutil.rmtree(dest)
-		repo = Repo.init(dest)
-		repo.add(reader_for(source))
+		repo = Repo.init(dest, codec=CodecConfig(dtype=self.dtype))
+		reader = reader_for(source)
+		repo.add(reader if self.content == "full" else _SignalsOnly(reader), workers=self.workers)
 		repo.commit("bench")
 
 	def open(self, dest: Path) -> "NeurozarrStore":
@@ -272,10 +298,13 @@ class _FakeSession:
 class PlainZarrArm:
 	name = "plain_zarr"
 
+	def __init__(self, dtype: str = "int16", content: str = "full"):
+		self.dtype, self.content = dtype, _check_content(content)
+
 	def convert(self, source: Path, dest: Path) -> None:
 		import zarr
 		from neurozarr import CodecConfig, Writer
-		from neurozarr.items import Recording, Table
+		from neurozarr.items import Attrs, Recording, Table
 		from neurozarr.readers import reader_for
 
 		dest = Path(dest)
@@ -285,20 +314,35 @@ class PlainZarrArm:
 		if dest.exists():
 			shutil.rmtree(dest)
 		dest.mkdir(parents=True, exist_ok=True)
-		codec = CodecConfig()
+		codec = CodecConfig(dtype=self.dtype)
+		reader = reader_for(source)
+		plan = reader.codec_plan(codec)  # the same codecs neurozarr picks: this arm isolates icechunk
 		writers: dict[str, Writer] = {}
-		for item in reader_for(source).read():
+
+		def writer_for(name: str) -> Writer:
+			if name not in writers:
+				store = zarr.storage.LocalStore(str(dest / name))
+				writers[name] = Writer(_FakeSession(store), codec=codec)  # type: ignore[arg-type]
+				writers[name].plan = plan
+			return writers[name]
+
+		for item in reader.read():
+			if isinstance(item, Attrs):
+				if self.content == "full":  # routed as Repo does: to its subject, else dataset-wide
+					sub = next((part for part in item.path if part.startswith("sub-")), None)
+					writer_for(sub or "_dataset").add_attrs(Attrs(tuple(p for p in item.path if p != sub), item.attrs))
+				continue
+			if isinstance(item, Table) and self.content != "full":
+				continue
 			if not isinstance(item, (Recording, Table)):
 				continue
-			sub_id = item.entities.sub
-			if sub_id not in writers:
-				store = zarr.storage.LocalStore(str(dest / sub_id))
-				writers[sub_id] = Writer(_FakeSession(store), codec=codec)  # type: ignore[arg-type]
-			writer = writers[sub_id]
+			writer = writer_for(item.entities.sub)
 			if isinstance(item, Recording):
 				writer.add_recording(item)
 			else:
 				writer.add_table(item)
+		for writer in writers.values():
+			writer._flush()  # no commit here to do it: write the nodes still batched
 
 	def open(self, dest: Path) -> "PlainZarrStore":
 		return PlainZarrStore(dest)
@@ -367,6 +411,67 @@ class PlainZarrStore:
 # doesn't add them or claim MATLAB can load its output.
 # ---------------------------------------------------------------------------
 
+def _int16_calibration(raw: Any) -> "tuple[np.ndarray, np.ndarray] | None":
+	"""Per-channel (scale, offset) such that physical = code * scale + offset, from the
+	EDF-family reader's own calibration -- the same source neurozarr's writer packs
+	int16 from. None when the reader doesn't provide it (then every arm stays float32)."""
+	extras = getattr(raw, "_raw_extras", None)
+	if not extras or "cal" not in extras[0]:
+		return None
+	units = np.array(extras[0]["units"])
+	scale, offset = np.array(extras[0]["cal"]) * units, np.array(extras[0]["offsets"]) * units
+	if scale.shape != (len(raw.ch_names),) or offset.shape != scale.shape or not np.all(scale != 0):
+		return None
+	return scale, offset
+
+
+def _encode_int16(physical: np.ndarray, scale: np.ndarray, offset: np.ndarray) -> np.ndarray:
+	"""Channel-major physical values -> int16 codes."""
+	return np.clip(np.round((physical - offset[:, None]) / scale[:, None]), -32768, 32767).astype("int16")
+
+
+def _check_content(content: str) -> str:
+	"""signals: recordings with their own sidecar metadata and annotations; full: also
+	every sidecar table and metadata file -- what neurozarr stores by default."""
+	if content not in ("signals", "full"):
+		raise ValueError(f"content must be 'signals' or 'full', got {content!r}")
+	return content
+
+
+def _annotations(raw: Any) -> "Any | None":
+	import pandas as pd
+	annotations = getattr(raw, "annotations", None)
+	if not annotations or len(annotations) == 0:
+		return None
+	return pd.DataFrame({"onset": annotations.onset, "duration": annotations.duration,
+						 "trial_type": [str(d) for d in annotations.description]})
+
+
+def _h5_table(parent: Any, name: str, df: Any, meta: dict[str, Any]) -> None:
+	"""A table the way an HDF5 user stores one fastest: one compound dataset (a record
+	array, as MATLAB tables and pandas' fixed format do) -- numbers as they are, missing
+	as NaN; text as UTF-8, missing as "". Column names and sidecar metadata as attributes.
+	Measured 2.4 ms per BRAVO table, against 4.1 ms for one dataset per column."""
+	import pandas as pd
+	missing = df.isna().to_numpy().reshape(len(df), len(df.columns))
+	fields, columns = [], []
+	for i, (_, series) in enumerate(df.items()):
+		if pd.api.types.is_numeric_dtype(series.dtype):
+			values = series.to_numpy(dtype="float64" if missing[:, i].any() else None, na_value=np.nan)
+		else:
+			values = np.char.encode(series.to_numpy(dtype=object, na_value="").astype(str), "utf-8")
+			if values.dtype.itemsize == 0:
+				values = values.astype("S1")
+		fields.append((f"c{i}", values.dtype))
+		columns.append(values)
+	records = np.empty(len(df), dtype=fields)
+	for (field, _), values in zip(fields, columns):
+		records[field] = values
+	dataset = parent.create_dataset(name, data=records)
+	dataset.attrs["columns"] = json.dumps([str(c) for c in df.columns])
+	dataset.attrs["meta"] = json.dumps(meta)
+
+
 class Hdf5Arm:
 	"""chunk_target_bytes/max_chunk_samples let a fairness sweep try HDF5 at
 	several chunk shapes instead of judging it on one arbitrary default --
@@ -377,39 +482,38 @@ class Hdf5Arm:
 	name = "hdf5_mat73"
 
 	def __init__(self, chunk_target_bytes: int = 8 * 1024 * 1024, max_chunk_samples: int = 65536,
-				 packed: bool = False):
+				 packed: bool = False, content: str = "signals", dtype: str | None = None):
 		self.chunk_target_bytes = chunk_target_bytes
 		self.max_chunk_samples = max_chunk_samples
-		self.packed = packed
+		self.dtype = dtype or ("int16" if packed else "float32")
+		self.packed = self.dtype == "int16"
+		self.content = _check_content(content)
 
 	def convert(self, source: Path, dest: Path) -> None:
 		import h5py
 		from neurozarr import util
-		from neurozarr.items import Recording
+		from neurozarr.items import Attrs, Recording, Table
 		from neurozarr.readers import reader_for
 
 		dest = Path(dest)
 		dest.mkdir(parents=True, exist_ok=True)
 		with h5py.File(dest / "store.h5", "w") as f:
 			for item in reader_for(source).read():
+				if self.content == "full" and isinstance(item, Table):
+					_h5_table(f.require_group("/".join((*item.prefix, *item.entities.path()))), item.name, item.df, item.meta)
+					continue
+				if self.content == "full" and isinstance(item, Attrs):
+					f.require_group("/".join(item.path) or "/").attrs["meta"] = json.dumps(item.attrs)
+					continue
 				if not isinstance(item, Recording):
 					continue
 				rec_id = _rec_id(item.entities)
 				shape = (len(item.raw.ch_names), int(item.raw.n_times))
 
-				scale = offset = None
-				dtype = np.dtype("float32")
-				if self.packed:
-					extras = getattr(item.raw, "_raw_extras", None)
-					if extras and "cal" in extras[0]:
-						cal = np.array(extras[0]["cal"])
-						units = np.array(extras[0]["units"])
-						offsets = np.array(extras[0]["offsets"])
-						scale, offset = cal * units, offsets * units
-						if scale.shape == (shape[0],) and offset.shape == scale.shape and np.all(scale != 0):
-							dtype = np.dtype("int16")
-						else:
-							scale = offset = None  # fall back to float32, same as neurozarr's own writer would
+				cal = _int16_calibration(item.raw) if self.packed else None
+				scale, offset = cal if cal is not None else (None, None)
+				# int16 where the source is calibrated; else lossless float32, as neurozarr does
+				dtype = np.dtype("int16" if cal is not None else ("float32" if self.packed else self.dtype))
 
 				chunks = util.chunk_shape(shape, dtype.itemsize, self.chunk_target_bytes, self.max_chunk_samples)
 				grp = f.require_group(rec_id)
@@ -424,12 +528,17 @@ class Hdf5Arm:
 					stop = min(shape[-1], start + chunks[-1])
 					physical = item.raw.get_data(start=start, stop=stop)
 					if scale is not None:
-						encoded = np.round((physical - offset[:, None]) / scale[:, None])
-						ds[:, start:stop] = np.clip(encoded, -32768, 32767).astype("int16")
+						ds[:, start:stop] = _encode_int16(physical, scale, offset)
 					else:
-						ds[:, start:stop] = physical.astype("float32")
+						ds[:, start:stop] = physical.astype(dtype)
 				ds.attrs["sfreq"] = float(item.raw.info["sfreq"])
 				ds.attrs["ch_names"] = list(item.raw.ch_names)
+				# what neurozarr keeps with every recording too: its sidecar metadata and the
+				# file's own annotations (as an events table), so "signals" is equal content
+				ds.attrs["meta"] = json.dumps(item.meta)
+				events = _annotations(item.raw)
+				if events is not None:
+					_h5_table(grp, "annotations", events, {"source": "mne.Raw.annotations"})
 				if scale is not None:
 					ds.attrs["data_scale"] = scale.tolist()
 					ds.attrs["data_offset"] = offset.tolist()
@@ -535,7 +644,8 @@ class _RawChunkIterator:
 	round-trip-verified (see demo_nwb_streaming_check.py) before being
 	trusted against a real multi-hour conversion."""
 
-	def __new__(cls, raw: Any, **kwargs: Any) -> Any:
+	def __new__(cls, raw: Any, cal: "tuple[np.ndarray, np.ndarray] | None" = None, float_dtype: str = "float32",
+				**kwargs: Any) -> Any:
 		from hdmf.data_utils import GenericDataChunkIterator
 
 		class _Impl(GenericDataChunkIterator):
@@ -547,11 +657,12 @@ class _RawChunkIterator:
 				time_sel, chan_sel = selection
 				start = time_sel.start or 0
 				stop = time_sel.stop if time_sel.stop is not None else int(self._raw.n_times)
-				data = self._raw.get_data(start=start, stop=stop).T.astype("float32")
-				return data[:, chan_sel]
+				physical = self._raw.get_data(start=start, stop=stop)
+				data = _encode_int16(physical, *cal) if cal is not None else physical.astype(float_dtype)
+				return data.T[:, chan_sel]
 
 			def _get_dtype(self) -> np.dtype:
-				return np.dtype("float32")
+				return np.dtype("int16" if cal is not None else float_dtype)
 
 			def _get_maxshape(self) -> tuple[int, int]:
 				return (int(self._raw.n_times), len(self._raw.ch_names))
@@ -559,7 +670,8 @@ class _RawChunkIterator:
 		return _Impl(raw, **kwargs)
 
 
-def _build_nwb_files(source: Path, backend: str) -> Iterator[tuple[tuple[str, str], Any]]:
+def _build_nwb_files(source: Path, backend: str, dtype: str = "float32", content: str = "signals",
+					 dataset_meta: dict[str, Any] | None = None) -> Iterator[tuple[tuple[str, str], Any]]:
 	"""Yields one (key, NWBFile) per (subject, session) as soon as that
 	session's items are exhausted, instead of returning a dict of every
 	session in the dataset at once -- holding all of them (each session's own
@@ -582,7 +694,18 @@ def _build_nwb_files(source: Path, backend: str) -> Iterator[tuple[tuple[str, st
 	hdmf-zarr's writer gets hold of it, which a chunked iterator doesn't
 	("'_Impl' object is not subscriptable", hit by actually trying this
 	against real data rather than assuming the HDF5 path's success implied
-	the Zarr path would behave the same way)."""
+	the Zarr path would behave the same way).
+
+	dtype="int16" stores int16 codes the way NeuroConv does: ElectricalSeries
+	`channel_conversion` carries the per-channel gain and `offset` the shift. NWB has
+	one offset per series, so a series whose channels' offsets differ stays float32.
+
+	Every series keeps its sidecar JSON (in scratch) and its file's annotations (a
+	TimeIntervals table), as neurozarr does. content="full" adds every sidecar table
+	(DynamicTable, "sidecars" module) and metadata file: session/subject JSON in the
+	scratch of that session's file(s); dataset-wide JSON in ``dataset_meta``, which the
+	arm writes beside the files (where DANDI keeps dataset metadata); anything arriving
+	after its file is done goes there too, keyed by path, so nothing is dropped."""
 	from datetime import datetime, timezone
 
 	from pynwb import NWBFile
@@ -600,23 +723,69 @@ def _build_nwb_files(source: Path, backend: str) -> Iterator[tuple[tuple[str, st
 	from neurozarr.items import Recording
 	from neurozarr.readers import reader_for
 
+	from neurozarr.items import Attrs, Table
+
 	open_key: tuple[str, str] | None = None
 	nwbfile: Any = None
 	rows: dict[str, int] = {}
+	scratch: dict[str, dict[str, Any]] = {}  # this file's metadata, by path, merged
+	subject_meta: dict[str, dict[str, dict[str, Any]]] = {}
+	pending: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+	done: set[tuple[str, str]] = set()
+	dataset_meta = dataset_meta if dataset_meta is not None else {}
+
+	def finish() -> Any:
+		for path, meta in scratch.items():
+			nwbfile.add_scratch(json.dumps(meta), name=path, description="BIDS metadata")
+		return nwbfile
 
 	for item in reader_for(source).read():
-		if not isinstance(item, Recording):
+		if isinstance(item, Attrs):
+			if content != "full":
+				continue
+			path = "__".join(item.path) or "dataset"
+			sub = next((part for part in item.path if part.startswith("sub-")), None)
+			ses = next((part for part in item.path if part.startswith("ses-")), None)
+			if sub is None:
+				dataset_meta.setdefault(path, {}).update(item.attrs)
+			elif ses is None:  # subject-level: into each of its session files
+				subject_meta.setdefault(sub, {}).setdefault(path, {}).update(item.attrs)
+				if open_key is not None and open_key[0] == sub:
+					scratch.setdefault(path, {}).update(item.attrs)
+			else:
+				key = (sub, ses or "ses-none")
+				if key == open_key:
+					scratch.setdefault(path, {}).update(item.attrs)
+				elif key in done:
+					dataset_meta.setdefault(path, {}).update(item.attrs)
+				else:
+					pending.setdefault(key, {}).setdefault(path, {}).update(item.attrs)
+			continue
+		if isinstance(item, Table) and content != "full":
+			continue
+		if not isinstance(item, (Recording, Table)):
 			continue
 		key = _nwb_group_key(item.entities)
 		if key != open_key:
 			if open_key is not None:
-				yield open_key, nwbfile
+				yield open_key, finish()
+				done.add(open_key)
 			nwbfile = NWBFile(session_description=f"{key[0]} {key[1]}", identifier="/".join(key),
 							   session_start_time=datetime.now(timezone.utc))
 			device = nwbfile.create_device(name="device")
 			nwbfile.create_electrode_group(name="group", description="all channels", location="unknown", device=device)
 			rows = {}
+			scratch = {path: dict(meta) for path, meta in subject_meta.get(key[0], {}).items()}
+			for path, meta in pending.pop(key, {}).items():
+				scratch.setdefault(path, {}).update(meta)
 			open_key = key
+
+		within = "__".join(item.entities.path()[2:])  # inside this session's file
+		if isinstance(item, Table):
+			module = nwbfile.processing.get("sidecars") or nwbfile.create_processing_module("sidecars", "BIDS sidecar tables")
+			module.add(_nwb_table(f"{within}__{item.name}" if within else item.name, item.df, item.meta,
+								  "/".join((*item.prefix, *item.entities.path(), item.name))))
+			continue
 
 		region_indices = []
 		for ch_name in item.raw.ch_names:
@@ -629,31 +798,83 @@ def _build_nwb_files(source: Path, backend: str) -> Iterator[tuple[tuple[str, st
 
 		# NWB wants (n_samples, n_channels); chunk shape computed the same way
 		# as every other arm's, then reversed to match that axis order.
+		cal = _int16_calibration(item.raw) if dtype == "int16" else None
+		if cal is not None and not np.all(cal[1] == cal[1][0]):
+			cal = None
+		float_dtype = "float32" if dtype == "int16" else dtype
 		shape = (len(item.raw.ch_names), int(item.raw.n_times))
-		chunks = util.chunk_shape(shape, np.dtype("float32").itemsize, 8 * 1024 * 1024, 65536)[::-1]
-		iterator = _RawChunkIterator(item.raw, chunk_shape=chunks)
+		itemsize = 2 if cal is not None else np.dtype(float_dtype).itemsize
+		chunks = util.chunk_shape(shape, itemsize, 8 * 1024 * 1024, 65536)[::-1]
+		iterator = _RawChunkIterator(item.raw, cal=cal, float_dtype=float_dtype, chunk_shape=chunks)
 		wrapped = DataIOCls(data=iterator, **dataio_kwargs)
 		name = item.entities.group_name() or "data"
+		scaling: dict[str, Any] = {} if cal is None else {"channel_conversion": cal[0].tolist(), "offset": float(cal[1][0])}
 		es = ElectricalSeries(name=name, data=wrapped, electrodes=region,
-							   rate=float(item.raw.info["sfreq"]), starting_time=0.0)
+							   rate=float(item.raw.info["sfreq"]), starting_time=0.0, **scaling)
 		nwbfile.add_acquisition(es)
+		scratch.setdefault(f"{name}__meta", {}).update(item.meta)
+		events = _annotations(item.raw)
+		if events is not None:
+			nwbfile.add_time_intervals(_nwb_intervals(f"{name}__annotations", events))
 
 	if open_key is not None:
-		yield open_key, nwbfile
+		yield open_key, finish()
+	for meta in pending.values():  # for a session no file was made for: kept, dataset-wide
+		for path, value in meta.items():
+			dataset_meta.setdefault(path, {}).update(value)
+
+
+def _nwb_frame(df: Any) -> Any:
+	"""A DataFrame hdmf can write: text (any string or categorical dtype) as plain str
+	with missing as "", numbers as numpy with missing as NaN."""
+	import pandas as pd
+	out = {}
+	for i, (_, series) in enumerate(df.items()):
+		if pd.api.types.is_numeric_dtype(series.dtype):
+			out[f"c{i}"] = series.to_numpy(dtype="float64" if series.isna().any() else None, na_value=np.nan)
+		else:
+			out[f"c{i}"] = series.to_numpy(dtype=object, na_value="").astype(str)
+	return pd.DataFrame(out, index=pd.RangeIndex(len(df)))
+
+
+def _nwb_table(name: str, df: Any, meta: dict[str, Any], key: str) -> Any:
+	from hdmf.common import DynamicTable
+	description = {"key": key, "columns": [str(c) for c in df.columns], "meta": meta}
+	return DynamicTable.from_dataframe(_nwb_frame(df), name=name, table_description=json.dumps(description))
+
+
+def _nwb_intervals(name: str, events: Any) -> Any:
+	import pandas as pd
+	from pynwb.epoch import TimeIntervals
+	frame = pd.DataFrame({"start_time": events["onset"].to_numpy(float),
+						  "stop_time": (events["onset"] + events["duration"]).to_numpy(float),
+						  "trial_type": events["trial_type"].astype(str).to_numpy()})
+	return TimeIntervals.from_dataframe(frame, name=name, table_description="mne.Raw.annotations")
 
 
 class NwbHdf5Arm:
 	name = "nwb_hdf5"
 
+	def __init__(self, packed: bool = False, content: str = "signals", dtype: str | None = None):
+		self.dtype = dtype or ("int16" if packed else "float32")
+		self.packed = self.dtype == "int16"
+		self.content = _check_content(content)
+
 	def convert(self, source: Path, dest: Path) -> None:
 		from pynwb import NWBHDF5IO
 
 		dest = Path(dest)
-		dest.mkdir(parents=True, exist_ok=True)
-		for (sub_id, ses_id), nwbfile in _build_nwb_files(source, backend="hdf5"):
+		if dest.exists():
+			shutil.rmtree(dest)
+		dest.mkdir(parents=True)
+		dataset_meta: dict[str, Any] = {}
+		for (sub_id, ses_id), nwbfile in _build_nwb_files(source, backend="hdf5", dtype=self.dtype, content=self.content,
+															dataset_meta=dataset_meta):
 			path = dest / f"{sub_id}_{ses_id}.nwb"
 			with NWBHDF5IO(str(path), mode="w") as io:
 				io.write(nwbfile)
+		if dataset_meta:
+			(dest / "dataset_metadata.json").write_text(json.dumps(dataset_meta))
 
 	def open(self, dest: Path) -> "NwbStore":
 		from pynwb import NWBHDF5IO
@@ -663,15 +884,26 @@ class NwbHdf5Arm:
 class NwbZarrArm:
 	name = "nwb_zarr"
 
+	def __init__(self, packed: bool = False, content: str = "signals", dtype: str | None = None):
+		self.dtype = dtype or ("int16" if packed else "float32")
+		self.packed = self.dtype == "int16"
+		self.content = _check_content(content)
+
 	def convert(self, source: Path, dest: Path) -> None:
 		from hdmf_zarr import NWBZarrIO
 
 		dest = Path(dest)
-		dest.mkdir(parents=True, exist_ok=True)
-		for (sub_id, ses_id), nwbfile in _build_nwb_files(source, backend="zarr"):
+		if dest.exists():
+			shutil.rmtree(dest)
+		dest.mkdir(parents=True)
+		dataset_meta: dict[str, Any] = {}
+		for (sub_id, ses_id), nwbfile in _build_nwb_files(source, backend="zarr", dtype=self.dtype, content=self.content,
+															dataset_meta=dataset_meta):
 			path = dest / f"{sub_id}_{ses_id}.nwb.zarr"
 			with NWBZarrIO(str(path), mode="w") as io:
 				io.write(nwbfile)
+		if dataset_meta:
+			(dest / "dataset_metadata.json").write_text(json.dumps(dataset_meta))
 
 	def open(self, dest: Path) -> "NwbStore":
 		from hdmf_zarr import NWBZarrIO
@@ -710,14 +942,26 @@ class NwbStore:
 	def recordings(self) -> list[RecInfo]:
 		return list(self._info.values())
 
+	def _decode(self, rec_id: str, data: np.ndarray, channel: "int | None" = None) -> np.ndarray:
+		"""Time-major codes -> channel-major physical values. Same arithmetic as pynwb's
+		get_data_in_units (data * conversion * channel_conversion + offset), but on the
+		slice already read, since that method always reads the whole series."""
+		series = self._recs[rec_id]
+		if series.channel_conversion is None:
+			return data.T if channel is None else data
+		gain = np.asarray(series.channel_conversion) * series.conversion
+		if channel is not None:
+			return data.astype("float64") * gain[channel] + series.offset
+		return data.T.astype("float64") * gain[:, None] + series.offset
+
 	def full_read(self, rec_id: str) -> np.ndarray:
-		return self._recs[rec_id].data[:, :].T  # back to channel-major for the runner's comparisons
+		return self._decode(rec_id, self._recs[rec_id].data[:, :])  # back to channel-major for the runner's comparisons
 
 	def window_read(self, rec_id: str, start: int, n: int) -> np.ndarray:
-		return self._recs[rec_id].data[start:start + n, :].T
+		return self._decode(rec_id, self._recs[rec_id].data[start:start + n, :])
 
 	def channel_read(self, rec_id: str, channel: int) -> np.ndarray:
-		return self._recs[rec_id].data[:, channel]
+		return self._decode(rec_id, self._recs[rec_id].data[:, channel], channel)
 
 	def search(self, **entities: str) -> list[str]:
 		return [rid for rid, info in self._info.items()
@@ -727,7 +971,7 @@ class NwbStore:
 		data = self._recs[rec_id].data
 		n = data.shape[0]
 		for start in range(0, n, block_samples):
-			yield data[start:min(n, start + block_samples), :].T
+			yield self._decode(rec_id, data[start:min(n, start + block_samples), :])
 
 	def forget(self, rec_id: str) -> None:
 		path, io = self._file_of[rec_id]  # re-open just this recording's file
@@ -745,11 +989,32 @@ class NwbStore:
 			io.close()
 
 
-ARMS: dict[str, Any] = {
-	"raw": RawArm(),
-	"neurozarr": NeurozarrArm(),
-	"plain_zarr": PlainZarrArm(),
-	"hdf5_mat73": Hdf5Arm(),
-	"nwb_hdf5": NwbHdf5Arm(),
-	"nwb_zarr": NwbZarrArm(),
+FORMATS: dict[str, Any] = {
+	"neurozarr": NeurozarrArm,
+	"plain_zarr": PlainZarrArm,
+	"hdf5": lambda dtype, content: Hdf5Arm(dtype=dtype, content=content),
+	"nwb_hdf5": lambda dtype, content: NwbHdf5Arm(dtype=dtype, content=content),
+	"nwb_zarr": lambda dtype, content: NwbZarrArm(dtype=dtype, content=content),
 }
+DTYPES = ("int16", "float32", "float64")
+CONTENTS = ("signals", "full")
+
+# every format x stored dtype x content level, as "<format>_<dtype>_<content>" -- the
+# experiment-1 matrix. int16 needs the source's calibration (EDF family); without it
+# each format stores float32, and that cell is reported as int16 unavailable.
+ARMS: dict[str, Any] = {"raw": RawArm()}
+for _format, _make in FORMATS.items():
+	for _dtype in DTYPES:
+		for _content in CONTENTS:
+			ARMS[f"{_format}_{_dtype}_{_content}"] = _make(dtype=_dtype, content=_content)
+# names earlier results and scripts use
+ARMS.update({
+	"neurozarr": ARMS["neurozarr_int16_full"],
+	"plain_zarr": ARMS["plain_zarr_int16_full"],
+	"hdf5_mat73": ARMS["hdf5_float32_signals"],
+	"nwb_hdf5": ARMS["nwb_hdf5_float32_signals"],
+	"nwb_zarr": ARMS["nwb_zarr_float32_signals"],
+	"hdf5_int16": ARMS["hdf5_int16_signals"],
+	"nwb_hdf5_int16": ARMS["nwb_hdf5_int16_signals"],
+	"nwb_zarr_int16": ARMS["nwb_zarr_int16_signals"],
+})
