@@ -40,9 +40,12 @@ Changelog = "https://github.com/chintan/neurozarr/blob/main/CHANGELOG.md"
 neurozarr = "neurozarr.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-timeout", "tqdm", "mypy", "pandas-stubs", "build", "nibabel"]
+dev = ["pytest", "pytest-timeout", "tqdm", "mypy", "pandas-stubs", "build", "nibabel",
+	   "neo", "pydicom", "tifffile", "imagecodecs", "defusedxml", "antio", "pymef", "curryreader", "pymatreader"]
 docs = ["sphinx", "myst-parser", "furo"]
 imaging = ["nibabel"]
+# every reader past mne, each imported only when its format turns up
+formats = ["nibabel", "neo", "pydicom", "tifffile", "imagecodecs", "defusedxml", "antio", "pymef", "curryreader", "pymatreader"]
 
 [tool.setuptools.packages.find]
 include = ["neurozarr*"]

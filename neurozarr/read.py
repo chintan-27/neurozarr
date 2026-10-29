@@ -837,6 +837,7 @@ def views_in(root: zarr.Group, base_path: str = "",
 	delete() can route a change back through Repo -- read.py itself never
 	writes and doesn't know about Repo."""
 	prefix = f"{base_path}/" if base_path else ""
+	yield from views_at(root, base_path, write)  # items on the root itself: a session's scans table
 	for path, node in root.members(max_depth=None):
 		if isinstance(node, zarr.Group):
 			yield from views_at(node, prefix + path, write)

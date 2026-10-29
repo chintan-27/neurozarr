@@ -12,9 +12,9 @@ from ..entities import Entities
 from ..errors import ValidationError
 from ..items import Attrs, ExternalFile, Item, Recording, Table
 from ..log import log_progress
-from .bids import MNE_READABLE_EXTS
 from ..codecs import CodecPlan, check_plan_options, plan_codecs
-from .formats import UnclaimedPolicy, decode_embed, decoder_for
+from .filetypes import decode_file
+from .formats import UnclaimedPolicy
 from ..util import source_provenance
 
 
@@ -183,19 +183,7 @@ class ManifestReader:
 			ext = path.suffix.lower()
 			meta = {**meta, "_neurozarr_provenance": source_provenance(path, "ManifestReader", self.checksum)}
 
-			decoder = decoder_for(path)
-			if ext in (".tsv", ".csv"):
-				yield Table(entities, name, pd.read_csv(path, sep="\t" if ext == ".tsv" else ","), meta)
-			elif ext in MNE_READABLE_EXTS:
-				raw = mne.io.read_raw(path, preload=False, verbose=False)
-				yield Recording(entities, raw, meta)
-			elif decoder is not None:
-				yield from decoder(path, entities, name, meta)
-			elif self.unclaimed is UnclaimedPolicy.EMBED:
-				yield from decode_embed(path, entities, name, meta)
-			else:
-				yield ExternalFile(entities, str(name), path,
-					reader_hint=f"install or register a reader for {ext!r}", meta=meta)
+			yield from decode_file(path, entities, str(name), meta, self.unclaimed)
 
 	def _attrs_path(self, row: Any) -> tuple[str, ...]:
 		"""A pathless row's Attrs path: whichever of sub/ses/datatype/name are

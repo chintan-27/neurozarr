@@ -10,8 +10,7 @@ from .diagnostics import Severity, ValidationIssue, ValidationReport
 from .entities import Entities
 from .constraints import validate_metadata, validate_segment
 from .errors import NeurozarrError, ValidationError
-from .readers.bids import MNE_READABLE_EXTS
-from .readers.formats import decoder_for
+from .readers.filetypes import companions, decodable, folder_kind
 
 if TYPE_CHECKING:
 	from .items import Reader
@@ -75,9 +74,9 @@ def inspect_manifest(reader: "ManifestReader") -> ValidationReport:
 		if not path.exists():
 			report.add(_issue("source.not_found", Severity.ERROR, f"file not found: {path}", where,
 				path=str(path)))
-		elif not path.is_file():
+		elif not path.is_file() and folder_kind(path) is None:
 			report.add(_issue("source.not_file", Severity.ERROR, f"not a file: {path}", where, path=str(path)))
-		elif path.suffix.lower() not in TABLE_EXTS | MNE_READABLE_EXTS and decoder_for(path) is None:
+		elif not decodable(path):
 			report.add(_issue("source.unsupported_format", Severity.WARNING,
 				f"no reader for {path.suffix!r} ({path.name}); it will be preserved as an external reference",
 				where, path=str(path), extension=path.suffix.lower()))
@@ -121,10 +120,10 @@ def inspect_bids(root_dir: str | Path) -> ValidationReport:
 			report.add(_issue("bids.no_datatypes", Severity.ERROR,
 				"no datatype directories (ieeg/, beh/, ...) found", subject.name))
 		for datatype_dir in datatype_dirs:
-			for path in datatype_dir.rglob("*"):
-				if (not path.is_file()
-						or path.suffix.lower() in ({".json", ".eeg", ".vmrk"} | TABLE_EXTS | MNE_READABLE_EXTS)
-						or decoder_for(path) is not None):
+			entries = [p for p in datatype_dir.iterdir() if not p.name.startswith(".")]
+			read_with = set().union(*(companions(p) for p in entries if p.is_file()))
+			for path in entries:
+				if path.suffix.lower() == ".json" or path in read_with or decodable(path):
 					continue
 				report.add(_issue("source.unsupported_format", Severity.WARNING,
 					f"no reader for {path.suffix!r} ({path.name}); it will be preserved as an external reference",

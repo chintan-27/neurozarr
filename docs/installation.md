@@ -11,9 +11,17 @@ pip install -e ".[imaging]"
 ```
 
 Adds `nibabel`, which enables automatic NIfTI decoding (`.nii`/`.nii.gz`) in
-{class}`~neurozarr.ManifestReader` and {class}`~neurozarr.BidsReader` — see
-{doc}`guide/ingest`. Without it, NIfTI files are handled like any other
-unrecognized format.
+every reader — see {doc}`guide/ingest`. Without it, NIfTI files are handled like
+any other unrecognized format.
+
+```bash
+pip install -e ".[formats]"
+```
+
+Adds the readers for every other supported format: `neo` (spike and
+intracellular systems), `pydicom`, `tifffile` and `imagecodecs` (TIFF, OME-TIFF),
+`defusedxml` (EGI MFF), `antio` (ANT), `pymef` (MEF3), `curryreader` (Curry) and
+`pymatreader` (FieldTrip). Each is imported only when its format turns up.
 
 ## Type checking
 

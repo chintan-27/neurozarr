@@ -1,41 +1,38 @@
 import copy
+import warnings
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Iterator
 
-import mne  # type: ignore[import-untyped]  # mne ships no type information
 import pandas as pd
 
 from ..entities import Entities, split_stem
 from ..errors import ValidationError
-from ..items import Attrs, ExternalFile, Item, Recording, Table
+from ..items import Attrs, Item, Table
 from ..log import log_progress
 from ..util import clean_nan, load_json, source_provenance
 from ..codecs import CodecPlan, check_plan_options, plan_codecs
-from .formats import UnclaimedPolicy, decode_embed, decoder_for
+from .filetypes import MNE_EXTS, _text_doc, companions, decodable, decode_file, folder_kind, signal_kind, text_attrs, true_ext
+from .formats import UnclaimedPolicy
 
-# Formats mne.io.read_raw() auto-dispatches on, covering eeg/ieeg/meg/nirs data
-# generically. Imaging datatypes (anat/func/dwi) are handled by a registered
-# format decoder when one claims the extension (NIfTI, automatically, if
-# nibabel is installed -- see readers/formats.py); anything else falls back to
-# the `unclaimed` policy instead of crashing (see _read_datatype_dir).
-MNE_READABLE_EXTS = {".edf", ".bdf", ".gdf", ".vhdr", ".set", ".fif", ".cnt"}
-
-# Path.suffix only ever returns the last dot-segment, so "sub-001_T1w.nii.gz"
-# reports ".gz" -- and the BIDS suffix "T1w" would come out as "T1w.nii". Listed
-# here rather than derived from whatever happens to be registered in
-# readers.formats, so stem-parsing doesn't change depending on whether an
-# optional dependency (nibabel) is installed.
-_COMPOUND_EXTS = (".nii.gz",)
+# Kept for importers: every extension mne opens by name (see readers/filetypes.py).
+MNE_READABLE_EXTS = MNE_EXTS
+_true_ext = true_ext
 
 
-def _true_ext(path: Path) -> str:
-	"""path.suffix, but recognizing a compound extension in _COMPOUND_EXTS."""
-	name = path.name.lower()
-	for ext in _COMPOUND_EXTS:
-		if name.endswith(ext):
-			return ext
-	return path.suffix.lower()
+def _is_text_doc(path: Path) -> bool:
+	return _text_doc(path)
+
+
+def _is_signal(path: Path) -> bool:
+	"""A recording -- the one item per entity set that must not have a twin."""
+	kind = folder_kind(path) if path.is_dir() else signal_kind(path)
+	return kind is not None and kind != "zarr"
+
+
+def _size(path: Path) -> int:
+	"""Bytes on disk: a file's size, or everything under a folder."""
+	return path.stat().st_size if path.is_file() else sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
 
 
 def _row_dict(row: "pd.Series") -> dict[str, Any]:
@@ -56,9 +53,12 @@ class BidsReader:
 	and JSON sidecars are resolved through the BIDS inheritance principle, where
 	the closest matching sidecar wins.
 
-	Data files are read by extension: ``.tsv`` with pandas, and EDF, BDF, GDF,
-	BrainVision, EEGLAB, FIF and CNT through mne. A file in any other format is
-	recorded as a reference to its path rather than failing the run.
+	Every file is decoded the same way every reader decodes it (see
+	``neurozarr/readers/filetypes.py``): signals through mne or neo, tables with
+	pandas, images and volumes as arrays, media as embedded bytes. A file nothing
+	reads is kept as a reference to its path rather than failing the run, and
+	files outside the BIDS tree that nothing reads (``stimuli/``, ``code/``...) are
+	named in the dataset's ``files_not_stored`` attrs.
 
 	Parameters
 	----------
@@ -183,12 +183,120 @@ class BidsReader:
 			for ses, sesDir in levels:
 				if ses and ses in sessionAttrs:
 					yield Attrs((sub, ses), sessionAttrs[ses])
+				yield from self._read_scans(sub, ses, sesDir)
 				for dtDir in sorted(sesDir.iterdir()):
 					if dtDir.is_dir() and dtDir.name != "derivatives":
 						yield from self._read_datatype_dir(sub, ses, dtDir.name, dtDir)
 
 		if self.include_derivatives:
 			yield from self._read_derivatives()
+
+		for doc in sorted(self.root_dir.iterdir()):
+			if _is_text_doc(doc):
+				yield text_attrs(doc, ())
+		yield from self._read_phenotype()
+		yield from self._read_samples()
+
+		# what none of the above reads -- README, stimuli/, phenotype/, sourcedata/... -- is
+		# named, so a store never looks complete while silently missing part of its source
+		not_stored = self._not_stored()
+		if not_stored:
+			warnings.warn(f"{len(not_stored)} files in {self.root_dir} are not stored (listed in the "
+						  f"dataset's 'files_not_stored' attrs), e.g. {', '.join(list(not_stored)[:3])}", stacklevel=2)
+			yield Attrs(("files_not_stored",), not_stored)
+
+	def _read_phenotype(self) -> Iterator[Item]:
+		"""``phenotype/<measure>.tsv``: each participant's row on that subject, under
+		``phenotype/<measure>``; the measure's JSON description on the dataset."""
+		folder = self.root_dir / "phenotype"
+		if not folder.is_dir():
+			return
+		for path in sorted(folder.glob("*.tsv")):
+			measure = path.stem
+			description = clean_nan(load_json(path.with_suffix(".json")))
+			if description:
+				yield Attrs(("phenotype", measure), description)
+			for row in pd.read_csv(path, sep="\t", dtype=str).to_dict("records"):
+				sub = str(row.pop("participant_id", ""))
+				if sub.startswith("sub-") and (self.root_dir / sub).is_dir() and self._wanted(sub):
+					yield Attrs((sub, "phenotype", measure), clean_nan({str(k): v for k, v in row.items()}))
+
+	def _read_samples(self) -> Iterator[Item]:
+		"""Microscopy's ``samples.tsv``: each sample's row on its subject, under ``samples/<id>``."""
+		path = self.root_dir / "samples.tsv"
+		if not path.exists():
+			return
+		description = clean_nan(load_json(path.with_suffix(".json")))
+		if description:
+			yield Attrs(("samples_description",), description)
+		for row in pd.read_csv(path, sep="\t", dtype=str).to_dict("records"):
+			sub, sample = str(row.get("participant_id", "")), str(row.get("sample_id", ""))
+			if sub.startswith("sub-") and sample and (self.root_dir / sub).is_dir() and self._wanted(sub):
+				yield Attrs((sub, "samples", sample), clean_nan({str(k): v for k, v in row.items()}))
+
+	def _read_scans(self, sub: str, ses: str | None, level: Path) -> Iterator[Item]:
+		"""A session's (or session-less subject's) ``*_scans.tsv``, as a table."""
+		for path in sorted(level.glob("*_scans.tsv")):
+			meta = clean_nan(load_json(path.with_suffix(".json")))
+			yield Table(Entities(sub, ses), "scans", pd.read_csv(path, sep="\t"),
+						{**meta, "_neurozarr_provenance": source_provenance(path, "BidsReader", self.checksum)})
+
+	def _not_stored(self) -> dict[str, int]:
+		"""Files this reader reads nothing from, as {path under the root: bytes}. Mirrors
+		read()'s walk rather than tracking what it consumed, so a parallel ingest (whose
+		workers read the data) lists exactly what a serial one does."""
+		# ponytail: any .json above a datatype folder counts as read (an inherited sidecar);
+		# one no data file inherits is not listed. Exact would need _find_sidecar per file.
+		out: dict[str, int] = {}
+
+		def note(path: Path) -> None:
+			for f in ([path] if path.is_file() else sorted(path.rglob("*"))):
+				if f.is_file() and not any(part.startswith(".") for part in f.relative_to(self.root_dir).parts):
+					out[str(f.relative_to(self.root_dir))] = f.stat().st_size
+
+		def level(directory: Path) -> None:  # a session folder, or a session-less subject
+			for entry in sorted(directory.iterdir()):
+				if entry.name.startswith(".") or entry.is_dir() or entry.suffix == ".json" \
+						or entry.name.endswith("_scans.tsv"):
+					continue  # datatype folders are read whole; see _read_datatype_dir
+				note(entry)
+
+		def subject(sub_dir: Path, known: set[str]) -> None:
+			sessions = [d for d in sorted(sub_dir.glob("ses-*")) if d.is_dir()]
+			if not sessions:
+				level(sub_dir)
+				return
+			for entry in sorted(sub_dir.iterdir()):
+				if entry.name.startswith(".") or entry in sessions or entry.name in known or entry.suffix == ".json":
+					continue
+				note(entry)
+			for ses_dir in sessions:
+				level(ses_dir)
+
+		def dataset(root: Path, derivatives: bool) -> None:
+			for entry in sorted(root.iterdir()):
+				name = entry.name
+				if name.startswith(".") or name in ("dataset_description.json", "participants.tsv", "samples.tsv") \
+						or entry.suffix == ".json" or _is_text_doc(entry):
+					continue
+				if entry.is_dir() and name == "phenotype" and root == self.root_dir:
+					for f in sorted(entry.iterdir()):
+						if f.suffix not in (".tsv", ".json") and not f.name.startswith("."):
+							note(f)
+					continue
+				if entry.is_dir() and name.startswith("sub-"):
+					subject(entry, {f"{name}_sessions.tsv"})
+				elif entry.is_dir() and name == "derivatives" and derivatives:
+					for deriv in sorted(entry.iterdir()):
+						if deriv.is_dir():
+							dataset(deriv, False)
+						elif not deriv.name.startswith("."):
+							note(deriv)
+				elif not (name == "derivatives" and not self.include_derivatives):
+					note(entry)
+
+		dataset(self.root_dir, self.include_derivatives)
+		return out
 
 	def _load_participants(self) -> tuple[dict[str, Any], dict[str, Any]]:
 		path = self.root_dir / "participants.tsv"
@@ -223,9 +331,9 @@ class BidsReader:
 						   prefix: tuple[str, ...] = (), wanted: set[Any] | None = None) -> Iterator[Item]:
 		groups: dict[tuple[tuple[tuple[str, str], ...], str], dict[str, Path]] = {}
 		for f in sorted(dir_path.iterdir()):
-			if not f.is_file():
+			if f.name.startswith("."):
 				continue
-			ext = _true_ext(f)
+			ext = _true_ext(f)  # a folder is an entry too: CTF .ds, EGI .mff, MEF3 .mefd
 			stem = f.name[:-len(ext)] if ext else f.stem
 			entities, suffix = split_stem(stem)
 			entities.pop("sub", None)
@@ -238,7 +346,7 @@ class BidsReader:
 		for (entityItems, suffix), exts in groups.items():
 			if isinstance(self._units, dict):
 				unit = (prefix, sub, ses, datatype, str(dir_path), entityItems)
-				self._units[unit] = self._units.get(unit, 0) + sum(f.stat().st_size for f in exts.values())
+				self._units[unit] = self._units.get(unit, 0) + sum(_size(f) for f in exts.values())
 				continue
 			if wanted is not None and entityItems not in wanted:
 				continue
@@ -253,34 +361,23 @@ class BidsReader:
 				continue
 
 			meta = self._find_sidecar(dir_path, dict(entityItems), suffix)
-
-			# BrainVision is a three-file bundle; only .vhdr is the entry point.
-			# Otherwise prefer a supported data file and reject ambiguous bundles.
-			preferred = [ext for ext in (".vhdr", ".edf", ".bdf", ".gdf", ".set", ".fif", ".cnt", ".tsv")
-						 if ext in dataExts]
-			if len(preferred) > 1:
+			# a bundle's companions (BrainVision's .eeg/.vmrk, EEGLAB's .fdt...) are read
+			# through its entry point; every other file under these entities is an item
+			members = {e: exts[e] for e in dataExts}
+			companion_files = set().union(*(companions(f) for f in members.values()))
+			candidates = sorted((e for e in members if members[e] not in companion_files),
+								key=lambda e: (not _is_signal(members[e]), not decodable(members[e]), e))
+			if sum(_is_signal(members[e]) for e in candidates) > 1:
+				# two recordings with the same entities would be written to the same group
 				raise ValidationError(
-					f"ambiguous data bundle for {suffix!r} in {dir_path}: {', '.join(preferred)}"
-				)
-			ext = preferred[0] if preferred else sorted(dataExts)[0]
-			path = exts[ext]
-			meta = {**meta, "_neurozarr_provenance": source_provenance(path, "BidsReader", self.checksum)}
-			decoder = decoder_for(path)
-			item_name = suffix or path.stem
-			if ext == ".tsv":
-				yield Table(item_entities, suffix, pd.read_csv(path, sep="\t"), meta, prefix)
-			elif ext in MNE_READABLE_EXTS:
-				raw = mne.io.read_raw(path, preload=False, verbose=False)
-				yield Recording(item_entities, raw, meta, prefix)
-			elif decoder is not None:
-				# a format decoder builds items with prefix=() -- it has no notion of
-				# derivatives/ routing, which is this reader's concern, not the decoder's.
-				yield from (replace(built, prefix=prefix) for built in decoder(path, item_entities, item_name, meta))
-			elif self.unclaimed is UnclaimedPolicy.EMBED:
-				yield from (replace(built, prefix=prefix) for built in decode_embed(path, item_entities, item_name, meta))
-			else:
-				yield ExternalFile(item_entities, item_name, path,
-					reader_hint=f"install or register a reader for {ext!r}", meta=meta, prefix=prefix)
+					f"ambiguous data bundle for {suffix!r} in {dir_path}: {', '.join(candidates)}")
+			for i, ext in enumerate(candidates):
+				path = members[ext]
+				item_name = (suffix or path.stem) if i == 0 else f"{suffix or path.stem}_{ext.lstrip('.').replace('.', '-')}"
+				yield from decode_file(
+					path, item_entities, item_name,
+					{**meta, "_neurozarr_provenance": source_provenance(path, "BidsReader", self.checksum)},
+					self.unclaimed, prefix)
 
 	def _find_sidecar(self, start_dir: Path, entities: dict[str, str], suffix: str) -> dict[str, Any]:
 		"""Merge applicable JSON sidecars from the dataset root to the data file."""

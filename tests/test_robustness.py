@@ -35,8 +35,8 @@ def test_invalid_codec_config_is_rejected(kwargs):
 
 
 def test_manifest_report_has_structured_warning_for_unknown_format(tmp_path):
-	path = tmp_path / "scan.dcm"
-	path.write_bytes(b"DICOM")
+	path = tmp_path / "scan.xyz"
+	path.write_bytes(b"a format nothing reads")
 	reader = ManifestReader(pd.DataFrame({"sub": ["sub-001"], "path": [str(path)]}))
 	report = inspect_source(reader)
 	assert report.ok

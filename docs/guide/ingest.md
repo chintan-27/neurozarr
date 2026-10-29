@@ -45,15 +45,23 @@ ManifestReader(df, sub_col="subject", path_col="filepath")
 
 ### How each row is read
 
-Files are opened by extension, and what comes back depends on what the
-extension is:
+Every reader -- `ManifestReader`, `BidsReader` and `SmartReader` -- hands each file
+it finds to the same decoder, so a format one of them reads, all of them read:
 
-- **Signal formats** (EDF, BDF, GDF, BrainVision, EEGLAB, FIF, CNT) load
-  through `mne.io.read_raw` and become a {class}`~neurozarr.Recording`. This
-  is the `ieeg`/Stream row above.
-- **`.tsv`/`.csv`** load with pandas and become a {class}`~neurozarr.Table`,
-  with column types recorded so they round-trip on read. This is the
-  `beh`/TherapyLog row:
+- **Signals** become a {class}`~neurozarr.Recording`:
+  - everything `mne` opens: EDF, BDF, GDF, BrainVision, EEGLAB, FIF, NeuroScan and
+    ANT CNT, EGI MFF, CTF `.ds`, KIT, BTi/4D, Artemis123, FIL OPM, Nihon Kohden,
+    Persyst, Curry, BCI2000, MEF3, Blackrock NSx, Nicolet, eximia, NEDF, SNIRF,
+    NIRx and EyeLink. Formats stored as a folder (CTF, EGI, MEF3, BTi, NIRx) are
+    read as one recording;
+  - spike and intracellular systems through `neo`: Intan, SpikeGLX, Open Ephys,
+    Neuralynx, Spike2, Axon, Plexon, TDT -- one recording per stream, with spike
+    times as a `spikes` table;
+  - every regularly sampled `TimeSeries` in an NWB file, alongside its tables;
+  - BIDS continuous TSVs (`_physio`, `_stim`, `_motion`), named from their sidecar,
+    and WAV audio.
+- **`.tsv`/`.csv`** become a {class}`~neurozarr.Table`, with column types recorded
+  so they round-trip on read. This is the `beh`/TherapyLog row:
 
   ```python
   log = repo.subject("sub-001").visit("ses-1").tables()[0]
@@ -63,11 +71,18 @@ extension is:
   # 1     60           2.5              60
   ```
 
-- **NIfTI** (`.nii`/`.nii.gz`), such as the `anat`/T1w row above, decodes to an
-  {class}`~neurozarr.Array` with real voxel data and `x`/`y`/`z` (and `t`, if
-  4D) dimensions — automatically, if `nibabel` is installed
-  (`pip install "neurozarr[imaging]"`). Without it, a NIfTI file falls through
-  to the next rule like any other unrecognized format.
+- **Images and volumes** become an {class}`~neurozarr.Array` with named
+  dimensions: NIfTI in its stored dtype (with DWI `.bval`/`.bvec`), DICOM (pixels
+  and technical tags; patient identifiers are never copied), TIFF and OME-TIFF,
+  and every resolution level of an OME-Zarr.
+- **Media** (video, audio other than WAV, PNG/JPEG/BMP, PDF) are embedded byte for
+  byte, so they are versioned with the rest of the store.
+- **README, CHANGES and LICENSE** files are kept as text metadata.
+
+Every library past `mne` is optional (`pip install "neurozarr[formats]"`) and only
+imported when its format turns up; without it, that file fails with a message
+naming the extra.
+
 - **Anything else** becomes an explicit {class}`~neurozarr.ExternalFile` by
   default: the path is recorded, not the file's contents.
 

@@ -8,6 +8,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- One file decoder for every reader (`neurozarr/readers/filetypes.py`): `BidsReader`,
+  `SmartReader` and `ManifestReader` all read the same formats. New: every format
+  `mne` opens (CTF, EGI MFF, KIT, BTi, Artemis123, FIL OPM, Nihon Kohden, Persyst,
+  Curry, BCI2000, MEF3, NSx, SNIRF, NIRx, EyeLink...), recordings stored as folders,
+  spike/intracellular systems through `neo`, NWB time series and tables, BIDS
+  physio/stim/motion TSVs, WAV, DICOM, TIFF/OME-TIFF, OME-Zarr, DWI `.bval`/`.bvec`,
+  and media (video, images, PDF) embedded byte for byte. Optional readers install with
+  `pip install "neurozarr[formats]"`.
+- `BidsReader` reads `*_scans.tsv`, `phenotype/`, microscopy `samples.tsv` and
+  README/CHANGES/LICENSE text, and names every file it reads nothing from in the
+  dataset's `files_not_stored` attrs, with a warning. `SmartReader` does the same, and
+  lists files a reader failed on in `files_unreadable`.
+
 - `RecordingView.write(values, start=, picks=)`: correct samples in place, in physical
   units; only the chunks they fall in are rewritten, so a version stores just those. A
   value an int16 recording can't hold exactly is refused, not rounded.
@@ -17,6 +30,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Table schema 4: a table whose values fit in 32 KiB of JSON is stored inline in its
   group's attrs -- one object instead of ~5 arrays, so one GET to read it remotely.
   Larger tables keep the packed column arrays; schema 2 and 3 stores read unchanged.
+
+### Fixed
+
+- `BidsReader` silently dropped recordings stored as folders (MEF3 `.mefd`, CTF `.ds`),
+  `scans.tsv`, and everything outside the datatype folders.
+- BDF and most GDF files failed to write: their calibration was applied to int16, which
+  cannot hold 24-bit samples. Wider samples are stored as float32.
+- `visit.tables()` missed tables attached to the session itself.
+- NIfTI volumes are stored in their own dtype, not float64.
+- `SmartReader`'s "no recordings found" error now says which files were unreadable and
+  which extensions were not recognised.
 
 ### Changed
 

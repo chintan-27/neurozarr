@@ -130,7 +130,7 @@ ManifestReader(df, sub_col="subject", path_col="filepath")     # your column nam
 ManifestReader(df, row_reader=lambda row: my_custom_item(row))  # full control per row
 ```
 
-Files are opened by extension: `.tsv`/`.csv` with pandas, signal formats with `mne.io.read_raw` (EDF, BDF, GDF, BrainVision, EEGLAB, FIF, CNT), and NIfTI (`.nii`/`.nii.gz`) if `nibabel` is installed (`pip install "neurozarr[imaging]"`). Anything else is recorded as a reference rather than crashing the run — or read as raw bytes with `unclaimed="embed"`. Add a decoder for another format with `register_format`; see [Extensions](docs/guide/extensions.md).
+Every reader decodes files the same way: signals through `mne` (EDF, BDF, GDF, BrainVision, EEGLAB, FIF, CNT, MFF, CTF, KIT, MEF3, SNIRF, NIRx and more) or `neo` (Intan, SpikeGLX, Open Ephys, Neuralynx, Spike2, Axon, Plexon), NWB time series and tables, BIDS physio/motion TSVs, WAV; tables with pandas; NIfTI, DICOM, TIFF/OME-TIFF and OME-Zarr as arrays; video, images and PDFs embedded byte for byte. Readers past `mne` are optional: `pip install "neurozarr[formats]"`. Anything else is recorded as a reference rather than crashing the run — or read as raw bytes with `unclaimed="embed"`. Add a decoder for another format with `register_format`; see [Extensions](docs/guide/extensions.md).
 
 ### 2. Explicitly
 

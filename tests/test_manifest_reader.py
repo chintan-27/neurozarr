@@ -32,8 +32,8 @@ def test_column_names_are_configurable(tsv_file):
 
 
 def test_unsupported_extension_becomes_an_explicit_reference(tmp_path):
-	odd = tmp_path / "scan.dcm"
-	odd.write_text("not a real dicom")
+	odd = tmp_path / "scan.xyz"
+	odd.write_text("a format nothing reads")
 	items = list(ManifestReader(pd.DataFrame([{"sub": "sub-003", "path": str(odd)}])).read())
 	assert isinstance(items[0], ExternalFile)
 	assert items[0].uri == odd

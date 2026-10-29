@@ -23,14 +23,15 @@ from ..errors import ValidationError
 from ..items import Attrs, ExternalFile, Item, Recording, Table
 from ..log import log_progress
 from ..util import clean_nan, load_json, source_provenance
-from .bids import MNE_READABLE_EXTS
 from ..codecs import CodecPlan, check_plan_options, plan_codecs
-from .formats import UnclaimedPolicy, decode_embed, decoder_for
+from .filetypes import _text_doc, companions, decodable, decode_file, folder_kind, open_raw, signal_kind, text_attrs
+from .formats import UnclaimedPolicy
 
-DATATYPES = ("eeg", "ieeg", "meg", "emg")
-_ARRAY_EXTS = {".mat": "mat", ".npy": "npy", ".npz": "npz", ".h5": "hdf5", ".hdf5": "hdf5", ".nwb": "hdf5"}
+DATATYPES = ("eeg", "ieeg", "meg", "emg", "nirs", "beh", "anat", "func", "dwi", "fmap", "perf", "pet", "micr",
+			 "motion", "ecephys", "icephys")
+_ARRAY_EXTS = {".mat": "mat", ".npy": "npy", ".npz": "npz", ".h5": "hdf5", ".hdf5": "hdf5"}  # .nwb: see filetypes
 # never sniffed: text and sidecar files, and the BrainVision/EEGLAB companions mne opens via their header file
-_NOT_DATA = {".tsv", ".csv", ".json", ".txt", ".md", ".eeg", ".vmrk", ".fdt"}
+_NOT_DATA = {".tsv", ".csv", ".json", ".txt", ".md", ".vmrk", ".fdt"}
 _RATE_NAMES = {"sfreq", "fs", "srate", "rate", "samplingrate", "samplingfrequency", "samplerate", "sr", "fsample"}
 _CH_NAMES = {"chnames", "channelnames", "channels", "labels", "chanlabels"}
 _FINGERPRINT_BYTES = 1 << 20
@@ -40,7 +41,12 @@ _JUNK_IDS = {"", "x", "surrogate", "anonymous", "unknown", "none", "n/a"}
 # a filename prefix with a digit that names a recording, not a subject ("run3_...")
 _NOT_IDS = {"run", "rec", "record", "recording", "ses", "session", "trial", "block", "part", "seg",
 			"segment", "file", "data", "eeg", "ieeg", "meg", "test", "task", "day", "visit", "block"}
-_HEADER_TYPES = {"ieeg": {"seeg", "ecog", "dbs"}, "meg": {"mag", "grad"}, "emg": {"emg"}}
+_HEADER_TYPES = {"ieeg": {"seeg", "ecog", "dbs"}, "meg": {"mag", "grad"}, "emg": {"emg"},
+				 "nirs": {"fnirs_cw_amplitude", "fnirs_od", "fnirs_fd_ac_amplitude", "hbo", "hbr"},
+				 "beh": {"eyegaze", "pupil"}}
+# what a non-signal file most likely is, when no folder or name says
+_KIND_TYPES = {".nii": "anat", ".nii.gz": "anat", ".dcm": "anat", ".tif": "micr", ".tiff": "micr",
+			   ".ome.tif": "micr", ".ome.tiff": "micr", ".zarr": "micr", ".ome.zarr": "micr", ".wav": "beh"}
 
 _ROW_KEYS = ("sub", "ses", "datatype", "path", "name", "format", "array", "sfreq", "prefix")
 
@@ -77,15 +83,30 @@ def _sniff(path: Path) -> str | None:
 
 
 def _format(path: Path) -> str | None:
-	ext = path.suffix.lower()
-	if ext in MNE_READABLE_EXTS:
+	""""mne" (a signal mne opens, header probed), an array format, "decode" (anything
+	else filetypes reads: neo, imaging, media...), "edf" (sniffed), or None."""
+	if path.is_dir():
+		kind = folder_kind(path)
+		return None if kind is None else "decode" if kind == "zarr" or kind.startswith("neo:") else "mne"
+	kind = signal_kind(path)
+	if kind is not None and kind.startswith("mne"):
 		return "mne"
+	ext = path.suffix.lower()
+	if ext == ".nwb":  # real NWB through pynwb; an HDF5 file merely named .nwb by its array heuristic
+		import h5py  # type: ignore[import-untyped]  # h5py ships no type information
+		try:
+			with h5py.File(path, "r") as f:
+				return "decode" if "nwb_version" in f.attrs else "hdf5"
+		except OSError:
+			return None
 	if ext == ".mat" and _sniff(path) == "hdf5":
 		return "hdf5"  # MATLAB v7.3 is HDF5 underneath
 	if ext in _ARRAY_EXTS:
 		return _ARRAY_EXTS[ext]
-	if ext in _NOT_DATA:
+	if ext in _NOT_DATA or _text_doc(path):
 		return None
+	if decodable(path):
+		return "decode"
 	return _sniff(path)
 
 
@@ -93,8 +114,13 @@ def _fingerprint(path: Path) -> tuple[int, str]:
 	"""Size plus a hash of the first and last MiB: identical copies of one recording
 	collide, distinct recordings with the same length and channels (CHB-MIT's hour-long
 	files) do not, without hashing whole multi-GB files."""
-	size = path.stat().st_size
 	digest = hashlib.blake2b(digest_size=16)
+	if path.is_dir():  # a folder recording: its files' names and sizes
+		files = sorted(p for p in path.rglob("*") if p.is_file())
+		for member in files:
+			digest.update(f"{member.relative_to(path)}:{member.stat().st_size};".encode())
+		return sum(member.stat().st_size for member in files), digest.hexdigest()
+	size = path.stat().st_size
 	with path.open("rb") as f:
 		digest.update(f.read(_FINGERPRINT_BYTES))
 		if size > 2 * _FINGERPRINT_BYTES:
@@ -110,7 +136,7 @@ Entry = tuple[tuple[int, ...], str, Callable[[], Any]]  # shape, numpy dtype kin
 
 def _h5_entries(path: Path) -> dict[str, Entry]:
 	try:
-		import h5py  # type: ignore[import-untyped]  # h5py ships no type information
+		import h5py
 	except ImportError as exc:
 		raise ValidationError("reading HDF5/NWB/MATLAB v7.3 files needs h5py (pip install h5py)") from exc
 
@@ -192,6 +218,8 @@ def _load_array(fmt: str, path: Path, key: str, sfreq: float, ch_type: str) -> "
 			if len(set(labels)) == n_ch:
 				ch_names = labels
 				break
+	if ch_type not in mne.io.get_channel_type_constants():
+		ch_type = "misc"  # a datatype like "icephys" names no mne channel type
 	info = mne.create_info(ch_names, sfreq, ch_type)
 	return mne.io.RawArray(data, info, verbose=False)
 
@@ -238,9 +266,44 @@ def _open_header(path: Path, fmt: str) -> dict[str, Any] | None:
 			if _sniff(path) != "hdf5":
 				raise
 		return {"meas_date": None, "his_id": None, "types": set()}
-	raw = mne.io.read_raw(path, preload=False, verbose=False)
+	raw = open_raw(path)
 	return {"meas_date": raw.info["meas_date"], "his_id": (raw.info.get("subject_info") or {}).get("his_id"),
 			"types": set(raw.get_channel_types())}
+
+
+_DATASET_FILES = {"dataset_description.json", "participants.tsv", "participants.json"}
+
+
+def _size(path: Path) -> int:
+	return path.stat().st_size if path.is_file() else sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+
+def _walk(root: Path) -> list[Path]:
+	"""Every file under ``root``, except that a folder which is itself one recording or
+	image (CTF .ds, Open Ephys, OME-Zarr...) is one entry and not looked inside."""
+	if folder_kind(root) is not None:
+		return [root]
+	out: list[Path] = []
+	for entry in sorted(root.iterdir()):
+		if entry.name.startswith("."):
+			continue
+		if entry.is_dir():
+			out += _walk(entry)
+		elif entry.is_file():
+			out.append(entry)
+	return out
+
+
+def _kind_type(path: Path, fmt: str) -> str | None:
+	"""A datatype from what the file is, for files that are not EEG-like signals."""
+	if fmt != "decode":
+		return None
+	from .filetypes import MEDIA_EXTS, true_ext
+	kind = folder_kind(path) if path.is_dir() else signal_kind(path)
+	if kind is not None and kind.startswith("neo:"):
+		return "ecephys"
+	ext = true_ext(path)
+	return _KIND_TYPES.get(ext) or ("beh" if ext in MEDIA_EXTS else None)
 
 
 def _answers_for(path: Path, answers: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -280,6 +343,7 @@ def scan_folders(roots: Sequence[str | Path],
 	answers = answers or {}
 	recs: list[dict[str, Any]] = []
 	skipped: Counter[str] = Counter()
+	skipped_files: dict[str, int] = {}
 	unreadable: list[dict[str, str]] = []
 	duplicates: list[dict[str, str]] = []
 	layouts: dict[str, str] = {}
@@ -298,12 +362,17 @@ def scan_folders(roots: Sequence[str | Path],
 		dataset_files += [str(root / n) for n in ("dataset_description.json", "participants.tsv", "participants.json")
 						  if (root / n).exists()]
 		dataset_files += [str(p) for p in sorted(root.rglob("*_sessions.tsv"))]
+		dataset_files += [str(p) for p in sorted(root.iterdir()) if _text_doc(p)]
 		root_recs: list[dict[str, Any]] = []
-		for path in sorted(p for p in root.rglob("*") if p.is_file() and not p.name.startswith(".")):
+		entries = _walk(root)
+		read_with = set().union(*(companions(p) for p in entries if p.is_file()))
+		for path in entries:
 			fmt = _format(path)
 			if fmt is None:
-				if path.suffix.lower() not in _NOT_DATA:
+				if path not in read_with and path.suffix.lower() not in _NOT_DATA and not _text_doc(path) \
+						and not (path.parent == root and path.name in _DATASET_FILES):
 					skipped[path.suffix.lower()] += 1
+					skipped_files[str(path)] = _size(path)
 				continue
 			given = _answers_for(path, answers)
 			if given.get("skip"):
@@ -315,8 +384,14 @@ def scan_folders(roots: Sequence[str | Path],
 					# header probe only: mne's per-file naming/date warnings are noise here
 					warnings.simplefilter("ignore")
 					header = _open_header(path, fmt)
-				if header is None:
-					probe = _probe_array(fmt, path)
+				if header is None and fmt != "decode":
+					try:
+						probe = _probe_array(fmt, path)
+					except ValidationError:
+						if fmt not in ("mat", "hdf5"):
+							raise
+						mne.io.read_raw_fieldtrip(path, info=None)  # a FieldTrip struct, or unreadable
+						fmt = "fieldtrip"
 			except Exception as exc:  # noqa: BLE001 -- any reader failure means "can't use this file"
 				unreadable.append({"path": str(path), "reason": f"{type(exc).__name__}: {exc}"[:300]})
 				continue
@@ -354,7 +429,8 @@ def scan_folders(roots: Sequence[str | Path],
 			for dt_rule, value in (("answer", given.get("datatype")),
 								   ("filename suffix", suffix_type),
 								   ("folder", next((p for p in reversed(parts) if p in DATATYPES), None)),
-								   ("channel types", header_type), ("guessed eeg", "eeg")):
+								   ("channel types", header_type), ("file type", _kind_type(path, fmt)),
+								   ("guessed eeg", "eeg")):
 				if value:
 					datatype = str(value)
 					break
@@ -368,7 +444,7 @@ def scan_folders(roots: Sequence[str | Path],
 					ents[key] = str(given[key])
 
 			sfreq = probe.get("sfreq")
-			if fmt not in ("mne", "edf"):
+			if fmt not in ("mne", "edf", "decode", "fieldtrip"):
 				sfreq = given.get("sfreq") or sfreq or sidecar.get("SamplingFrequency")
 				if sfreq is None:
 					ask("sfreq", root, None, "array files with no sampling rate inside them or in a JSON sidecar", path)
@@ -433,7 +509,7 @@ def scan_folders(roots: Sequence[str | Path],
 	report: dict[str, Any] = {
 		"recordings": len(recs), "subjects": len({r["sub"] for r in recs}), "layouts": layouts,
 		"sub_rules": dict(sub_rules), "datatype_rules": dict(dtype_rules), "run_rules": {},
-		"runs_numbered": 0, "skipped_extensions": dict(skipped), "unreadable": unreadable,
+		"runs_numbered": 0, "skipped_extensions": dict(skipped), "skipped_files": skipped_files, "unreadable": unreadable,
 		"duplicates": duplicates, "dataset_files": dataset_files, "questions": list(questions.values())}
 	if not recs:
 		return pd.DataFrame(), report
@@ -496,6 +572,14 @@ def _as_edf(path: Path) -> Path:
 	if not link.exists():
 		link.symlink_to(path)
 	return link
+
+
+def _item_name(path: Path) -> str:
+	"""A storable item name from a file name: its stem, unsafe characters replaced."""
+	from .filetypes import true_ext
+	ext = true_ext(path)
+	stem = path.name[:-len(ext)] if ext and path.name.lower().endswith(ext) else path.name
+	return re.sub(r"[^A-Za-z0-9._+-]", "_", stem).lstrip("._+-") or "data"
 
 
 def _with_prefix(item: Item, prefix: tuple[str, ...]) -> Item:
@@ -610,7 +694,15 @@ class SmartReader:
 		self.folders = [Path(folders)] if isinstance(folders, (str, Path)) else [Path(f) for f in folders]
 		self.df, self.report = scan_folders(self.folders, answers)
 		if self.df.empty:
-			raise ValidationError(f"no recordings found in {[str(f) for f in self.folders]}")
+			# the report holds why: without it, "unreadable" and "unrecognised" look alike
+			why = [f"{Path(u['path']).name}: {u['reason'].splitlines()[0]}" for u in self.report["unreadable"][:5]]
+			if len(self.report["unreadable"]) > 5:
+				why.append(f"... {len(self.report['unreadable']) - 5} more unreadable")
+			if self.report["skipped_extensions"]:
+				why.append("not recognised: " + ", ".join(
+					f"{ext or '(none)'} x{n}" for ext, n in sorted(self.report["skipped_extensions"].items())))
+			raise ValidationError(f"no recordings found in {[str(f) for f in self.folders]}"
+								  + ("; " + "; ".join(why) if why else ""))
 		self.questions: list[dict[str, Any]] = self.report["questions"]
 		self.checksum = checksum
 		self.unclaimed = UnclaimedPolicy(unclaimed)
@@ -635,6 +727,7 @@ class SmartReader:
 	def read(self) -> Iterator[Item]:
 		log_progress("Reading folders", ", ".join(map(str, self.folders)), f"{len(self.df)} files")
 		yield from self._dataset_attrs()
+		self._failed: dict[str, str] = {}
 		for row in self.df.to_dict("records"):
 			path = Path(row["path"])
 			extra = {str(k): v for k, v in row.items() if k not in _ROW_KEYS and pd.notna(v)}
@@ -650,7 +743,14 @@ class SmartReader:
 				continue
 			meta = {**clean_nan(load_json(path.with_suffix(".json"))), **meta} if path.suffix else meta
 			if fmt == "mne":
-				yield Recording(entities, mne.io.read_raw(path, preload=False, verbose=False), meta, prefix)
+				yield Recording(entities, open_raw(path), meta, prefix)
+			elif fmt == "decode":
+				try:
+					yield from decode_file(path, entities, _item_name(path), meta, self.unclaimed, prefix)
+				except Exception as exc:  # noqa: BLE001 -- one bad file is listed, not fatal
+					self._failed[str(path)] = f"{type(exc).__name__}: {exc}"[:300]
+			elif fmt == "fieldtrip":
+				yield Recording(entities, mne.io.read_raw_fieldtrip(path, info=None), meta, prefix)
 			elif fmt == "edf":
 				yield Recording(entities, mne.io.read_raw_edf(_as_edf(path), preload=False, verbose=False), meta, prefix)
 			elif pd.notna(row["sfreq"]):
@@ -660,19 +760,18 @@ class SmartReader:
 			else:
 				yield ExternalFile(entities, path.stem, path,
 								   reader_hint="no sampling rate found; answer sfreq for this file", meta=meta, prefix=prefix)
+		# named, not dropped: files no reader recognised, and ones a reader failed on
+		if self.report["skipped_files"]:
+			yield Attrs(("files_not_stored",), self.report["skipped_files"])
+		unreadable = {u["path"]: u["reason"] for u in self.report["unreadable"]} | self._failed
+		if unreadable:
+			yield Attrs(("files_unreadable",), unreadable)
 
 	def _sidecar(self, path: Path, entities: Entities, name: str, meta: dict[str, Any]) -> Iterator[Item]:
-		ext = path.suffix.lower()
-		if ext == ".json":
+		if path.suffix.lower() == ".json":
 			yield Attrs((*entities.path(), name), clean_nan(load_json(path)))
-		elif ext in (".tsv", ".csv"):
-			yield Table(entities, name, pd.read_csv(path, sep="\t" if ext == ".tsv" else ","), meta)
-		elif (decoder := decoder_for(path)) is not None:
-			yield from decoder(path, entities, name, meta)
-		elif self.unclaimed is UnclaimedPolicy.EMBED:
-			yield from decode_embed(path, entities, name, meta)
 		else:
-			yield ExternalFile(entities, name, path, reader_hint=f"install or register a reader for {ext!r}", meta=meta)
+			yield from decode_file(path, entities, name, meta, self.unclaimed)
 
 	def _dataset_attrs(self) -> Iterator[Item]:
 		"""dataset_description.json, participants.tsv/.json and *_sessions.tsv, wherever a
@@ -690,6 +789,8 @@ class SmartReader:
 					sub = "sub-" + _label(str(row.pop("participant_id", "")).removeprefix("sub-"))
 					if sub in subjects:
 						yield Attrs((sub,), clean_nan({str(k): v for k, v in row.items()}))
+			elif _text_doc(file):  # README, CHANGES, LICENSE
+				yield text_attrs(file, ())
 			else:  # sub-XX_sessions.tsv
 				sub = "sub-" + _label(file.name.removesuffix("_sessions.tsv").removeprefix("sub-"))
 				if sub in subjects:

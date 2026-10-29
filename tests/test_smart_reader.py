@@ -46,7 +46,7 @@ def test_layouts_metadata_duplicates_and_unreadable(tmp_path):
 	_write(bids / "sub-01/ses-a/ieeg/sub-01_ses-a_task-rest_run-1_events.tsv", "onset\tduration\n1\t0\n")
 	_write(bids / "dataset_description.json", json.dumps({"Name": "demo", "BIDSVersion": "1.9"}))
 	_write(bids / "participants.tsv", "participant_id\tage\nsub-01\t31\nsub-99\t40\n")
-	_write(bids / "sub-01/notes.pdf")
+	_write(bids / "sub-01/notes.xyz")
 	_save(_raw(1), flat / "chb01/chb01_03.fif")
 	_save(_raw(2), flat / "chb01/chb01_04.fif")
 	_save(_raw(3), flat / "chb02/chb02_01.fif")
@@ -59,7 +59,7 @@ def test_layouts_metadata_duplicates_and_unreadable(tmp_path):
 
 	assert report["recordings"] == 4 and report["subjects"] == 3
 	assert set(report["layouts"].values()) == {"bids", "folder per subject"}
-	assert report["skipped_extensions"] == {".pdf": 1}
+	assert report["skipped_extensions"] == {".xyz": 1}
 	assert [d["path"].endswith("copy/chb02_01.fif") for d in report["duplicates"]] == [True]
 	assert [u["path"].endswith("broken.edf") for u in report["unreadable"]] == [True]
 	b = recs[recs["sub"] == "sub-01"].iloc[0]
@@ -195,3 +195,12 @@ def test_derivatives_and_lettered_runs(tmp_path, store):
 	repo.commit("deriv")
 	paths = sorted(r.path for r in Repo.open(store).find())
 	assert len(paths) == 4 and sum("derivatives/bipolar" in p for p in paths) == 1  # stored apart from the raw one
+
+
+def test_no_recordings_error_says_why(tmp_path):
+	"""The scan's report used to be dropped with this error, so an unreadable file and
+	an unrecognised one looked alike."""
+	(tmp_path / "broken.edf").write_bytes(b"not an edf")
+	(tmp_path / "notes.xyz").write_bytes(b"\0")
+	with pytest.raises(ValidationError, match=r"broken\.edf: .*not recognised: \.xyz x1"):
+		SmartReader([tmp_path])

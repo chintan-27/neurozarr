@@ -90,3 +90,30 @@ def test_include_derivatives_flag(tiny_bids, store):
 	without_derivatives.add(BidsReader(tiny_bids, include_derivatives=False))
 	without_derivatives.commit("without derivatives")
 	assert not any("derivatives" in t.path for t in without_derivatives.subject("sub-001").tables())
+
+
+def test_nothing_in_the_tree_is_dropped_silently(tiny_bids, store):
+	"""A folder no reader knows becomes a reference, scans.tsv a table, README text
+	metadata, and files nothing reads (stimuli/) are named in 'files_not_stored'."""
+	ses = tiny_bids / "sub-001" / "ses-1"
+	unknown = ses / "ieeg" / "sub-001_ses-1_task-rest_run-1_ieeg.xyzd"
+	(unknown / "inner").mkdir(parents=True)
+	(unknown / "inner" / "part.bin").write_bytes(b"\0" * 10)
+	pd.DataFrame({"filename": ["ieeg/x.xyzd"], "acq_time": ["2020-01-01T00:00:00"]}).to_csv(
+		ses / "sub-001_ses-1_scans.tsv", sep="\t", index=False)
+	(tiny_bids / "README").write_text("about")
+	(tiny_bids / "stimuli").mkdir()
+	(tiny_bids / "stimuli" / "face.png").write_bytes(b"png")
+
+	repo = Repo.init(store)
+	with pytest.warns(UserWarning, match="1 files .* are not stored"):
+		repo.add(BidsReader(tiny_bids))
+	repo.commit("tiny")
+
+	reopened = Repo.open(store)
+	visit = reopened.subject("sub-001").visit("ses-1")
+	assert [f.name for f in visit.external_files()] == ["ieeg"]
+	assert "scans" in [t.name for t in visit.tables()]
+	dataset = reopened.root_of("_dataset")
+	assert dataset["README"].attrs["text"] == "about"
+	assert dataset["files_not_stored"].attrs.asdict() == {"stimuli/face.png": 3}
