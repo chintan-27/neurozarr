@@ -51,6 +51,7 @@ def raw_calibrated():
 		"cal": np.array([1.0, 1.0]),
 		"units": np.array([lsb, lsb]),
 		"offsets": np.array([0.0, 0.0]),
+		"dtype_byte": 2,  # EDF's 2-byte samples; BDF reports 3
 	}]
 	return raw
 

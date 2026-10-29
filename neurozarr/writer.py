@@ -85,7 +85,10 @@ def recording_layout(raw: "mne.io.BaseRaw", codec: "CodecConfig") -> RecordingLa
 		return RecordingLayout(np.dtype(codec.dtype), None, None,
 							   f"data is physical value in the channel's native unit, as {codec.dtype}")
 	extras = getattr(raw, "_raw_extras", None)
-	if extras and "cal" in extras[0]:
+	# the calibration only makes int16 exact for 2-byte samples: BDF stores 3 bytes, GDF
+	# up to 8, and their values overflow int16 (every write of a BDF used to fail here)
+	# ponytail: wider sources go to float32 (~6e-8 relative); int32 packing would keep them exact
+	if extras and "cal" in extras[0] and np.all(np.asarray(extras[0].get("dtype_byte", 0)) == 2):
 		scale = np.array(extras[0]["cal"]) * np.array(extras[0]["units"])
 		offset = np.array(extras[0]["offsets"]) * np.array(extras[0]["units"])
 		if scale.shape != (len(raw.ch_names),) or offset.shape != scale.shape or np.any(scale == 0):
@@ -152,7 +155,8 @@ class CodecConfig:
 		as EDF does, and compresses best. ``"float16"``, ``"float32"`` and
 		``"float64"`` store physical values at that precision (``"float64"`` is
 		exactly what mne returns). Recordings whose source carries no
-		calibration are stored as float32 under ``"int16"``.
+		calibration, or stores samples wider than 16 bits (BDF, most GDF),
+		are stored as float32 under ``"int16"``.
 	chunk_target_bytes : int, default 8 MiB
 		Target size of one chunk, which bounds chunk size for arrays with many
 		channels.

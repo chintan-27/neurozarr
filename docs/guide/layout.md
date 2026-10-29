@@ -91,7 +91,8 @@ considerably better than storing floats. Reading undoes it, so
 {meth}`~neurozarr.RecordingView.data` hands back physical units either way.
 
 A recording whose source carries no calibration information is stored as
-float32 instead, rather than guessing at a scale and offset.
+float32 instead, rather than guessing at a scale and offset. So is one whose
+samples are wider than 16 bits (BDF's 24-bit, most GDF), which int16 cannot hold.
 
 Arrays are chunked along the time axis, which is what allows a window to be read
 without fetching the whole recording. Chunk size is a trade-off: larger chunks

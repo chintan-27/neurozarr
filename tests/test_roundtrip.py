@@ -31,6 +31,20 @@ def test_int16_calibration_path_roundtrips(store, raw_calibrated):
 	assert np.array_equal(values, raw_calibrated.get_data())
 
 
+def test_wider_than_16_bit_samples_fall_back_to_float32(store, raw_calibrated):
+	"""BDF stores 3-byte samples and GDF up to 8: their calibration is real, but the
+	values overflow int16. Every BDF write used to fail here instead of falling back."""
+	raw_calibrated._raw_extras[0]["dtype_byte"] = 3
+	raw_calibrated._data[:] *= 1000  # beyond int16's +-32767 steps of the LSB
+	repo = Repo.init(store)
+	repo.create_subject("sub-001").add_visit("ses-1").add_recording(raw_calibrated, task="Stream")
+	repo.commit("bdf-like")
+	rec = Repo.open(store).subject("sub-001").visit("ses-1").recording(task="Stream")
+	assert rec.array.dtype == np.dtype("float32")
+	values, _ = rec.data()
+	assert np.allclose(values, raw_calibrated.get_data(), rtol=1e-6, atol=0)
+
+
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_float_options_store_physical_values_even_with_calibration(store, raw_calibrated, dtype):
 	repo = Repo.init(store, codec=CodecConfig(dtype=dtype))

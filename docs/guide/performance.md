@@ -91,8 +91,8 @@ repo = Repo.init("./study.zarr", codec=CodecConfig(
 offset, which is lossless for data that arrived as integers, as EDF does, and
 compresses best; `bitround_k` only applies there. `dtype="float16"` stores
 physical values rounded to half precision instead — use one or the other, not
-both. A recording whose source carries no calibration is always stored as
-float32, regardless of `dtype`. `chunk_target_bytes` and `max_chunk_samples`
+both. A recording whose source carries no calibration, or stores samples wider
+than 16 bits (BDF, most GDF), is always stored as float32, regardless of `dtype`. `chunk_target_bytes` and `max_chunk_samples`
 together bound chunk size: larger chunks compress a little better and make
 full reads faster, smaller ones make short windowed reads cheaper — see
 {doc}`read` for what a windowed read actually fetches.
